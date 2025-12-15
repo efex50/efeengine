@@ -86,7 +86,7 @@ case "$1" in
         if [ "$2" = "run" ];then
             if [ -n "$3" ];then
                 linux_target=$3
-                eval echo $native_run
+                eval $native_run
                 exit 0
             fi
             exit 1
@@ -94,7 +94,7 @@ case "$1" in
 
             linux_target=$2
             echo $linux_target $2
-            eval echo $native_build
+            eval $native_build
         fi
         ;;
     
