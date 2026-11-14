@@ -30,7 +30,8 @@ exist the template is used as is.
 From the repo root (needs nightly with `rust-src` and the `wasm32-unknown-unknown`
 target, plus `wasm-bindgen-cli` matching the version in `Cargo.lock`):
 
-    scripts/web.sh build <example> [--release]
+    ./build.py build <example> web [--release]   (python build.py on Windows)
+    scripts/web.sh build <example> [--release]   # same thing, directly
     scripts/web.sh serve <example> [--release] [--port N]   # default 8080
     scripts/web.sh dist  <example>                          # release build, publish-ready
 

@@ -3,3 +3,4 @@ target/
 # Generated web builds (wasm-bindgen output and assembled sites)
 **/web/pkg/
 /dist/
+__pycache__/

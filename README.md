@@ -22,15 +22,27 @@ The core crate is named `efeengine-core` rather than `core` because a crate call
   (`.cargo/config.toml`: atomics, shared memory, `-Z build-std`), and links the
   system SDL3 instead of building it from source.
 
-## Building
+## Building and running
 
-Native builds compile SDL3 from source, so you need a C compiler and CMake
-(`sudo dnf install gcc gcc-c++ cmake`).
+Everything goes through `./build.py` (Python 3.9+, standard library only; on Windows use
+`python build.py`). Run it without arguments to be asked which example to use, whether to
+run it native or on the web, and whether to run or just build:
 
 ```sh
-cargo build --workspace
-cargo run -p test_example --bin native
+./build.py                                   # interactive
+./build.py run   test_example native [--release] [--static]
+./build.py run   test_example web    [--release] [--port 8080]
+./build.py build test_example native|web [--release]
+./build.py dist  test_example                # web publish folder
+./build.py list | check | test | doctor
+./build.py dev linux|web|windows|<triple>    # rust-analyzer target (.vscode/settings.json)
+./build.py clean [test_example]
 ```
+
+Add `--dry-run` to print the commands instead of running them. Native builds link the
+system SDL3 (`sudo dnf install SDL3-devel`); `--static` builds SDL3 from source instead and
+needs a C compiler and CMake (`sudo dnf install gcc gcc-c++ cmake`). `./build.py doctor`
+reports what is missing.
 
 ## Web
 
@@ -38,10 +50,12 @@ Examples can be built to wasm and served in the browser (nightly Rust with `rust
 and the `wasm32-unknown-unknown` target, plus `wasm-bindgen-cli` matching `Cargo.lock`):
 
 ```sh
-scripts/web.sh build test_example [--release]
-scripts/web.sh serve test_example [--release] [--port 8080]
-scripts/web.sh dist  test_example      # release build, publish-ready
+./build.py run test_example web [--release] [--port 8080]
+./build.py dist test_example           # release build, publish-ready
 ```
+
+`scripts/web.py` (also `scripts/web.sh`) still works directly:
+`scripts/web.sh build|serve|dist <example> [--release] [--port N]`.
 
 Output goes to `dist/<example>/` (gitignored). The page needs the
 `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`
