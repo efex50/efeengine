@@ -44,6 +44,20 @@ system SDL3 (`sudo dnf install SDL3-devel`); `--static` builds SDL3 from source 
 needs a C compiler and CMake (`sudo dnf install gcc gcc-c++ cmake`). `./build.py doctor`
 reports what is missing.
 
+### Rust alternative: `cargo xtask`
+
+The same commands are also available as a Rust tool (`xtask/`, using clap, dialoguer and
+tiny_http), so nothing but cargo is needed. `build.py` keeps working as before.
+
+```sh
+cargo xtask                                  # interactive (arrow keys)
+cargo xtask run test_example native [--release] [--static]
+cargo xtask run test_example web [--port 8080] [--host 0.0.0.0]
+cargo xtask serve test_example               # serve dist/ again without rebuilding
+cargo xtask build | dist | list | check | test | doctor | dev | clean
+cargo xtask --help                           # every command and flag
+```
+
 ## Web
 
 Examples can be built to wasm and served in the browser (nightly Rust with `rust-src`

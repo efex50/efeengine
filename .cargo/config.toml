@@ -12,3 +12,6 @@ rustflags = [
     "-C", "link-arg=--export=__heap_base", # wasm-bindgen threads transform needs it
     "-C", "link-arg=--export=__data_end",
 ]
+[alias]
+# Build/run automation (Rust port of build.py): cargo xtask --help
+xtask = "run --quiet --package xtask --"

@@ -1,0 +1,14 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Build/run/serve automation for efeengine (cargo xtask)"
+
+[dependencies]
+anyhow = "1.0.104"
+cargo_metadata = "0.23.1"
+clap = { version = "4.6.7", features = ["derive"] }
+dialoguer = { version = "0.12.0", default-features = false }
+tiny_http = "0.12.0"
+toml = "1.2.1"
