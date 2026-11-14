@@ -10,6 +10,13 @@ crate-type = ["cdylib", "rlib"]
 
 
 
+
+[package.metadata.vcpkg]
+vcpkg-root = "C:/Users/efe/scoop/apps/vcpkg/current" # Scoop kullanıyorsan yolun doğruluğuna bak
+install = ["sdl3"]
+[package.metadata.vcpkg.target.x86_64-pc-windows-msvc]
+install = ["sdl3:x86_64-windows"]
+
 [dependencies]
 bytemuck = { version = "1.24.0", features = ["derive"] }
 log = "0.4.28"
@@ -21,23 +28,48 @@ serde_json = "1.0.145"
 wgpu = "27.0.1"
 efeengine-macros = { path = "./macros" }
 flume = { version = "0.12.0", default-features = false }
+oneshot = "0.1.11"
+hecs = "0.11.0"
+
+[dev-dependencies]
+# only used by the tests in src/engine/systems/mod.rs
+pyo3 = { version = "0.28.2", features = ["auto-initialize"] }
 
 [features]
 default = []
+debug_log = []
 static=["sdl3/build-from-source","sdl3/static-link"]
 
+[target.'cfg(target_os = "windows")'.build-dependencies]
+vcpkg = "0.2.15"
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-sdl3-sys = "0.5.11"
-sdl3 = { version = "0.14", features = ["raw-window-handle","build-from-source-static"] }
+sdl3-sys = "0.5.12"
+sdl3 = { version = "0.14", features = ["raw-window-handle"] }
 env_logger = "0.11"
 
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-console_error_panic_hook = "0.1"
+console_error_panic_hook = "0.1.7"
 console_log = "1"
-wasm-bindgen = "0.2"
+wasm-bindgen = "0.2.105"
 wasm-bindgen-futures = "0.4"
 serde-wasm-bindgen = "0.6.5"
 js-sys = "0.3"
 ts-rs = "11.1.0"
+gloo-timers = "0.3.0"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3.83"
+features = [
+    "Worker",
+    "WorkerOptions",
+    "DedicatedWorkerGlobalScope",
+    "WorkerType",
+    "MessageEvent",
+    "Window",
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "Location"
+]
