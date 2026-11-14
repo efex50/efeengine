@@ -1,59 +1,100 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, Mutex};
 
 use js_sys::Array;
 use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 use web_sys::WorkerOptions;
 
-use crate::{WASM_PATH, debug_info, global_info, thread::Jobs, thread_pool::{ThreadPoolTrait}};
+use crate::{WASM_PATH, debug_info, global_info, thread::Jobs, thread_pool::{KillGate, ThreadPoolTrait}};
 
+/// Web Worker pool. Same design as the native one: one shared flume channel,
+/// shrink = `Kill` jobs. Nothing here ever blocks the main thread: exited workers
+/// are only `terminate()`d (by dropping them) on the next resize call.
 pub struct ThreadPool{
     receiver:flume::Receiver<Jobs>,
     sender:flume::Sender<Jobs>,
-    workers:Vec<Worker>,
+    /// Only locked by resize and dedicated-worker creation on the main thread.
+    workers:Mutex<Vec<Worker>>,
+    target:AtomicUsize,
+    next_id:AtomicUsize,
+    kills:Arc<KillGate>,
+    url:String,
     dedicated_workers:Arc<Mutex<Vec<Worker>>>,
 
 }
 unsafe impl Sync for ThreadPool {}
 unsafe impl Send for ThreadPool {}
 
+impl ThreadPool {
+    /// Terminate workers that already left their loop (flag set by the worker).
+    fn prune(workers:&mut Vec<Worker>) {
+        workers.retain(|w| !w.done.load(Ordering::SeqCst));
+    }
+}
+
 impl ThreadPoolTrait for ThreadPool{
     fn new(cores:usize) -> Self {
         assert!(cores > 0);
         let (tx,rx) = flume::unbounded::<Jobs>();
         let mut workers = Vec::with_capacity(cores);
+        let kills = Arc::new(KillGate::default());
 
         let url = gen_url(WorkerType::Standart);
 
         for x in 0..cores{
-            let worker = Worker::new(x, rx.clone(),&url);
+            let worker = Worker::new(x, rx.clone(),&url, Some(kills.clone()));
             workers.push(worker);
         };
         Self {
             dedicated_workers:Arc::new(Mutex::new(Vec::new())),
-            workers,
+            workers:Mutex::new(workers),
+            target:AtomicUsize::new(cores),
+            next_id:AtomicUsize::new(cores),
+            kills,
+            url,
             receiver: rx,
             sender: tx,
         }
     }
 
     fn execute<F>(&self, f: F) where F: FnOnce() + Send + 'static {
-        self.sender.send(Jobs::Job(Box::new(f)));
+        let _ = self.sender.send(Jobs::Job(Box::new(f)));
     }
 
     fn send_job(&self,job:super::Jobs) {
-        self.sender.send(job);
+        let _ = self.sender.send(job);
     }
 
-    fn change_worker_amount(&mut self,new_size:usize) {
-        todo!()
+    fn change_worker_amount(&self,new_size:usize) {
+        let new_size = new_size.max(1);
+        let mut workers = self.workers.lock().unwrap();
+        Self::prune(&mut workers);
+        let cur = self.target.load(Ordering::SeqCst);
+        if new_size > cur {
+            let need = new_size - cur;
+            let cancelled = self.kills.cancel(need);
+            for _ in 0..need - cancelled {
+                let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+                workers.push(Worker::new(id, self.receiver.clone(), &self.url, Some(self.kills.clone())));
+            }
+        } else if new_size < cur {
+            let n = cur - new_size;
+            self.kills.request(n);
+            for _ in 0..n {
+                let _ = self.sender.send(Jobs::Kill);
+            }
+        }
+        self.target.store(new_size, Ordering::SeqCst);
     }
-    
-    
+
+    fn worker_amount(&self) -> usize {
+        self.target.load(Ordering::SeqCst)
+    }
+
     fn new_dedicated_worker(&self) -> super::WorkerHandle {
         let (tx,rx) = flume::unbounded::<Jobs>();
         let mut ex = self.dedicated_workers.lock().unwrap();
         // the new workers has id +31000 
-        let w = Worker::new(ex.len() + 31000, rx, &gen_url(WorkerType::Standart));
+        let w = Worker::new(ex.len() + 31000, rx, &gen_url(WorkerType::Standart), None);
         ex.push(w);
         super::WorkerHandle{sender:tx}
 
@@ -93,12 +134,17 @@ fn gen_url(ty:WorkerType) -> String{
 struct WorkerInit {
     id: usize,
     rx: flume::Receiver<Jobs>,
+    /// None for dedicated workers: any `Kill` stops them.
+    kills: Option<Arc<KillGate>>,
+    /// Set by the worker right before it leaves its loop.
+    done: Arc<AtomicBool>,
 }
 
 
 pub(super) struct Worker{
     worker:web_sys::Worker,
     id:usize,
+    done:Arc<AtomicBool>,
 }
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -113,12 +159,13 @@ enum WorkerType{
 }
 
 impl Worker{
-    fn new(id:usize,rx:flume::Receiver<Jobs>,url:&String) -> Self{
+    fn new(id:usize,rx:flume::Receiver<Jobs>,url:&String,kills:Option<Arc<KillGate>>) -> Self{
 
 
         let module = wasm_bindgen::module();
         let memory = wasm_bindgen::memory();
-        let init_data = Box::new(WorkerInit { id, rx });
+        let done = Arc::new(AtomicBool::new(false));
+        let init_data = Box::new(WorkerInit { id, rx, kills, done: done.clone() });
 
         let mut workeropt = WorkerOptions::new();
         workeropt.set_type(web_sys::WorkerType::Module);
@@ -135,6 +182,7 @@ impl Worker{
         Self { 
             worker,
             id,
+            done,
         }
     }
 }
@@ -153,12 +201,18 @@ pub fn worker_loop(ptr: usize){
 
             match job {
                 Jobs::Job(fun)=>{fun()},
-                Jobs::Kill=>break,
+                Jobs::Kill=>{
+                    // Stale kills (shrink was cancelled) are ignored.
+                    if init_data.kills.as_ref().map_or(true, |k| k.try_take()) {
+                        break;
+                    }
+                },
             }
         }else {
             break
         }
     }
+    init_data.done.store(true, Ordering::SeqCst);
 }
 #[wasm_bindgen]
 pub fn worker_loop_once(ptr: usize){

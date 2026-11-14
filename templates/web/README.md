@@ -5,9 +5,9 @@ Page shell used by `scripts/web.sh` to publish an example as a wasm web app.
 ## Files
 
 - `index.html`: full-window `<canvas id="canvas">`, loads `main.js`.
-- `main.js`: initialises the wasm module from `./pkg/{{CRATE}}.js`, sets the
-  worker script path (relative, so it works under any sub-path), starts the
-  engine, shows an error box if start-up fails.
+- `main.js`: initialises the wasm module from `./pkg/{{CRATE}}.js`, calls
+  `__engine_start({ wasmJsPath, threads?, canvasId?, externalApi? })` (relative
+  path, so it works under any sub-path) to start the engine, shows an error box if start-up fails.
 - `favicon.ico`
 - `_headers`: COOP/COEP headers in Netlify / Cloudflare Pages format.
 

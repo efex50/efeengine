@@ -24,12 +24,15 @@ once_cell = "1.21.3"
 pollster = "0.4.0"
 raw-window-handle = "0.6.2"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
 wgpu = "27.0.1"
 efeengine-macros = { path = "./macros" }
 flume = { version = "0.12.0", default-features = false }
 oneshot = "0.1.11"
+# ECS for the game world (ROADMAP Phase 3)
 hecs = "0.11.0"
+
+[dev-dependencies]
+serde_json = "1.0.145"
 
 
 [features]
@@ -47,6 +50,8 @@ env_logger = "0.11"
 
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# WebGL2 fallback for browsers without WebGPU (webgpu is already a default feature)
+wgpu = { version = "27.0.1", features = ["webgl"] }
 console_error_panic_hook = "0.1.7"
 console_log = "1"
 wasm-bindgen = "0.2.105"
@@ -68,5 +73,15 @@ features = [
     "Blob",
     "BlobPropertyBag",
     "Url",
-    "Location"
+    "Location",
+    # web window backend (window/web_backend.rs)
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Event",
+    "EventTarget",
+    "KeyboardEvent",
+    "Navigator",
+    "HtmlElement",
+    "Performance",
 ]

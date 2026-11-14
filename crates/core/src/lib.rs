@@ -6,6 +6,8 @@ pub mod gamerunner;
 #[allow(unused)]
 pub use prelude::*;
 pub use engine::*;
+/// The ECS used for the game world (ROADMAP Phase 3), re-exported as-is.
+pub use hecs;
 
 
 
@@ -13,7 +15,6 @@ pub use engine::*;
 
 #[cfg(target_family = "wasm")]
 mod wasm{
-    use std::{cell::RefCell, rc::Rc};
 
     use wasm_bindgen::prelude::{Closure, wasm_bindgen};
     use wgpu::web_sys;
@@ -49,36 +50,20 @@ mod wasm{
 
 #[cfg(test)]
 mod tests{
-    use serde::{Deserialize, Serialize};
-    use serde_json::Value;
+    use serde_json::json;
 
-    #[derive(Debug,Serialize,Deserialize)]
-    enum E {
-        A(String),
-        B,
-        C(u32),
-        D{
-            class:i32,
-            stype:i32,
-            id:i32,
-        },
-    }
+    use crate::engine::messages::Message;
+
+    /// JS sends messages in serde's default (externally tagged) shape;
+    /// pin it so a refactor can't silently break `send_message` from JS.
     #[test]
-    fn serde_test(){
-        let mut vec = Value::Array(Vec::new());
-        let a = E::B;
-        let json = serde_json::to_value(a).unwrap();
-        vec.as_array_mut().unwrap().push(json);
-        let a = E::A("zorzrot".to_string());
-        let json = serde_json::to_value(a).unwrap();
-        vec.as_array_mut().unwrap().push(json);
-        let a = E::C(23232);
-        let json = serde_json::to_value(a).unwrap();
-        vec.as_array_mut().unwrap().push(json);
-        let a = E::D { class: 31, stype: 12, id: 5454 };
-        let json = serde_json::to_value(a).unwrap();
-        vec.as_array_mut().unwrap().push(json);
-        
-        println!("a:{}",vec);
+    fn message_json_shape(){
+        let shape = |m: &Message| serde_json::to_value(m).unwrap();
+        assert_eq!(shape(&Message::Start), json!("Start"));
+        assert_eq!(shape(&Message::Say("hi".into())), json!({ "Say": "hi" }));
+        assert_eq!(shape(&Message::SetThreads(4)), json!({ "SetThreads": 4 }));
+
+        let parsed: Message = serde_json::from_value(json!({ "ChangeTitle": "x" })).unwrap();
+        assert!(matches!(parsed, Message::ChangeTitle(t) if t == "x"));
     }
 }

@@ -28,11 +28,11 @@ crates/core/macros
 3. Emits the renamed function plus wrappers selected with `cfg`:
    - Native (`not(target_arch = "wasm32")`): `fn main() { __engine_user_main() }`, a normal binary entry point. The return value is passed through as the tail expression, so a `()` return is what works in practice.
    - Wasm (`target_arch = "wasm32"`): `use wasm_bindgen::prelude::*;`, then
-     - `#[wasm_bindgen] pub fn __engine_start() { __engine_user_main() }`, the real start of the game; JS must call it explicitly.
+     - `#[wasm_bindgen] pub fn __engine_start(config: JsValue) -> Result<(), JsValue>`, the real start of the game; JS must call it explicitly (e.g. `__engine_start({ wasmJsPath: "./pkg/<crate>.js" })`). It calls `efeengine_core::config::__start_from_js(config)?` (parses the optional JS startup config object `{ wasmJsPath, threads, canvasId, externalApi, graphicsBackend }` with serde-wasm-bindgen; undefined/null = defaults) and then the user's main (`__engine_user_main()`).
      - `#[wasm_bindgen(start)] pub fn main() {}`, an empty start function. The in-code comment says it inits without starting the game so that workers do not start it.
 
 ### Why the wasm split matters
-Web Workers in `efeengine-core` instantiate the same wasm module with shared memory. A start function that ran the game would run it in every worker, so the game start is moved to the explicit `__engine_start()` export that the page calls once.
+Web Workers in `efeengine-core` instantiate the same wasm module with shared memory. A start function that ran the game would run it in every worker, so the game start is moved to the explicit `__engine_start({ ... })` export that the page calls once.
 
 ## Public API
 - `#[main]` (attribute macro, no arguments), applied to the game's `fn main()`.
@@ -40,7 +40,7 @@ Web Workers in `efeengine-core` instantiate the same wasm module with shared mem
 - On wasm the expansion refers to `wasm_bindgen` by crate name (`use wasm_bindgen::prelude::*;`), so `wasm_bindgen` must resolve in the module where `#[main]` is used. The game example only depends on `efeengine-core`, relying on the prelude glob import (`pub use wasm_bindgen` on wasm) to bring it into scope.
 
 ## Platform notes
-Native: standard `fn main`. Wasm: build the game crate as `cdylib` with the root `.cargo/config.toml` flags (atomics, shared memory) and nightly `build-std`; load the wasm-bindgen output, then call `__engine_start()`. The macro crate itself needs no special setup.
+Native: standard `fn main`. Wasm: build the game crate as `cdylib` with the root `.cargo/config.toml` flags (atomics, shared memory) and nightly `build-std`; load the wasm-bindgen output, then call `__engine_start({ ... })` (e.g. `__engine_start({ wasmJsPath: "./pkg/<crate>.js" })`). The macro crate itself needs no special setup.
 
 ## Status and known gaps
 - Attribute arguments are silently ignored; async or generic `main` is not handled specially.

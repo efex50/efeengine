@@ -86,8 +86,8 @@ Requirements:
 ## Where things stand
 
 The crate `structure.md` files list known gaps with file references. The largest:
-- **Web:** the wasm build compiles and serves, but `wasm_loop_start` never calls `init_graphics` (`crates/core/src/engine.rs`), so nothing is drawn in the browser yet.
-- **Engine:** the renderer is a single fixed triangle. `hecs`, systems and the game runner are stubs. Window events reach the message queue but aren't handled yet.
+- **Web:** the wasm build starts through `__engine_start({...})`, initialises graphics (WebGPU, or WebGL2 on desktop Linux by default) before the frame loop and handles resize, focus and keyboard input; see `crates/core/structure.md` for remaining gaps.
+- **Engine:** the renderer is a single fixed triangle. `hecs` (planned for the Phase 3 game world), systems and the game runner are stubs. Resize, focus and close events are handled; key events reach the message queue but nothing consumes them yet.
 - **efescript:** many inputs panic instead of returning errors. Several opcodes and syscalls are `todo!()`. The `Finish` syscall's result is ignored. Threads hold raw pointers into the runtime. There is no high-level language yet.
 - **efepages:** reads and writes that end exactly on a page boundary across several pages lose the last page's data, and `set_max_pages` is `todo!()`.
 - **calc:** integer division by zero panics, and trailing tokens are silently ignored.

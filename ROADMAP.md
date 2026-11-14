@@ -25,28 +25,29 @@ On the web you can already test input without graphics: the requestAnimationFram
 
 ## Phase 0: Housekeeping (small, do alongside Phase 1)
 
-- [ ] 0.1 Commit or finish the work in progress in `engine.rs`, `thread_pool.rs`, `systems/mod.rs` and `Cargo.toml` (the `init_global_pool_auto` refactor).
-- [ ] 0.2 Stop the console flood: `sdl_backend.rs` calls `global_alert("event got!")` for every unhandled SDL event, including each mouse move. Turn it into a debug-level log, or remove it.
-- [ ] 0.3 Refresh `crates/core/structure.md`: it still lists hecs as dev-only.
-- [ ] 0.4 Fix CI (`.github/workflows/rust.yml`). It needs nightly + `rust-src`, SDL3 dev packages, and a wasm `cargo check` step; it should also run `cargo fmt --check` and `clippy`.
-- [ ] 0.5 Results of the health scan (2026-11-14). Native and wasm `cargo check` both pass.
-  - The `Engine::new` doc example (`engine.rs:53`) is stale and makes `cargo test` fail: it passes 2 arguments, and the function takes 1.
-  - Remove or use the unused dependencies `env_logger`, `serde_json` and `console_log`. `hecs` is used only in a test until Phase 3.
-  - Unused `Rc`/`RefCell` import on wasm (`lib.rs:16`).
-  - Install clippy for nightly: `rustup component add --toolchain nightly clippy`.
-  - Baseline in `crates/core/src` (2,417 lines): 38 `unwrap`, 11 `expect`, 30 `unsafe`, 9 statics, 1 `todo!()` (`thread_pool/web.rs:48`), 17 `println!`/`dbg!`.
+- [x] 0.1 Commit or finish the work in progress in `engine.rs`, `thread_pool.rs`, `systems/mod.rs` and `Cargo.toml` (the `init_global_pool_auto` refactor). _Done: committed (thread pool refactor, pyo3 removal)._
+- [x] 0.2 Stop the console flood: `sdl_backend.rs` calls `global_alert("event got!")` for every unhandled SDL event, including each mouse move. Turn it into a debug-level log, or remove it. _Done: unhandled SDL events are silent now._
+- [x] 0.3 Refresh `crates/core/structure.md`: it still lists hecs as dev-only. _Done: structure.md refreshed; hecs is documented as the planned game-world ECS and re-exported as `efeengine_core::hecs`._
+- [x] 0.4 Fix CI (`.github/workflows/rust.yml`). It needs nightly + `rust-src`, SDL3 dev packages, and a wasm `cargo check` step; it should also run `cargo fmt --check` and `clippy`. _Done: native check+test run in a Fedora container with SDL3-devel (Ubuntu 24.04 has no SDL3, and `--static` is broken: sdl3-src ships without SDL's `test/` dir); wasm check with build-std; fmt+clippy job is `continue-on-error` until the code is formatted (~730 rustfmt diffs today)._
+- [x] 0.5 Results of the health scan (2026-11-14). Native and wasm `cargo check` both pass.
+  - The `Engine::new` doc example (`engine.rs:53`) is stale and makes `cargo test` fail: it passes 2 arguments, and the function takes 1. _Fixed._
+  - Remove or use the unused dependencies `env_logger`, `serde_json` and `console_log`. `hecs` is used only in a test until Phase 3. _Done: env_logger/console_log now route the `log` crate (wgpu errors) to the terminal / browser console; serde_json is a dev-dependency; hecs is re-exported._
+  - Unused `Rc`/`RefCell` import on wasm (`lib.rs:16`). _Fixed._
+  - Install clippy for nightly: `rustup component add --toolchain nightly clippy`. _Done (clippy + rustfmt installed)._
+  - Baseline in `crates/core/src` (2,417 lines): 38 `unwrap`, 11 `expect`, 30 `unsafe`, 9 statics, 0 `todo!()` (the web pool resize is implemented), 17 `println!`/`dbg!`.
+- [ ] 0.6 Run `cargo fmt --all` once (one big formatting commit), fix clippy warnings, then remove `continue-on-error` from the lint job in `.github/workflows/rust.yml`.
 
 ## Phase 1: IO system (window + input), SDL3 and web
 
 Goal: one platform-agnostic window, event and input-state API that behaves the same in both builds. No rendering work.
 
 ### Window size and window events
-- [ ] 1.1 **[W] Real canvas.** `WebWindow` resolves the `HtmlCanvasElement` once (id from `SetCanvasId`, default `"canvas"`). It sets the backing-store size to CSS size × `devicePixelRatio`, and `size()` returns those physical pixels instead of `(0,0)`.
+- [x] 1.1 **[W] Real canvas.** `WebWindow` resolves the `HtmlCanvasElement` once (id from `SetCanvasId`, default `"canvas"`). It sets the backing-store size to CSS size × `devicePixelRatio`, and `size()` returns those physical pixels instead of `(0,0)`. _Done (size is synced every frame instead of a ResizeObserver; renderer uses the same canvas)._
   - Add `web-sys` as a direct dependency with the features this phase needs: `Document`, `HtmlCanvasElement`, `KeyboardEvent`, `PointerEvent`, `WheelEvent`, `FocusEvent`, `ResizeObserver*`, `MediaQueryList`, `AddEventListenerOptions`, …
   - The placeholder renderer keeps its own `getElementById` until Phase 4.
 
   _Files:_ `Cargo.toml`, `window/web_backend.rs`. _Done:_ the logged size matches the canvas at DPR 1 and 2.
-- [ ] 1.2 **[S] Window events.**
+- [x] 1.2 **[S] Window events.** _Done. Native scale changes are only caught when the window moves to another display (sdl3 0.14 has no DisplayScaleChanged). Engine keeps size/scale/focus in `EngineState.window`._
   - Native uses `size_in_pixels()` and the SDL `PixelSizeChanged`/`DisplayScaleChanged`, focus and close events.
   - Web uses a `ResizeObserver` (`devicePixelContentBoxSize`), `focus`/`blur` and `visibilitychange`.
   - Both send `Resized`, `ScaleFactorChanged`, `Focused` and `CloseRequested`, plus an initial `Resized` at startup. The engine stores the current size and scale.
@@ -86,13 +87,13 @@ Goal: one platform-agnostic window, event and input-state API that behaves the s
   - Map `Quit` to `CloseRequested`.
 
   _Files:_ `sdl_backend.rs`, `sdl_impls.rs`.
-- [ ] 1.7 **[N] Thread-safety cleanup.**
+- [x] 1.7 **[N] Thread-safety cleanup.** _Done: Kill now breaks the loop so Drop runs._
   - Drop `Send + Sync` from `InnerWindow`, and remove the `unsafe impl Send/Sync` on the window types (SDL is main-thread only).
   - Delete the unused `Mutex<Sdl>`.
   - On Kill, end the loop cleanly instead of calling `process::exit(0)`, so `Drop` runs.
 
 ### Web (DOM)
-- [ ] 1.8 **[W] Keyboard and focus.**
+- [x] 1.8 **[W] Keyboard and focus.** _Done (code in `web_backend.rs` / `web_impls.rs`; held keys are released as KeyUp on blur/hidden)._
   - Listeners for `keydown`/`keyup`: `code` gives the physical key, `key` the logical key, plus `repeat` and the modifiers.
   - Clear held keys on `blur` and `visibilitychange`.
   - Canvas gets `tabindex=0` and takes focus on pointerdown.

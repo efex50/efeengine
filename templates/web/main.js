@@ -1,4 +1,4 @@
-import init, { __engine_start, __init_thread_pool, set_wasmjs_path, worker_loop } from "./pkg/{{CRATE}}.js"
+import init, { __engine_start, worker_loop } from "./pkg/{{CRATE}}.js"
 
 function showError(err) {
     console.error(err)
@@ -17,11 +17,14 @@ async function run() {
     }
     try {
         await init()
-        //__init_thread_pool(4);
-
         // Relative path: works under any sub-path (e.g. GitHub Pages /repo/).
-        set_wasmjs_path("./pkg/{{CRATE}}.js")
-        __engine_start()
+        __engine_start({
+            wasmJsPath: "./pkg/{{CRATE}}.js",
+            // threads: 4,          // optional; omitted = automatic
+            // canvasId: "canvas",  // optional; default "canvas"
+            // externalApi: false,  // reserved
+            // graphicsBackend: "auto", // "auto" | "webgpu" | "webgl"; auto = WebGL on desktop Linux
+        })
     } catch (err) {
         showError(err)
     }

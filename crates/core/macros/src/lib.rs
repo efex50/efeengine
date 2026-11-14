@@ -29,9 +29,11 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
         use wasm_bindgen::prelude::*;
         #[cfg(target_arch = "wasm32")]
         #[wasm_bindgen]
-        pub fn __engine_start(){
-            // real starting point for game engine
-            __engine_user_main()
+        pub fn __engine_start(config: JsValue) -> Result<(), JsValue>{
+            // parse the optional startup config, then run the game
+            efeengine_core::config::__start_from_js(config)?;
+            __engine_user_main();
+            Ok(())
         }
         #[cfg(target_arch = "wasm32")]
         #[wasm_bindgen(start)]

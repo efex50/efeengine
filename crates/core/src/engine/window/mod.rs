@@ -3,6 +3,8 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 #[cfg(target_family = "wasm")]
 pub mod web_backend;
+#[cfg(target_family = "wasm")]
+mod web_impls;
 
 #[cfg(not(target_family = "wasm"))]
 pub mod sdl_backend;
@@ -17,12 +19,19 @@ use crate::engine::renderer::SurfaceManager;
 pub trait InnerWindow: HasWindowHandle + HasDisplayHandle{
     #[cfg(target_family = "wasm")]
     fn set_canvas_id(&mut self,canvas_id:String);
+    #[cfg(target_family = "wasm")]
+    fn canvas(&self) -> Option<web_sys::HtmlCanvasElement>;
+    #[cfg(target_family = "wasm")]
+    fn canvas_id(&self) -> &str;
     fn set_title(&mut self,title:String);
     fn size(&self) -> (u32, u32);
+    /// Physical pixels per logical pixel (DPI scale / devicePixelRatio).
+    fn scale_factor(&self) -> f64 { 1.0 }
     fn poll_events(&mut self);
 }
 pub trait WindowManager{
     fn size(&self) -> (u32,u32);
+    fn scale_factor(&self) -> f64;
     fn poll_events(&mut self);
     fn set_title(&mut self,title:String);
 
@@ -52,6 +61,15 @@ impl GameWindowManager {
     pub fn poll_events(&mut self ){
         self.inner.poll_events();
     }
+    /// The canvas the window draws to (web only).
+    #[cfg(target_family = "wasm")]
+    pub fn canvas(&self) -> Option<web_sys::HtmlCanvasElement>{
+        self.inner.canvas()
+    }
+    #[cfg(target_family = "wasm")]
+    pub fn canvas_id(&self) -> &str{
+        self.inner.canvas_id()
+    }
     #[cfg(target_family = "wasm")]
     pub fn set_canvas_id(&mut self, canvas_id:String){
         self.inner.set_canvas_id(canvas_id);
@@ -63,6 +81,10 @@ impl GameWindowManager {
 impl WindowManager for GameWindowManager {
     fn size(&self) -> (u32,u32) {
         self.inner.size()
+    }
+
+    fn scale_factor(&self) -> f64 {
+        self.inner.scale_factor()
     }
     
     fn poll_events(&mut self) {

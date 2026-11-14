@@ -1,6 +1,4 @@
-use std::any::Any;
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use once_cell::sync::Lazy;
 #[cfg(target_arch = "wasm32")]
@@ -108,18 +106,61 @@ impl WorkerHandle {
 }
 
 
+/// Counts "please exit" requests for the resizable workers.
+///
+/// Shrinking the pool adds N to the counter and queues N `Jobs::Kill` on the shared
+/// channel. A worker that pops a `Kill` only exits if it can take one request off the
+/// counter; otherwise the `Kill` is stale (the shrink was cancelled by a later grow)
+/// and it is ignored. This keeps the pool size right even if grow/shrink are mixed
+/// quickly while old `Kill` jobs are still queued.
+#[derive(Default)]
+pub(crate) struct KillGate(AtomicUsize);
+impl KillGate {
+    pub(crate) fn request(&self, n: usize) {
+        self.0.fetch_add(n, Ordering::SeqCst);
+    }
+    /// Cancel up to `n` pending requests, returns how many were cancelled.
+    pub(crate) fn cancel(&self, n: usize) -> usize {
+        let mut cur = self.0.load(Ordering::SeqCst);
+        loop {
+            let take = cur.min(n);
+            if take == 0 { return 0; }
+            match self.0.compare_exchange_weak(cur, cur - take, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return take,
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+    /// Called by a worker that received `Jobs::Kill`: true if it must exit.
+    pub(crate) fn try_take(&self) -> bool {
+        self.cancel(1) == 1
+    }
+}
+
 pub trait ThreadPoolTrait{
     fn new(cores:usize) -> Self;
     fn execute<F>(&self, f: F) where F: FnOnce() + Send + 'static;
     fn send_job(&self,job:Jobs);
-    fn change_worker_amount(&mut self,new_size:usize);
+    /// Grow or shrink the resizable worker set. Never blocks on running jobs.
+    /// Shrinking lets busy workers finish their current job (and any job queued
+    /// before the `Kill`) and then exit. Call from one thread (the main thread).
+    fn change_worker_amount(&self,new_size:usize);
+    /// Number of resizable workers the pool is aiming for.
+    fn worker_amount(&self) -> usize;
     fn new_dedicated_worker(&self) -> WorkerHandle;
 }
-static mut CORES:usize = 0;
+
+/// Size requested before the pool exists (0 = nothing requested, use the default).
+static CORES: AtomicUsize = AtomicUsize::new(0);
+const DEFAULT_POOL_SIZE: usize = 2;
+
+/// The global pool. It is created on first use with the size recorded by
+/// `init_global_pool`/`set_global_pool_size` and can be resized afterwards
+/// (`ThreadPool::change_worker_amount` takes `&self`).
 pub static GLOBAL_POOL: Lazy<ThreadPool> = Lazy::new(|| {
-    let mut cores = unsafe {CORES};
+    let mut cores = CORES.load(Ordering::SeqCst);
     if cores == 0 {
-        cores = 2; 
+        cores = DEFAULT_POOL_SIZE;
         #[cfg(not(target_arch = "wasm32"))]
         println!("UYARI: init_global_pool çağrılmadı, varsayılan olarak 2 thread açılıyor.");
     }
@@ -132,11 +173,32 @@ pub fn __init_thread_pool(a:usize){
     init_global_pool(a);
 }
 
-pub fn init_global_pool(_a:usize){
-    unsafe {
-        CORES = _a;
-    }
+pub fn init_global_pool(a:usize){
+    CORES.store(a.max(1), Ordering::SeqCst);
     Lazy::force(&GLOBAL_POOL);
+}
+
+/// Change the number of global pool workers at runtime (clamped to >= 1).
+/// Before the pool exists this only records the size. Call from the main thread.
+/// On shrink, running jobs finish first; on wasm nothing blocks.
+pub fn set_global_pool_size(n:usize){
+    let n = n.max(1);
+    CORES.store(n, Ordering::SeqCst);
+    if let Some(pool) = Lazy::get(&GLOBAL_POOL) {
+        pool.change_worker_amount(n);
+    }
+}
+
+/// Current (target) number of global pool workers, or the recorded size if the pool
+/// has not been created yet.
+pub fn global_pool_size() -> usize{
+    match Lazy::get(&GLOBAL_POOL) {
+        Some(pool) => pool.worker_amount(),
+        None => match CORES.load(Ordering::SeqCst) {
+            0 => DEFAULT_POOL_SIZE,
+            n => n,
+        },
+    }
 }
 
 pub struct JobHandle<T>{
@@ -185,4 +247,91 @@ pub fn spawn_job_global(job:Jobs){
 }
 pub fn new_worker_global() -> WorkerHandle {
     GLOBAL_POOL.new_dedicated_worker()
+}
+
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
+        let end = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < end {
+            if cond() { return true; }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        cond()
+    }
+
+    #[test]
+    fn grow_then_shrink() {
+        let pool = ThreadPool::new(2);
+        assert_eq!(pool.worker_amount(), 2);
+        pool.change_worker_amount(5);
+        assert_eq!(pool.worker_amount(), 5);
+        assert_eq!(pool.live_workers(), 5);
+        pool.change_worker_amount(5);
+        assert_eq!(pool.worker_amount(), 5);
+        pool.change_worker_amount(1);
+        assert_eq!(pool.worker_amount(), 1);
+        assert!(wait_until(|| pool.live_workers() == 1));
+        assert_eq!(pool.live_workers(), 1);
+        // still works with the single remaining worker
+        let hit = Arc::new(AtomicUsize::new(0));
+        let h = hit.clone();
+        let (tx, rx) = oneshot::channel::<()>();
+        pool.execute(move || { h.fetch_add(1, Ordering::SeqCst); let _ = tx.send(()); });
+        rx.recv().unwrap();
+        assert_eq!(hit.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn jobs_complete_across_resizes() {
+        let pool = ThreadPool::new(2);
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        let submit = |pool: &ThreadPool, n: usize, handles: &mut Vec<oneshot::Receiver<()>>| {
+            for _ in 0..n {
+                let c = count.clone();
+                let (tx, rx) = oneshot::channel::<()>();
+                pool.execute(move || {
+                    std::thread::sleep(Duration::from_millis(1));
+                    c.fetch_add(1, Ordering::SeqCst);
+                    let _ = tx.send(());
+                });
+                handles.push(rx);
+            }
+        };
+        submit(&pool, 50, &mut handles);
+        pool.change_worker_amount(6);
+        submit(&pool, 50, &mut handles);
+        pool.change_worker_amount(1);
+        submit(&pool, 50, &mut handles);
+        pool.change_worker_amount(3);
+        submit(&pool, 50, &mut handles);
+        for h in handles { h.recv().unwrap(); }
+        assert_eq!(count.load(Ordering::SeqCst), 200);
+        assert_eq!(pool.worker_amount(), 3);
+        assert!(wait_until(|| pool.live_workers() == 3));
+        assert_eq!(pool.live_workers(), 3);
+    }
+
+    #[test]
+    fn global_size_api() {
+        // Uses the global pool: keep this the only test touching it.
+        init_global_pool(2);
+        assert_eq!(global_pool_size(), 2);
+        set_global_pool_size(0);
+        assert_eq!(global_pool_size(), 1);
+        set_global_pool_size(3);
+        assert_eq!(global_pool_size(), 3);
+        let count = Arc::new(AtomicUsize::new(0));
+        let hs: Vec<_> = (0..20).map(|_| { let c = count.clone(); spawn_global(move || { c.fetch_add(1, Ordering::SeqCst); }) }).collect();
+        set_global_pool_size(2);
+        for h in hs { h.join(); }
+        assert_eq!(count.load(Ordering::SeqCst), 20);
+        assert_eq!(global_pool_size(), 2);
+    }
 }

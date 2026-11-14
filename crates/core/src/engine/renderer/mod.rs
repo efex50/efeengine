@@ -151,68 +151,110 @@ pub struct SurfaceManager {
 }
 
 impl GraphicsContext {
-    pub async fn new() -> Self {
+    /// Create the GPU context and the window's surface.
+    ///
+    /// On the web this prefers WebGPU and falls back to WebGL2 when the browser
+    /// has no working WebGPU adapter. The surface is created before the adapter
+    /// because WebGL can only hand out an adapter for a given canvas.
+    pub async fn new(window: &GameWindowManager) -> Result<(Self, SurfaceManager), String> {
+        #[cfg(not(target_arch = "wasm32"))]
         let instance = Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
+        #[cfg(target_arch = "wasm32")]
+        let instance = web_instance().await;
+
+        let surface = create_surface(&instance, window)?;
 
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: None,
+            compatible_surface: Some(&surface),
             force_fallback_adapter: false,
-        }).await.expect("Uygun grafik adaptörü bulunamadı!");
+        }).await.map_err(|e| format!("no suitable graphics adapter: {e}"))?;
 
+        let info = adapter.get_info();
+        crate::global_info(&format!("graphics backend: {:?} ({})", info.backend, info.name));
+
+        // WebGL2 cannot meet wgpu's default limits. Take the max texture size from
+        // the adapter, so large / HiDPI canvases are not capped at the defaults.
+        let base_limits = if info.backend == wgpu::Backend::Gl {
+            wgpu::Limits::downlevel_webgl2_defaults()
+        } else {
+            wgpu::Limits::default()
+        };
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("RealGameEngine Device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: if cfg!(target_arch = "wasm32") {
-                    wgpu::Limits::downlevel_webgl2_defaults()
-                } else {
-                    wgpu::Limits::default()
-                },
+                required_limits: base_limits.using_resolution(adapter.limits()),
                 ..Default::default()
             },
-        ).await.expect("Device oluşturulamadı");
+        ).await.map_err(|e| format!("could not create device: {e}"))?;
 
-        Self { instance, adapter, device, queue }
+        let surface_manager = SurfaceManager::new(surface, &adapter, window.size(), &device);
+        Ok((Self { instance, adapter, device, queue }, surface_manager))
     }
-    
-    pub fn create_surface_manager(&self, window: &GameWindowManager) -> SurfaceManager {
-        SurfaceManager::new(&self.instance, &self.adapter, window, &self.device)
+}
+
+/// Pick WebGPU or WebGL2 per the startup config's `graphicsBackend`.
+/// This must be decided before the canvas gets a context: a canvas that has a
+/// WebGPU context can never get a WebGL one, so a fallback after the fact is impossible.
+#[cfg(target_arch = "wasm32")]
+async fn web_instance() -> Instance {
+    use crate::config::{GraphicsBackend, startup_config};
+
+    let gl_only = || Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::GL,
+        ..Default::default()
+    });
+    let choice = startup_config().graphics_backend;
+    if choice == GraphicsBackend::Webgl
+        || (choice == GraphicsBackend::Auto && is_desktop_linux_browser())
+    {
+        return gl_only();
+    }
+    // Drops BROWSER_WEBGPU when `navigator.gpu` is missing or gives no adapter.
+    wgpu::util::new_instance_with_webgpu_detection(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+        ..Default::default()
+    }).await
+}
+
+/// Desktop Linux (not Android / ChromeOS), from the user agent.
+#[cfg(target_arch = "wasm32")]
+fn is_desktop_linux_browser() -> bool {
+    let Some(ua) = web_sys::window().and_then(|w| w.navigator().user_agent().ok()) else {
+        return false;
+    };
+    ua.contains("Linux") && !ua.contains("Android") && !ua.contains("CrOS")
+}
+
+fn create_surface(instance: &Instance, window: &GameWindowManager) -> Result<Surface<'static>, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let canvas = window.canvas().ok_or_else(|| {
+            format!("canvas element with id \"{}\" not found (or not a <canvas>)", window.canvas_id())
+        })?;
+        instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+            .map_err(|e| format!("could not create surface: {e}"))
+    }
+    // SAFETY: the returned surface is stored in `window.surface_manager`,
+    // which `GameWindowManager` declares before (and so drops before) the
+    // inner window whose raw handles it uses. The window never moves out of
+    // its owner while the surface exists, and is not `Send`, so both stay on
+    // the main thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    unsafe {
+        let target = wgpu::SurfaceTargetUnsafe::from_window(window)
+            .map_err(|e| format!("no window handle: {e}"))?;
+        instance.create_surface_unsafe(target)
+            .map_err(|e| format!("could not create surface: {e}"))
     }
 }
 
 impl SurfaceManager {
-    fn new(instance: &Instance, adapter: &Adapter, window: &GameWindowManager, device: &Device) -> Self {
-        let size = window.size();
-        
-        let surface = unsafe {
-            #[cfg(target_arch = "wasm32")]
-            {
-                use wasm_bindgen::JsCast;
-                use wgpu::web_sys;
-                let win = web_sys::window().unwrap();
-                let doc = win.document().unwrap();
-                let canvas = doc.get_element_by_id("canvas")
-                    .expect("Canvas elementi bulunamadi!")
-                    .dyn_into::<web_sys::HtmlCanvasElement>()
-                    .unwrap();
-                instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas)).unwrap()
-            }
-            // SAFETY: the returned surface is stored in `window.surface_manager`,
-            // which `GameWindowManager` declares before (and so drops before) the
-            // inner window whose raw handles it uses. The window never moves out of
-            // its owner while the surface exists, and is not `Send`, so both stay on
-            // the main thread.
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let target = wgpu::SurfaceTargetUnsafe::from_window(window).unwrap();
-                instance.create_surface_unsafe(target).unwrap()
-            }
-        };
-
+    fn new(surface: Surface<'static>, adapter: &Adapter, size: (u32, u32), device: &Device) -> Self {
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps.formats.iter()
             .copied()

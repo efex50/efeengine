@@ -33,6 +33,8 @@ pub fn recv_messages() -> flume::Drain<'static, engine::messages::Message>{
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message{
     SetFrameRate(f32),
+    /// Resize the global thread pool (clamped to >= 1).
+    SetThreads(usize),
     WindowEvent(WindowEvents),
     Start,
     Stop,

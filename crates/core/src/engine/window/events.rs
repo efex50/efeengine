@@ -12,6 +12,8 @@ pub enum WindowEvents{
         key_code:Option<LogicalKey>,
         scancode:Option<PhysicalKey>,
         keymod:KeyMod,
+        /// True for auto-repeat events while the key is held (always false for KeyUp).
+        repeat: bool,
         raw:u16
     },
     KeyDown{
@@ -20,6 +22,8 @@ pub enum WindowEvents{
         key_code:Option<LogicalKey>,
         scancode:Option<PhysicalKey>,
         keymod:KeyMod,
+        /// True for auto-repeat events while the key is held (always false for KeyUp).
+        repeat: bool,
         raw:u16
     },
     /// Window drawable size changed, in physical pixels.
@@ -27,7 +31,13 @@ pub enum WindowEvents{
         window_id:u32,
         width:u32,
         height:u32
-    }
+    },
+    /// The window/canvas gained (`true`) or lost (`false`) keyboard focus.
+    Focused { window_id: u32, focused: bool },
+    /// The user asked to close the window (native close button / quit). The engine decides what to do.
+    CloseRequested { window_id: u32 },
+    /// Display scale (DPI / devicePixelRatio) changed; `scale` is physical pixels per logical pixel.
+    ScaleFactorChanged { window_id: u32, scale: f64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash,Serialize,Deserialize)]

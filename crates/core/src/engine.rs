@@ -5,7 +5,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use wasm_bindgen::prelude::*;
 
 use crate::{debug_info, engine::{messages::{Message}, window::{GameWindowManager, events::WindowEvents}}, log::{Logger, NewDefaultLogger}, recv_messages, renderer::GraphicsContext, set_global_logger, window::WindowManager, world::EngineWorld};
-use crate::{global_info, thread_pool::init_global_pool_auto};
+use crate::{global_info, thread_pool::{init_global_pool, init_global_pool_auto}};
 pub mod window;
 pub mod messages;
 pub mod log;
@@ -14,12 +14,26 @@ pub mod flags;
 pub mod world;
 pub mod thread_pool;
 pub mod systems;
+pub mod config;
 
 pub static WASM_PATH:OnceCell<String> =OnceCell::new();
 #[cfg(target_family = "wasm")]
 #[wasm_bindgen]
+#[allow(deprecated)]
+#[deprecated(note = "pass `wasmJsPath` in the config given to `__engine_start` instead")]
 pub fn set_wasmjs_path(path:String){
     WASM_PATH.set(path);
+}
+
+/// Route the `log` crate (used by wgpu, naga and `config.rs`) somewhere visible:
+/// the terminal on native (filter with `RUST_LOG`, default `warn`), the browser
+/// console on the web. Without this, wgpu validation errors are silently dropped.
+/// Calling it more than once is harmless.
+fn init_log_crate_logger() {
+    #[cfg(not(target_family = "wasm"))]
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).try_init();
+    #[cfg(target_family = "wasm")]
+    let _ = console_log::init_with_level(::log::Level::Warn);
 }
 
 #[derive(Debug,PartialEq, Eq)]
@@ -34,8 +48,24 @@ pub enum EngineStatus{
 
 
 
+/// Last known state of the main window, kept up to date from window events.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowState{
+    /// Drawable size in physical pixels.
+    pub size: (u32, u32),
+    pub scale_factor: f64,
+    pub focused: bool,
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        Self { size: (0, 0), scale_factor: 1.0, focused: true }
+    }
+}
+
 pub struct EngineState{
     pub world : EngineWorld,
+    pub window: WindowState,
 
 }
 
@@ -48,19 +78,23 @@ pub struct Engine{
 }
 impl Engine {
 
-    /// create new game instance with title of the game and project name(for wasm)
-    /// 
+    /// Create a new game instance with the given window title.
+    ///
     /// ```no_run
     /// use efeengine_core::prelude::*;
-    /// Engine::new("title",env!("CARGO_PKG_NAME"))
+    /// let engine = Engine::new("title");
+    /// engine.game_loop();
     /// ```
     pub fn new<S:Into<String>>(title:S) -> Self {
         let title = title.into();
 
-        
+        init_log_crate_logger();
 
         // init thread pool
-        init_global_pool_auto();
+        match config::startup_config().threads {
+            Some(n) => init_global_pool(n),
+            None => init_global_pool_auto(),
+        }
 
 
         #[cfg(target_family = "wasm")]
@@ -75,7 +109,8 @@ impl Engine {
         let world = EngineWorld::new();
         
         let state = EngineState{
-            world
+            world,
+            window: WindowState::default(),
         };
 
         Self {
@@ -110,6 +145,11 @@ impl Engine {
                 Message::SetFrameRate(_) => {
     
                 },
+                Message::SetThreads(n) => {
+                    crate::thread_pool::set_global_pool_size(n);
+                    let size = crate::thread_pool::global_pool_size();
+                    self.logger.info(&format!("thread pool size: {size}"));
+                },
                 Message::ChangeTitle(tit) => {
                     self.windows.set_title(tit.to_string());
                 },
@@ -117,7 +157,18 @@ impl Engine {
                     self.logger.log(&log_msg);
                 },
                 Message::WindowEvent(WindowEvents::Resized { width, height, .. }) => {
+                    self.state.window.size = (width, height);
                     self.resize_surface((width, height));
+                }
+                Message::WindowEvent(WindowEvents::ScaleFactorChanged { scale, .. }) => {
+                    self.state.window.scale_factor = scale;
+                }
+                Message::WindowEvent(WindowEvents::Focused { focused, .. }) => {
+                    self.state.window.focused = focused;
+                }
+                Message::WindowEvent(WindowEvents::CloseRequested { .. }) => {
+                    self.logger.info("close requested");
+                    self.status = EngineStatus::Kill;
                 }
                 // Key events etc. are not consumed by the engine yet.
                 Message::WindowEvent(_) => {}
@@ -129,17 +180,15 @@ impl Engine {
     // YENİ: Async Grafik Bağlamı Başlatıcı
     pub async fn init_graphics(&mut self) {
         self.logger.info("Initializing Graphics Context...");
-        let graphics_context = GraphicsContext::new().await;
-        self.graphics_context = Some(graphics_context);
-        self.logger.info("Graphics Context Initialized!");
-        
-        // SurfaceManager'ı oluştur ve Window'a ata
-        {
-            let sm = self.graphics_context.as_ref().unwrap().create_surface_manager(&self.windows);
-            self.windows.surface_manager = Some(sm);
-            self.logger.info("Window Surface Manager Initialized!");
+        match GraphicsContext::new(&self.windows).await {
+            Ok((graphics_context, surface_manager)) => {
+                self.graphics_context = Some(graphics_context);
+                self.windows.surface_manager = Some(surface_manager);
+                self.logger.info("Graphics Context Initialized!");
+            }
+            // The engine keeps ticking (messages, input) without rendering.
+            Err(e) => self.logger.error(&format!("graphics init failed: {e}")),
         }
-        
     }
     pub fn render(&mut self){
         
@@ -188,10 +237,18 @@ impl Engine {
     }
     #[cfg(target_family = "wasm")]
     pub fn wasm_loop_start(mut self){
+        // The browser can't block on async GPU init (no pollster here), so init
+        // graphics on the JS event loop first and start ticking once it is done.
+        wasm_bindgen_futures::spawn_local(async move {
+            self.init_graphics().await;
+            self.wasm_run_frames();
+        });
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn wasm_run_frames(self){
         use std::rc::Rc;
         use std::cell::RefCell;
-
-        use crate::global_info;
 
         // 1. Wrap engine in Rc<RefCell> so it can be shared with the closure
         let engine = Rc::new(RefCell::new(self));
@@ -199,8 +256,6 @@ impl Engine {
         let g = f.clone();
         // 2. Create the animation frame closure
         *g.borrow_mut() = Some(Closure::new(move || {
-            use crate::global_info;
-
             let mut engine_ref = engine.borrow_mut();
                 
             // Run logic
@@ -237,9 +292,8 @@ impl Engine {
                 EngineStatus::Ready |
                 EngineStatus::Stopped |
                 EngineStatus::Running => {},
-                EngineStatus::Kill => {
-                    std::process::exit(0)
-                },
+                // Leave the loop so `game_loop` returns and the engine is dropped normally.
+                EngineStatus::Kill => break 'main,
             }
         }
     }
