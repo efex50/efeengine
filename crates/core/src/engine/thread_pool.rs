@@ -45,6 +45,50 @@ impl WorkerHandleOnce {
         JobHandle { rx }
     }
 }
+
+/// How many workers to spawn, leaving headroom for main/render/audio threads.
+pub fn worker_count(cores: usize) -> usize {
+    let reserve = match cores {
+        0..=3 => 1,
+        4..=5 => 2,
+        6..=9 => 3,
+        _ => 4,
+    };
+    cores.saturating_sub(reserve).max(1)
+}
+
+fn detect_cores() -> usize {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::thread::available_parallelism().map_or(2, |n| n.get())
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let Some(win) = web_sys::window() else { return 1 };
+        // Without cross-origin isolation there is no SharedArrayBuffer -> no threads.
+        let isolated = js_sys::Reflect::get(&win, &"crossOriginIsolated".into())
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !isolated {
+            crate::debug_warn("page is not crossOriginIsolated; running single-threaded");
+            return 1;
+        }
+        (win.navigator().hardware_concurrency() as usize).max(1)
+    }
+}
+
+pub fn init_global_pool_auto() {
+    let cores = detect_cores();
+    let workers = std::env::var("EFE_THREADS")          // optional override (native)
+        .ok().and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| worker_count(cores));
+    crate::debug_info(&format!("cores: {cores}, pool workers: {workers}"));
+    init_global_pool(workers);
+}
+
+
+
 pub struct WorkerHandle{
     sender:flume::Sender<Jobs>,
 }

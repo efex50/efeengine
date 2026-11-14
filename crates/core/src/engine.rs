@@ -5,7 +5,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use wasm_bindgen::prelude::*;
 
 use crate::{debug_info, engine::{messages::{Message}, window::GameWindowManager}, global_warn, log::{Logger, NewDefaultLogger}, recv_messages, renderer::GraphicsContext, set_global_logger, window::WindowManager, world::EngineWorld};
-use crate::{global_info, thread_pool::init_global_pool};
+use crate::{global_info, thread_pool::init_global_pool_auto};
 pub mod window;
 pub mod messages;
 pub mod log;
@@ -60,61 +60,7 @@ impl Engine {
         
 
         // init thread pool
-        {
-            #[cfg(not(target_family = "wasm"))]
-            {
-                let cores = std::thread::available_parallelism().unwrap().get();
-                if cores <= 2{
-                    todo!("desteklenmeyen sistem. todo! daha düzgün bir hata mesajı")
-                }
-                if cores < 4{
-                    init_global_pool(2);
-                }else if cores < 6 {
-
-                    init_global_pool(cores -2);
-                }else if cores < 10{
-                    init_global_pool(cores -3);
-                }else {
-                    init_global_pool(cores -4);
-                }
-                debug_info(&format!("total amount of cores: {}",cores));
-            }
-            #[cfg(target_family = "wasm")]
-            {
-                use wasm_bindgen::prelude::wasm_bindgen;
-                use wgpu::web_sys;
-
-                use crate::thread_pool::init_global_pool;
-
-                #[wasm_bindgen]
-                unsafe extern "C" {
-                    pub fn alert(s:&str);
-                }
-
-                let cores = web_sys::window().unwrap().navigator().hardware_concurrency() as usize;
-                if cores <= 2{
-                    use wasm_bindgen::JsValue;
-                    unsafe {
-                        alert("Desteklenmeyen sistem.işlemci sayısı az en az 3 olmalı");
-                    }
-                    todo!("desteklenmeyen sistem. daha düzgün bir hata mesajı")
-                }
-                if cores < 4{
-
-                    init_global_pool(1  );
-                }else if cores < 6 {
-
-                    init_global_pool(cores -2);
-                }else if cores < 10{
-                    init_global_pool(cores -3);
-                }else {
-                    init_global_pool(cores -6);
-                }
-                debug_info(&format!("total amount of cores: {}",cores));
-
-
-            }
-        }
+        init_global_pool_auto();
 
 
         #[cfg(target_family = "wasm")]
