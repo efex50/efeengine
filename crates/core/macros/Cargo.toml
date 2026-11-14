@@ -1,5 +1,5 @@
 [package]
-name = "proc_marcoes"
+name = "efeengine-macros"
 version = "0.1.0"
 edition = "2024"
 

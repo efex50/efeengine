@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/core/macros",
+    "crates/efescript",
+    "crates/efescript/proc_macros",
+    "crates/efescript/strtohx",
+    "crates/efepages",
+    "crates/calc",
+    "examples/*",
+]
+
+[profile.optimize]
+inherits = "release"
+opt-level = 3
+strip = true
+lto = "fat"
+panic = "abort"

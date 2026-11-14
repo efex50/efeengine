@@ -275,4 +275,4 @@ impl SurfaceManager {
 }
 
 // Dosya yolu structure'a göre ayarlanmalı. Eğer proje kökünden çalışıyorsan bu yol doğru olabilir.
-const SHADER_SOURCE: &str = include_str!("../../../gsl/triangle_anim.wgsl");
+const SHADER_SOURCE: &str = include_str!("../../../shaders/triangle_anim.wgsl");

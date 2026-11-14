@@ -3,23 +3,11 @@ name = "efescript"
 version = "0.2.0"
 edition = "2021"
 
-[workspace]
-members = ["efepages", "proc_macros","strtohx"]
 
 
 [dependencies]
-efepages = { path="efepages" }
+efepages = { path = "../efepages" }
 proc_macros = { path="proc_macros" }
 num-derive = "0.4.2"
 num-traits = "0.2.19"
 text_io = "0.1.12"
-
-
-
-
-[profile.optimize]
-inherits = "release"
-opt-level = 3
-strip = true
-lto = "fat"
-panic = "abort"

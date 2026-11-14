@@ -7,7 +7,7 @@ pub use crate::{
     engine::*,
     messages::*,
 };
-pub use proc_marcoes::main;
+pub use efeengine_macros::main;
 
 #[cfg(target_arch = "wasm32")]
 pub mod a {
