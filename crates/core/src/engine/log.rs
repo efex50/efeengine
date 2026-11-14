@@ -11,8 +11,16 @@ pub trait Logger:Send + Sync{
     fn warn(&mut self,log:&str );
     fn error(&mut self,log:&str );
     fn alert(&mut self,log:&str );
-    fn log(&mut self,log:&LogMsg);
+    fn log(&mut self,log:&LogMsg){
+        match log {
+            LogMsg::Info(_) => self.info(&log.get_msg()),
+            LogMsg::Warn(_) => self.warn(&log.get_msg()),
+            LogMsg::Alert(_) => self.alert(&log.get_msg()),
+            LogMsg::Error(_) => self.error(&log.get_msg()),
+        }
+    }
 }
+#[cfg_attr(target_family = "wasm", derive(ts_rs::TS))]
 #[derive(Debug,Serialize,Deserialize)]
 pub enum LogMsg{
     Info(String),
@@ -136,15 +144,6 @@ mod sdl3{
             let msg = CString::new(log).unwrap();
             unsafe {
                 SDL_Log(msg.as_ptr());
-            }
-        }
-        
-        fn log(&mut self,log:&super::LogMsg) {
-            match log {
-                super::LogMsg::Info(_) => self.info(&log.get_msg()),
-                super::LogMsg::Warn(_) => self.warn(&log.get_msg()),
-                super::LogMsg::Alert(_) => self.alert(&log.get_msg()),
-                super::LogMsg::Error(_) => self.error(&log.get_msg()),
             }
         }
     }
