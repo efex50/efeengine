@@ -7,7 +7,7 @@ Monorepo for the efe game engine.
 | `crates/core` | `efeengine-core` | Engine core: SDL3 (native) / web window, wgpu renderer, message queue |
 | `crates/core/macros` | `efeengine-macros` | `#[main]` entry-point macro (native + wasm) |
 | `crates/efescript` | `efescript` | Scripting language: assembler + bytecode VM (`proc_macros`, `strtohx` inside) |
-| `crates/efescript/efepages` | `efepages` | Paged memory used by the efescript VM (`page_size_macro` inside) |
+| `crates/efepages` | `efepages` | Paged memory used by the efescript VM (`page_size_macro` inside) |
 | `crates/calc` | `calc` | Expression parser / printer / simplifier |
 | `examples/test_example` | `test_example` | Example game (native binary + wasm) |
 
