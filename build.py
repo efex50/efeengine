@@ -194,7 +194,19 @@ def do_native(action, ex, release, static):
     desc = ("release" if release else "debug") + (", static SDL3" if static else "")
     if has_native_bin(ex):
         step(f"native {action}: {pkg} ({desc})")
-        run(["cargo", action, "-p", pkg, "--bin", "native"] + extra)
+        try:
+            run(["cargo", action, "-p", pkg, "--bin", "native"] + extra)
+        except Fail:
+            if static:
+                print("hint: building SDL3 from source also needs its platform dev headers "
+                      "(look for 'Could NOT find' / 'CMake Error' above), e.g.\n"
+                      "  Fedora: sudo dnf install wayland-devel libxkbcommon-devel libX11-devel "
+                      "libXext-devel mesa-libGL-devel alsa-lib-devel pulseaudio-libs-devel\n"
+                      "  Debian: sudo apt install libwayland-dev libxkbcommon-dev libx11-dev "
+                      "libxext-dev libgl-dev libasound2-dev libpulse-dev\n"
+                      "Or skip the source build: install SDL3 itself (dnf install SDL3-devel) "
+                      "and drop --static.", file=sys.stderr)
+            raise
     else:
         step(f"{pkg} has no 'native' bin; building the lib")
         run(["cargo", "build", "-p", pkg, "--lib"] + extra)
