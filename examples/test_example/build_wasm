@@ -1,2 +1,2 @@
 #!/bin/sh
-wasm-pack build --target web --out-dir web/pkg
+exec "$(dirname "$0")/../../scripts/web.sh" build test_example "$@"

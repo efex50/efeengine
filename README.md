@@ -32,6 +32,23 @@ cargo build --workspace
 cargo run -p test_example --bin native
 ```
 
+## Web
+
+Examples can be built to wasm and served in the browser (nightly Rust with `rust-src`
+and the `wasm32-unknown-unknown` target, plus `wasm-bindgen-cli` matching `Cargo.lock`):
+
+```sh
+scripts/web.sh build test_example [--release]
+scripts/web.sh serve test_example [--release] [--port 8080]
+scripts/web.sh dist  test_example      # release build, publish-ready
+```
+
+Output goes to `dist/<example>/` (gitignored). The page needs the
+`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`
+headers for wasm threads: `scripts/serve.py` sends them locally, and `_headers` covers
+Netlify / Cloudflare Pages (GitHub Pages cannot set headers). See
+[templates/web/README.md](templates/web/README.md).
+
 ## History
 
 The original repositories (realgameengine, efescript, calc) were merged with their

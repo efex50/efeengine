@@ -24,8 +24,8 @@ help_msg(){
     echo "  native     - Build desktop version with SDL3"
     echo "  native static - staticly link sdl"
     echo "  native run - Build and run"
-    echo "  web        - Build WebAssembly version with wasm-pack"
-    echo "  web run    - Build and run"
+    echo "  web        - Build WebAssembly version (scripts/web.sh)"
+    echo "  web run    - Build and serve (COOP/COEP)"
     echo "  target (target)     - Build for custom rust target SDL3"
     echo "  target (target) static - staticl link sdl"
     echo "  target (target) run - Build and run"
@@ -57,28 +57,14 @@ case "$1" in
         ;;
     web)
         echo "Building for web (wasm32)..."
-        
-        # Ensure wasm-pack is installed
-        if ! command -v wasm-pack &> /dev/null; then
-            echo "Installing wasm-pack..."
-            cargo install wasm-pack
-        fi
-        
-        # Build WASM    
-        rustup run $rust_verr wasm-pack build . --target web --out-dir web/pkg -- -Z build-std=panic_abort,std
-        
-        echo ""
+        web_script="$(dirname "$0")/../../scripts/web.sh"
         case "$2" in
             run)
-                echo "Build complete!"
-
-                echo starting...
-                miniserve web --header "Cross-Origin-Opener-Policy: same-origin" --header "Cross-Origin-Embedder-Policy: require-corp" --index index.html
+                "$web_script" serve test_example --release
             ;;
             *)
-                echo "Build complete! To run:"
-                echo "  cd web && python3 ./server.py"
-                echo "  Open http://localhost:8080 in a WebGPU-enabled browser"
+                "$web_script" build test_example --release
+                echo "Run with: ./build.sh web run"
             ;;
         esac
         ;;
