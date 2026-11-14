@@ -1,0 +1,39 @@
+; sound.efe - PlaySound (syscall 12): rb = pointer to the path, rc = path length.
+; The result comes back in ra: 0 = ok, 1 = failed.
+; The path is relative to the WORKING DIRECTORY of the process, so run it from the
+; crate directory (crates/efescript):
+;   cargo run -q -p efescript -- examples/sound.efe
+; Real playback needs the `audio` cargo feature (--features audio, ALSA headers on
+; Linux). Without it the host reports an error: the program prints "sound failed" and
+; exits with code 1 (an error line is also written to stderr).
+; Expected output with audio: "sound ok", exit code 0.
+; With the default build:      "sound failed", exit code 1.
+
+path db "examples/ominous_worse.ogg"
+ok   db "sound ok"
+bad  db "sound failed"
+
+mov ra, 12
+mov rb, path
+mov rc, path.len
+syscall
+mov r1, ra                 ; keep the status, printing clobbers ra
+cmp r1, 0
+jne _failed
+
+mov ra, 2
+mov rb, ok
+mov rc, ok.len
+syscall
+jmp _exit
+
+label _failed
+mov ra, 2
+mov rb, bad
+mov rc, bad.len
+syscall
+
+label _exit
+mov ra, 5050
+mov rb, r1                 ; exit code = status
+syscall

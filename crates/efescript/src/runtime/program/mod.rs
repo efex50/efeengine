@@ -5,6 +5,7 @@ mod runtime;
 
 use efepages::page::Page;
 use thread::PThread;
+use crate::runtime::host::{Host, StdHost};
 
 
 
@@ -56,7 +57,6 @@ impl PFlags {
 
 
 
-#[derive(Debug,Default)]
 pub struct ProgramRuntime{
     pub counter:usize,
     pub program:Page,
@@ -65,5 +65,49 @@ pub struct ProgramRuntime{
     pub stdin:Vec<u8>,
     pub stderr:Vec<u8>,
     pub stdout:Vec<u8>,
-
+    /// output / sound sink (StdHost unless `with_host` was used)
+    pub host:Box<dyn Host>,
 }
+
+impl Default for ProgramRuntime {
+    fn default() -> Self {
+        Self{
+            counter:0,
+            program:Page::default(),
+            program_size:0,
+            threads:Vec::new(),
+            stdin:Vec::new(),
+            stderr:Vec::new(),
+            stdout:Vec::new(),
+            host:Box::new(StdHost),
+        }
+    }
+}
+
+impl std::fmt::Debug for ProgramRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProgramRuntime")
+            .field("counter", &self.counter)
+            .field("program", &self.program)
+            .field("program_size", &self.program_size)
+            .field("threads", &self.threads)
+            .field("host", &"<dyn Host>")
+            .finish()
+    }
+}
+
+/// How a run ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunResult{
+    /// the program called syscall Finish with this code
+    Finished(u8),
+    /// the end-of-program byte was reached
+    EndOfProgram,
+    /// `run_with_limit` executed its maximum number of instructions
+    LimitReached,
+    /// the program did something invalid (bad opcode, unknown syscall, stack underflow, ...)
+    Fault(String),
+}
+
+#[cfg(test)]
+mod tests;

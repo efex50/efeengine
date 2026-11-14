@@ -1,0 +1,368 @@
+; jumps.efe - conditional jumping: je jne jgt jlt jge jle jz jnz js.
+; For each jump there is one case where it is taken and one where it is not.
+; Each case prints "<jump> taken: ok" / "<jump> not taken: ok", or a line starting
+; with FAIL if the wrong path ran. cmp compares unsigned; test sets the zero flag
+; (value == 0) and the sign flag (top bit of the 64-bit value set).
+; Run from the crate dir:  cargo run -q -p efescript -- examples/jumps.efe
+; Expected output: the 18 lines listed below, no FAIL; exit code 0.
+; Lines:
+; je taken: ok
+; je not taken: ok
+; jne taken: ok
+; jne not taken: ok
+; jgt taken: ok
+; jgt not taken: ok
+; jlt taken: ok
+; jlt not taken: ok
+; jge taken: ok
+; jge not taken: ok
+; jle taken: ok
+; jle not taken: ok
+; jz taken: ok
+; jz not taken: ok
+; jnz taken: ok
+; jnz not taken: ok
+; js taken: ok
+; js not taken: ok
+
+s1ok db "je taken: ok"
+s1bad db "FAIL je taken"
+s2ok db "je not taken: ok"
+s2bad db "FAIL je not taken"
+s3ok db "jne taken: ok"
+s3bad db "FAIL jne taken"
+s4ok db "jne not taken: ok"
+s4bad db "FAIL jne not taken"
+s5ok db "jgt taken: ok"
+s5bad db "FAIL jgt taken"
+s6ok db "jgt not taken: ok"
+s6bad db "FAIL jgt not taken"
+s7ok db "jlt taken: ok"
+s7bad db "FAIL jlt taken"
+s8ok db "jlt not taken: ok"
+s8bad db "FAIL jlt not taken"
+s9ok db "jge taken: ok"
+s9bad db "FAIL jge taken"
+s10ok db "jge not taken: ok"
+s10bad db "FAIL jge not taken"
+s11ok db "jle taken: ok"
+s11bad db "FAIL jle taken"
+s12ok db "jle not taken: ok"
+s12bad db "FAIL jle not taken"
+s13ok db "jz taken: ok"
+s13bad db "FAIL jz taken"
+s14ok db "jz not taken: ok"
+s14bad db "FAIL jz not taken"
+s15ok db "jnz taken: ok"
+s15bad db "FAIL jnz taken"
+s16ok db "jnz not taken: ok"
+s16bad db "FAIL jnz not taken"
+s17ok db "js taken: ok"
+s17bad db "FAIL js taken"
+s18ok db "js not taken: ok"
+s18bad db "FAIL js not taken"
+
+; je taken
+mov r1, 5
+mov r2, 5
+cmp r1, r2
+je _ok1
+mov ra, 2
+mov rb, s1bad
+mov rc, s1bad.len
+syscall
+jmp _e1
+label _ok1
+mov ra, 2
+mov rb, s1ok
+mov rc, s1ok.len
+syscall
+label _e1
+
+; je not taken
+mov r1, 5
+mov r2, 6
+cmp r1, r2
+je _bad2
+mov ra, 2
+mov rb, s2ok
+mov rc, s2ok.len
+syscall
+jmp _e2
+label _bad2
+mov ra, 2
+mov rb, s2bad
+mov rc, s2bad.len
+syscall
+label _e2
+
+; jne taken
+mov r1, 5
+mov r2, 6
+cmp r1, r2
+jne _ok3
+mov ra, 2
+mov rb, s3bad
+mov rc, s3bad.len
+syscall
+jmp _e3
+label _ok3
+mov ra, 2
+mov rb, s3ok
+mov rc, s3ok.len
+syscall
+label _e3
+
+; jne not taken
+mov r1, 5
+mov r2, 5
+cmp r1, r2
+jne _bad4
+mov ra, 2
+mov rb, s4ok
+mov rc, s4ok.len
+syscall
+jmp _e4
+label _bad4
+mov ra, 2
+mov rb, s4bad
+mov rc, s4bad.len
+syscall
+label _e4
+
+; jgt taken
+mov r1, 6
+mov r2, 5
+cmp r1, r2
+jgt _ok5
+mov ra, 2
+mov rb, s5bad
+mov rc, s5bad.len
+syscall
+jmp _e5
+label _ok5
+mov ra, 2
+mov rb, s5ok
+mov rc, s5ok.len
+syscall
+label _e5
+
+; jgt not taken
+mov r1, 5
+mov r2, 5
+cmp r1, r2
+jgt _bad6
+mov ra, 2
+mov rb, s6ok
+mov rc, s6ok.len
+syscall
+jmp _e6
+label _bad6
+mov ra, 2
+mov rb, s6bad
+mov rc, s6bad.len
+syscall
+label _e6
+
+; jlt taken
+mov r1, 5
+mov r2, 6
+cmp r1, r2
+jlt _ok7
+mov ra, 2
+mov rb, s7bad
+mov rc, s7bad.len
+syscall
+jmp _e7
+label _ok7
+mov ra, 2
+mov rb, s7ok
+mov rc, s7ok.len
+syscall
+label _e7
+
+; jlt not taken
+mov r1, 5
+mov r2, 5
+cmp r1, r2
+jlt _bad8
+mov ra, 2
+mov rb, s8ok
+mov rc, s8ok.len
+syscall
+jmp _e8
+label _bad8
+mov ra, 2
+mov rb, s8bad
+mov rc, s8bad.len
+syscall
+label _e8
+
+; jge taken
+mov r1, 5
+mov r2, 5
+cmp r1, r2
+jge _ok9
+mov ra, 2
+mov rb, s9bad
+mov rc, s9bad.len
+syscall
+jmp _e9
+label _ok9
+mov ra, 2
+mov rb, s9ok
+mov rc, s9ok.len
+syscall
+label _e9
+
+; jge not taken
+mov r1, 5
+mov r2, 6
+cmp r1, r2
+jge _bad10
+mov ra, 2
+mov rb, s10ok
+mov rc, s10ok.len
+syscall
+jmp _e10
+label _bad10
+mov ra, 2
+mov rb, s10bad
+mov rc, s10bad.len
+syscall
+label _e10
+
+; jle taken
+mov r1, 5
+mov r2, 5
+cmp r1, r2
+jle _ok11
+mov ra, 2
+mov rb, s11bad
+mov rc, s11bad.len
+syscall
+jmp _e11
+label _ok11
+mov ra, 2
+mov rb, s11ok
+mov rc, s11ok.len
+syscall
+label _e11
+
+; jle not taken
+mov r1, 6
+mov r2, 5
+cmp r1, r2
+jle _bad12
+mov ra, 2
+mov rb, s12ok
+mov rc, s12ok.len
+syscall
+jmp _e12
+label _bad12
+mov ra, 2
+mov rb, s12bad
+mov rc, s12bad.len
+syscall
+label _e12
+
+; jz taken
+mov r1, 0
+test r1
+jz _ok13
+mov ra, 2
+mov rb, s13bad
+mov rc, s13bad.len
+syscall
+jmp _e13
+label _ok13
+mov ra, 2
+mov rb, s13ok
+mov rc, s13ok.len
+syscall
+label _e13
+
+; jz not taken
+mov r1, 1
+test r1
+jz _bad14
+mov ra, 2
+mov rb, s14ok
+mov rc, s14ok.len
+syscall
+jmp _e14
+label _bad14
+mov ra, 2
+mov rb, s14bad
+mov rc, s14bad.len
+syscall
+label _e14
+
+; jnz taken
+mov r1, 1
+test r1
+jnz _ok15
+mov ra, 2
+mov rb, s15bad
+mov rc, s15bad.len
+syscall
+jmp _e15
+label _ok15
+mov ra, 2
+mov rb, s15ok
+mov rc, s15ok.len
+syscall
+label _e15
+
+; jnz not taken
+mov r1, 0
+test r1
+jnz _bad16
+mov ra, 2
+mov rb, s16ok
+mov rc, s16ok.len
+syscall
+jmp _e16
+label _bad16
+mov ra, 2
+mov rb, s16bad
+mov rc, s16bad.len
+syscall
+label _e16
+
+; js taken
+mov r1, 0x8000000000000000
+test r1
+js _ok17
+mov ra, 2
+mov rb, s17bad
+mov rc, s17bad.len
+syscall
+jmp _e17
+label _ok17
+mov ra, 2
+mov rb, s17ok
+mov rc, s17ok.len
+syscall
+label _e17
+
+; js not taken
+mov r1, 1
+test r1
+js _bad18
+mov ra, 2
+mov rb, s18ok
+mov rc, s18ok.len
+syscall
+jmp _e18
+label _bad18
+mov ra, 2
+mov rb, s18bad
+mov rc, s18bad.len
+syscall
+label _e18
+
+; Finish(0)
+mov ra, 5050
+mov rb, 0
+syscall

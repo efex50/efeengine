@@ -49,28 +49,35 @@ Design rules for v1 (these keep JIT, AOT and a wasm translator possible):
 ## Roadmap
 
 ### E0: Make the current code testable (small)
-- [ ] E0.1 Remove debug noise: `dbg!` on every token (`nasm_efe/mod.rs:211`, `:288`), `dbg!` in `Println`, the whole-memory dump on an unknown opcode.
-- [ ] E0.2 Fix the assembler bugs that make the examples wrong:
+- [x] E0.1 Remove debug noise: `dbg!` on every token (`nasm_efe/mod.rs:211`, `:288`), `dbg!` in `Println`, the whole-memory dump on an unknown opcode.
+  _Done:_ no `dbg!` is left in `src`; unknown opcodes fault with a message instead of dumping memory.
+- [x] E0.2 Fix the assembler bugs that make the examples wrong:
   - `[rbp+8]` assembles as `[rbp+rbp]`: `PtrInner::from_tokens` reads `t[0]` instead of `t[2]` (`nasm_funs.rs:67-79`) **(verified)**. This is why `hello.efe` says the form "doesn't work".
   - Hex literals containing `b` (`0x20b`, `0x0b`) are rejected: the `0b` prefix test uses `contains` (`funs.rs:7`) **(verified)**.
   - Forward jumps near address 255 are encoded one byte off, because label resolution guesses jump sizes in three passes instead of iterating to a fixed point **(verified)**.
   - An undefined label panics; a duplicate label silently takes the last definition **(verified)**.
   - Decimal numbers are rejected in `push32 5` and panic in `[8]`.
-- [ ] E0.3 Fix the decoder bugs: first static inside a pointer reads one byte instead of `len` (`data_funs.rs`) **(verified)**; `[reg-reg]` adds; sub-register masks use `|` instead of `&`; `mov al, x` does not mask to 8 bits.
-- [ ] E0.4 Make `tick` return the instruction's result so `Finish` ends the program with its exit code.
-- [ ] E0.5 Golden tests: each example assembles to known bytes and runs to a known output; one test per fixed bug. Fix the two `efepages` bugs with tests: multi-page reads and writes ending on a page boundary lose the last page, and a zero-length read at a page boundary returns a whole page **(both verified)**.
-- [ ] E0.6 Stop the CLI writing `./out.efec` on every run (make it `-o <file>`), and let it run a precompiled file.
+  _Done:_ all listed bugs fixed; labels use a fixed 4-byte encoding so no size guessing remains; undefined/duplicate symbols are `ParseErr` with a position. Added the `db` string system and `NAME.len` (see `docs/e0-design.md`).
+- [x] E0.3 Fix the decoder bugs: first static inside a pointer reads one byte instead of `len` (`data_funs.rs`) **(verified)**; `[reg-reg]` adds; sub-register masks use `|` instead of `&`; `mov al, x` does not mask to 8 bits.
+  _Done:_ all four fixed with lib tests; also `lea` and `js` now assemble and run, add/sub wrap.
+- [x] E0.4 Make `tick` return the instruction's result so `Finish` ends the program with its exit code.
+  _Done:_ `tick` returns a `TickSignal`; `run`/`run_with_limit` return `RunResult::{Finished(u8), EndOfProgram, LimitReached, Fault}`; Finish ends the program with its code, and invalid bytecode or syscalls are faults instead of panics.
+- [x] E0.5 Golden tests: each example assembles to known bytes and runs to a known output; one test per fixed bug. Fix the two `efepages` bugs with tests: multi-page reads and writes ending on a page boundary lose the last page, and a zero-length read at a page boundary returns a whole page **(both verified)**.
+  _Done:_ `tests/examples.rs` runs hello, strings, jumps, recursion, call and heap to exact output and `RunResult`; `tests/{sound,control_flow,strings,errors,cli}.rs` and the lib tests cover each fixed bug. Byte-exact golden files of the assembled output are not stored, only behaviour is asserted. The `efepages` boundary bugs are fixed (`cargo test -p efepages`).
+- [x] E0.6 Stop the CLI writing `./out.efec` on every run (make it `-o <file>`), and let it run a precompiled file.
+  _Done:_ `-o <file>` writes the bytecode and does not run; `.efec` files run directly; no `./out.efec` any more; missing file/assembly error exits 2, runtime fault 3 (`tests/cli.rs`).
 
 ### E1: v1 core VM (embeddable, safe)
-- [ ] E1.1 **Specification first.** One document: value types (`i32`, `i64`, `f32`, `f64`), registers, instruction list with exact semantics, traps, calling convention, module layout. Everything after this implements it.
-- [ ] E1.2 `Vm`, `Module`, `Instance` types that own their data (indices instead of raw pointers; safe to move and store in a world). No `unsafe` in the interpreter.
-- [ ] E1.3 Linear memory: one little-endian `Vec<u8>` per instance with a configurable maximum, bounds-checked loads and stores, `memory.size` / `memory.grow`. `efepages` stays available as an optional sparse backend, not the default.
-- [ ] E1.4 Pre-decoded execution: decode once at load into an instruction array; the loop runs over that array. Target: under 10 ns per instruction in release.
-- [ ] E1.5 `run(budget) -> Exit`: `Halt(code)`, `Yield`, `Budget` (resumable), `Trap(kind)`. Typed traps: out-of-bounds, division by zero, stack overflow, unreachable, bad host call.
-- [ ] E1.6 Complete integer and control set: mul, signed and unsigned div and rem, shifts, rotates, not, neg, count-leading/trailing-zeros, popcount, sign and zero extension, signed and unsigned comparisons, conditional select, jump table, indirect call through a function table. Arithmetic sets no hidden flags; comparisons produce a value or feed the branch directly.
-- [ ] E1.7 Floating point: `f32` and `f64` arithmetic, comparisons and conversions.
+_Done 2026-11-15 in the new crate `crates/efevm` (spec: `crates/efevm/SPEC.md`): 372 tests, about 3.1 ns per instruction. E1.8 stays open until CI checks wasm32 (a local check passes)._
+- [x] E1.1 **Specification first.** One document: value types (`i32`, `i64`, `f32`, `f64`), registers, instruction list with exact semantics, traps, calling convention, module layout. Everything after this implements it.
+- [x] E1.2 `Vm`, `Module`, `Instance` types that own their data (indices instead of raw pointers; safe to move and store in a world). No `unsafe` in the interpreter.
+- [x] E1.3 Linear memory: one little-endian `Vec<u8>` per instance with a configurable maximum, bounds-checked loads and stores, `memory.size` / `memory.grow`. `efepages` stays available as an optional sparse backend, not the default.
+- [x] E1.4 Pre-decoded execution: decode once at load into an instruction array; the loop runs over that array. Target: under 10 ns per instruction in release.
+- [x] E1.5 `run(budget) -> Exit`: `Halt(code)`, `Yield`, `Budget` (resumable), `Trap(kind)`. Typed traps: out-of-bounds, division by zero, stack overflow, unreachable, bad host call.
+- [x] E1.6 Complete integer and control set: mul, signed and unsigned div and rem, shifts, rotates, not, neg, count-leading/trailing-zeros, popcount, sign and zero extension, signed and unsigned comparisons, conditional select, jump table, indirect call through a function table. Arithmetic sets no hidden flags; comparisons produce a value or feed the branch directly.
+- [x] E1.7 Floating point: `f32` and `f64` arithmetic, comparisons and conversions.
 - [ ] E1.8 Builds and passes its tests on `wasm32-unknown-unknown`; CI checks it.
-- [ ] E1.9 Tests: instruction-level tests for every opcode, trap tests, a budget/resume test, and a fuzz target that feeds random bytes to the loader and must never panic.
+- [x] E1.9 Tests: instruction-level tests for every opcode, trap tests, a budget/resume test, and a fuzz target that feeds random bytes to the loader and must never panic.
 
 ### E2: Module format and assembler v2
 - [ ] E2.1 Binary module format (`.efec` v1): magic, version, section table, checksum. A loader with a verifier: jump targets, register and type use, stack depth per function, import signatures.

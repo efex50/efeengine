@@ -1,172 +1,165 @@
 use std::collections::HashMap;
 
-use num_traits::ToPrimitive;
+use crate::compiler::ast::lexer::LineColumn;
+use crate::ops::OpCodes;
 
-use crate::{funs::trim_zeroes, instruction::Instruction, ops::OpCodes};
+use super::nasm_funs::{static_bytes, static_fixed};
+use super::{AsmInner, AsmInstruction, AsmItem, AsmOperand, Imm, ParseErr, PreCompile};
 
-use super::PreCompile;
+/// Jump and call instructions: their operand is a label (or a register).
+pub(crate) fn is_jump(op: &OpCodes) -> bool {
+    matches!(
+        op,
+        OpCodes::Jmp
+            | OpCodes::Je
+            | OpCodes::Jne
+            | OpCodes::Jgt
+            | OpCodes::Jlt
+            | OpCodes::Jle
+            | OpCodes::Jge
+            | OpCodes::Jz
+            | OpCodes::Jnz
+            | OpCodes::Js
+            | OpCodes::Call
+    )
+}
 
 #[derive(Debug)]
-enum Objects {
-    Instruction {
-        i: Instruction,
-        len: usize,
-    },
-    Jump {
-        /// type is like jmp, jne, je
-        type_: OpCodes,
-        label: String,
-    },
-    AfterJump {
-        type_: OpCodes,
-        label: String,
-        /// size of the jump instruction
-        jump: Vec<u8>,
-    },
-    Label(String),
-    AfterLabel(String, usize),
+enum SymKind {
+    /// address inside the code
+    Code(usize),
+    /// offset inside the data block and its length
+    Data { off: usize, len: usize },
 }
+
+type Resolver<'a> = &'a dyn Fn(&str, bool, &LineColumn) -> Result<u32, ParseErr>;
+
+fn emit_imm(imm: &Imm, resolve: Resolver, out: &mut Vec<u8>) -> Result<(), ParseErr> {
+    match imm {
+        Imm::Num(n) => out.extend(static_bytes(*n)),
+        Imm::Sym { name, len, pos } => out.extend(static_fixed(resolve(name, *len, pos)?)),
+    }
+    Ok(())
+}
+
+fn emit_item(item: &AsmItem, resolve: Resolver, out: &mut Vec<u8>) -> Result<(), ParseErr> {
+    match item {
+        AsmItem::Reg(r) => out.push(r.to_operand() as u8),
+        AsmItem::Imm(i) => emit_imm(i, resolve, out)?,
+    }
+    Ok(())
+}
+
+fn emit_operand(op: &AsmOperand, resolve: Resolver, out: &mut Vec<u8>) -> Result<(), ParseErr> {
+    match op {
+        AsmOperand::Null => {}
+        AsmOperand::Reg(r) => out.push(r.to_operand() as u8),
+        AsmOperand::Imm(i) => emit_imm(i, resolve, out)?,
+        AsmOperand::Ptr(tag, inner) => {
+            out.push(tag.clone() as u8);
+            match inner {
+                AsmInner::One(a) => emit_item(a, resolve, out)?,
+                AsmInner::Sum(a, b) | AsmInner::Sub(a, b) => {
+                    emit_item(a, resolve, out)?;
+                    out.push(if matches!(inner, AsmInner::Sum(..)) { b'+' } else { b'-' });
+                    emit_item(b, resolve, out)?;
+                }
+            }
+            out.push(tag.clone() as u8);
+        }
+    }
+    Ok(())
+}
+
+fn emit_instruction(i: &AsmInstruction, resolve: Resolver) -> Result<Vec<u8>, ParseErr> {
+    let mut out = vec![i.opcode.clone() as u8];
+    emit_operand(&i.left, resolve, &mut out)?;
+    emit_operand(&i.right, resolve, &mut out)?;
+    Ok(out)
+}
+
+/// The assembled program: after the sizing pass every symbol address is known.
 #[derive(Debug)]
-pub struct Data {
-    v: Vec<Objects>,
-    labels: HashMap<String, usize>,
+pub(crate) struct Data {
+    code: Vec<AsmInstruction>,
+    symbols: HashMap<String, SymKind>,
+    code_len: usize,
+    data: Vec<u8>,
+    has_data: bool,
 }
+
 impl Data {
-    pub(crate) fn from_pre_compile(a: Vec<PreCompile>) -> Self {
-        let mut v: Vec<Objects> = Vec::new();
-        let mut labels = HashMap::new();
+    /// Sizing pass: instruction sizes do not depend on symbol values, so one walk
+    /// gives the address of every label and the offset of every data definition.
+    pub(crate) fn from_pre_compile(a: Vec<PreCompile>) -> Result<Self, ParseErr> {
+        let mut code = Vec::new();
+        let mut symbols: HashMap<String, SymKind> = HashMap::new();
+        let mut cur = 0usize;
+        let mut data = Vec::new();
+        let mut has_data = false;
+
+        let dummy = |_: &str, _: bool, _: &LineColumn| Ok(0u32);
         for x in a {
             match x {
-                PreCompile::I(inst) => match inst.opcode {
-                    OpCodes::Jmp
-                    | OpCodes::Je
-                    | OpCodes::Jne
-                    | OpCodes::Jgt
-                    | OpCodes::Jlt
-                    | OpCodes::Jle
-                    | OpCodes::Jge
-                    | OpCodes::Call
-                    | OpCodes::Jz
-                    | OpCodes::Jnz => {
-                        match inst.operandl {
-                            crate::nasm_efe::Operands::Label(l) => {
-                                v.push(Objects::Jump {
-                                    type_: inst.opcode,
-                                    label: l,
-                                });
-                            }
-                            _ => todo!(),
-                        };
+                PreCompile::I(inst) => {
+                    cur += emit_instruction(&inst, &dummy)?.len();
+                    code.push(inst);
+                }
+                PreCompile::L(name, pos) => {
+                    if symbols.contains_key(&name) {
+                        return Err(ParseErr::DuplicateSymbol(name, pos));
                     }
-                    _ => {
-                        let len = inst.get_len();
-                        v.push(Objects::Instruction { i: inst, len: len });
+                    symbols.insert(name, SymKind::Code(cur));
+                }
+                PreCompile::D(def) => {
+                    if symbols.contains_key(&def.name) {
+                        return Err(ParseErr::DuplicateSymbol(def.name, def.pos));
                     }
-                },
-                PreCompile::L(l) => {
-                    labels.insert(l.clone(), 0);
-                    v.push(Objects::Label(l))
+                    symbols.insert(
+                        def.name,
+                        SymKind::Data { off: data.len(), len: def.bytes.len() },
+                    );
+                    data.extend(def.bytes);
+                    has_data = true;
                 }
             }
         }
 
-        Self { v, labels }
-    }
-    pub fn r1(&mut self) {
-        let mut current_len = 0;
-        for x in &mut self.v {
-            match x {
-                Objects::Instruction { i: _, len } => {
-                    current_len += *len;
-                }
-                Objects::Jump { type_: _, label: _ } => {
-                    current_len += 2;
-                }
-                Objects::Label(l) => {
-                    self.labels.insert(l.to_string(), current_len);
-                    *x = Objects::AfterLabel(l.clone(), current_len);
-                }
-                _ => todo!(),
-            }
-        }
-    }
-    pub fn r2(&mut self) {
-        let mut current_len = 0;
-        for x in &mut self.v {
-            match x {
-                Objects::Instruction { i: _i, len } => {
-                    current_len += *len;
-                }
-                Objects::Jump { type_, label } => {
-                    let labeld = self.labels.get(label).unwrap();
-                    let mut staticval = Vec::new();
-                    staticval.push(type_.to_u8().unwrap());
-                    staticval.push(0);
-                    let mut addr = trim_zeroes(labeld.to_be_bytes().to_vec());
-                    staticval.push(addr.len() as u8);
-                    staticval.append(&mut addr);
-                    current_len += staticval.len();
-                    *x = Objects::AfterJump {
-                        type_: type_.clone(),
-                        label: label.clone(),
-                        jump: staticval,
-                    }
-                }
-                Objects::AfterLabel(l, _addr) => {
-                    let s = l.clone();
-                    *x = Objects::AfterLabel(s.clone(), current_len);
-                    self.labels.insert(s, current_len);
-                }
-                Objects::AfterJump {
-                    type_,
-                    label,
-                    jump: _jump,
-                } => {
-                    let labeld = self.labels.get(label).unwrap();
-                    let mut staticval = Vec::new();
-                    staticval.push(type_.to_u8().unwrap());
-                    staticval.push(0);
-                    let mut addr = trim_zeroes(labeld.to_be_bytes().to_vec());
-                    staticval.push(addr.len() as u8);
-                    staticval.append(&mut addr);
-                    current_len += staticval.len();
-                    *x = Objects::AfterJump {
-                        type_: type_.clone(),
-                        label: label.clone(),
-                        jump: staticval,
-                    }
-                }
-                _ => {
-                    println!("panic {:?}", x);
-                    panic!()
-                }
-            }
-        }
+        Ok(Self { code, symbols, code_len: cur, data, has_data })
     }
 
-    pub fn to_program(&self) -> Vec<u8> {
-        let mut p = Vec::new();
-
-        for x in &self.v {
-            match x {
-                Objects::Instruction { i, len: _ } => {
-                    let mut px = i.get_program();
-                    p.append(&mut px);
+    fn resolve(&self, name: &str, len: bool, pos: &LineColumn) -> Result<u32, ParseErr> {
+        let value = match self.symbols.get(name) {
+            None => return Err(ParseErr::UndefinedSymbol(name.to_string(), pos.clone())),
+            Some(SymKind::Code(addr)) => {
+                if len {
+                    return Err(ParseErr::UndefinedSymbol(format!("{name}.len"), pos.clone()));
                 }
-                Objects::Jump { type_: _, label: _ } => todo!(),
-                Objects::AfterJump {
-                    type_: _,
-                    label: _,
-                    jump,
-                } => {
-                    let mut px = jump.clone();
-                    p.append(&mut px);
-                }
-                Objects::Label(_) => (),
-                Objects::AfterLabel(_, _) => (),
+                *addr
             }
-        }
+            Some(SymKind::Data { off, len: l }) => {
+                if len {
+                    *l
+                } else {
+                    self.code_len + 1 + off
+                }
+            }
+        };
+        u32::try_from(value).map_err(|_| ParseErr::ProgramTooLarge)
+    }
 
-        p
+    /// Emit pass.
+    pub(crate) fn to_program(&self) -> Result<Vec<u8>, ParseErr> {
+        let resolver = |n: &str, l: bool, p: &LineColumn| self.resolve(n, l, p);
+        let mut p = Vec::with_capacity(self.code_len + 1 + self.data.len());
+        for i in &self.code {
+            p.extend(emit_instruction(i, &resolver)?);
+        }
+        debug_assert_eq!(p.len(), self.code_len);
+        if self.has_data {
+            p.push(0);
+            p.extend_from_slice(&self.data);
+        }
+        Ok(p)
     }
 }

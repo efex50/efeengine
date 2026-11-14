@@ -1,0 +1,65 @@
+; strings.efe - the string system: `db`, NAME, NAME.len, BYTEPTR [msg] and [msg+reg].
+; Run from the crate dir:  cargo run -q -p efescript -- examples/strings.efe
+; Expected output (5 lines):
+;   hello
+;   h-e-l-l-o-
+;   104
+;   çay
+;   4
+; Exit code: 0
+;
+; `db` definitions may appear anywhere; the data is placed after the code.
+; `NAME` is the address of the first byte, `NAME.len` the length in bytes
+; (the UTF-8 string "çay" has 3 characters but 4 bytes).
+
+greeting db "hello"
+dash     db "-"
+tail     db "çay"
+
+; 1. print the whole string
+mov ra, 2                  ; Println
+mov rb, greeting
+mov rc, greeting.len
+syscall
+
+; 2. print it one byte at a time, each followed by a dash
+mov r1, 0                  ; index
+label _loop
+cmp r1, greeting.len
+je _done
+mov rb, 0
+mov bl, BYTEPTR [greeting+r1]   ; byte access with [symbol+register]
+mov ra, 0                  ; Printchar(rb)
+syscall
+mov ra, 0
+mov rb, 45                 ; '-'
+syscall
+add64 r1, 1
+jmp _loop
+label _done
+mov ra, 0
+mov rb, 10                 ; newline
+syscall
+
+; 3. the first byte through BYTEPTR [greeting] ('h' = 104) as a number
+mov rb, 0
+mov bl, BYTEPTR [greeting]
+mov ra, 3                  ; NumToString: rb = number, rc = 0 unsigned, rd = 0 decimal
+mov rc, 0
+mov rd, 0
+syscall                    ; returns rb = pointer, rc = length
+mov ra, 2
+syscall
+
+; 4. a non-ASCII string and its length in bytes
+mov ra, 2
+mov rb, tail
+mov rc, tail.len
+syscall                    ; prints: çay
+mov rb, tail.len           ; NAME.len is an ordinary immediate
+mov rc, 0
+mov rd, 0
+mov ra, 3
+syscall
+mov ra, 2
+syscall                    ; prints: 4

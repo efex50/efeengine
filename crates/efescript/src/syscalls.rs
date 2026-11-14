@@ -139,6 +139,19 @@ pub enum SysCalls{
     /// 
     Flush,
 
+    /// plays a sound file (needs the `audio` cargo feature, otherwise it fails)
+    ///
+    /// takes:
+    ///
+    /// rb -> pointer of the path
+    ///
+    /// rc -> length of the path
+    ///
+    /// returns:
+    ///
+    /// ra -> 0 = ok, 1 = failed (the error is printed to stderr)
+    PlaySound,
+
     /// exits the program
     /// 
     /// takes:

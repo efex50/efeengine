@@ -63,9 +63,7 @@ let untouched = mem.read(1_000_000, 4); // zeros, nothing allocated
 ## Status and known gaps
 - `set_max_pages` is `todo!()`: `crates/efepages/src/page/init.rs:14-16`. Calling it panics.
 - `create_new_page` has an inverted check: `init.rs:21` tests `max < self.page.len()` and should test `len < max`. The "Maximum pages reached" panic at `init.rs:23` is effectively unreachable today because `max_pages` is always `None` (no safe way to set it).
-- Boundary bug in `write`: when a write ends exactly on a page boundary and spans more than one page, the final chunk is computed as `tail % pagesize == 0`, so the last page's data is dropped (`funs.rs:79-81`). Verified: `write(0, vec![7; 2*PAGE_SIZE])` leaves page 1 all zeros.
-- Same boundary bug in `read`: `read(0, 2*PAGE_SIZE)` returns only `PAGE_SIZE` bytes (`funs.rs:124-125`, verified).
-- Zero-length operations at a page boundary: `write(PAGE_SIZE, vec![])` panics with a slice index error (`funs.rs:71`, slice `write[counter..counter_end]`; verified). `read(PAGE_SIZE, 0)` returns `PAGE_SIZE` zero bytes instead of an empty vector (`funs.rs:110-134`; verified).
+- Page-boundary reads and writes (multi-page ranges ending on a boundary, zero-length operations at a boundary) were buggy in `read`/`write`; this is fixed and covered by tests (`cargo test -p efepages` passes with 18 tests).
 - No free / unmap of pages; memory only grows.
 - `read` and `write` have no bounds on address arithmetic beyond `usize` overflow (`start + len` may overflow for huge values).
 - Unit tests in `src/lib.rs` are mostly `println!` checks, with a single assertion (`pt8`); they do not check the boundary cases above.

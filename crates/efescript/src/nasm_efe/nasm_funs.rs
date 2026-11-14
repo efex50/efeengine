@@ -1,105 +1,99 @@
-use num_traits::ToPrimitive;
+use crate::{
+    compiler::ast::lexer::{LexerTokens, LineColumn},
+    funs::trim_zeroes,
+    instruction::{Operands, PtrInner, Registers},
+    ops::OpCodes,
+};
 
-use crate::{compiler::ast::lexer::{LexerTokenType, LexerTokens}, funs::{as_usize, trim_zeroes}, instruction::{Operands, PtrInner, Registers}, ops::OpCodes};
-
-use super::{OperandType, ParseErr};
+use super::{AsmInner, AsmItem, Imm, OperandType, ParseErr};
 
 
-
-enum PtrInnerState{
-    Single,
-    /// true = Summary, else Extraction
-    SumOrExt(bool),
+/// Static operand with the usual trimmed encoding: `00 len bytes..` (0 = `00 00`).
+pub(crate) fn static_bytes(v: u64) -> Vec<u8> {
+    let l = trim_zeroes(v.to_be_bytes().to_vec());
+    let mut out = vec![OperandType::Static as u8, l.len() as u8];
+    out.extend(l);
+    out
 }
 
-enum PtrInnerData{
-    Reg(Registers),
-    Num(usize),
+/// Static operand for a symbol: fixed 4 byte big-endian value, `00 04 b3 b2 b1 b0`.
+pub(crate) fn static_fixed(v: u32) -> Vec<u8> {
+    let mut out = vec![OperandType::Static as u8, 4];
+    out.extend_from_slice(&v.to_be_bytes());
+    out
+}
+
+fn ptr_inner_bytes(inner: &PtrInner) -> Vec<u8> {
+    let reg = |r: &Registers| vec![r.to_operand() as u8];
+    let num = |n: &usize| static_bytes(*n as u64);
+    let mut out = Vec::new();
+    match inner {
+        PtrInner::Static(s) => out.extend(num(s)),
+        PtrInner::Reg(r) => out.extend(reg(r)),
+        PtrInner::Sum(r, s) => {
+            out.extend(reg(r));
+            out.push(b'+');
+            out.extend(num(s));
+        }
+        PtrInner::Ext(r, s) => {
+            out.extend(reg(r));
+            out.push(b'-');
+            out.extend(num(s));
+        }
+        PtrInner::Extr(s, r) => {
+            out.extend(num(s));
+            out.push(b'-');
+            out.extend(reg(r));
+        }
+        PtrInner::SumReg(a, b) => {
+            out.extend(reg(a));
+            out.push(b'+');
+            out.extend(reg(b));
+        }
+        PtrInner::ExtReg(a, b) => {
+            out.extend(reg(a));
+            out.push(b'-');
+            out.extend(reg(b));
+        }
+    }
+    out
+}
+
+fn no_symbols(pos: &LineColumn) -> ParseErr {
+    ParseErr::WrongPtrInner("symbols are not allowed here".to_string(), pos.clone())
+}
+
+/// register or plain number; symbols are an error (`PtrInner` cannot hold them)
+fn plain_item(i: AsmItem) -> Result<Result<Registers, u64>, ParseErr> {
+    match i {
+        AsmItem::Reg(r) => Ok(Ok(r)),
+        AsmItem::Imm(Imm::Num(n)) => Ok(Err(n)),
+        AsmItem::Imm(Imm::Sym { pos, .. }) => Err(no_symbols(&pos)),
+    }
 }
 
 impl PtrInner {
-    pub fn from_tokens(t:Vec<LexerTokens>) -> Result<Self,ParseErr>{
-        // efecalc ile tekrardan düzenlenip sadeleştirilmesi gerek
-        let state = if t.len() == 1 {
-            PtrInnerState::Single
-        }else if t[1].token_type == LexerTokenType::Plus {
-            PtrInnerState::SumOrExt(true)
-        }else if t[1].token_type == LexerTokenType::Minus{
-            PtrInnerState::SumOrExt(false)
-        }else{
-            return Err(ParseErr::WrongPtrInner("Undefined operand in ptrinner".to_string(),t[1].pos.start.clone()));
-        };
-        
-        match state {
-            PtrInnerState::Single => {
-                let tag = t[0].token_type.get_inner_str().unwrap();
-                match Registers::from_str(tag){
-                    Some(so) => return  Ok(Self::Reg(so)),
-                    None => {
-                        let num = as_usize(tag);
-                        return num
-                            .map(|a| Self::Static(a))
-                            .map_err(|_| ParseErr::WrongPtrInner("Error while parsing the number".to_string(),t[0].pos.start.clone()))
-                            ;
-                    },
-                };
-    
-
+    /// Builds a pointer inner from the tokens between `[` and `]`.
+    pub fn from_tokens(t: Vec<LexerTokens>) -> Result<Self, ParseErr> {
+        let inner = super::parse_ptr_inner_tokens(t)?;
+        Ok(match inner {
+            AsmInner::One(a) => match plain_item(a)? {
+                Ok(r) => PtrInner::Reg(r),
+                Err(n) => PtrInner::Static(n as usize),
             },
-            PtrInnerState::SumOrExt(_type) => {
-
-
-                // yeni sistem
-                let token_left = if let LexerTokenType::Ident(id) = &t[0].token_type {
-                    let reg = if let Some(a) = Registers::from_str(id) {
-                        a
-                    }else {
-                        return Err(ParseErr::WrongPtrInner("Undefined register".to_string(),t[0].pos.start.clone()));
-                    };
-                    PtrInnerData::Reg(reg)
-                } else if let LexerTokenType::Number(num) = &t[0].token_type {
-                    let number = *num as usize;
-                    PtrInnerData::Num(number)
-                }else {
-                    panic!("ptrinner value is not an register or number")
-                };
-
-                let token_right = if let LexerTokenType::Ident(id) = &t[0].token_type {
-                    let reg = if let Some(a) = Registers::from_str(id) {
-                        a
-                    }else {
-                        return Err(ParseErr::WrongPtrInner("Undefined register".to_string(),t[0].pos.start.clone()));
-                    };
-                    PtrInnerData::Reg(reg)
-                } else if let LexerTokenType::Number(num) = &t[0].token_type {
-                    let number = *num as usize;
-                    PtrInnerData::Num(number)
-                }else {
-                    panic!("ptrinner value is not an register or number")
-                };
-                if _type {
-                    //sum type
-                    match (token_left,token_right) {
-                        (PtrInnerData::Reg(registers1), PtrInnerData::Reg(registers2)) => return Ok(Self::SumReg(registers1, registers2)),
-                        (PtrInnerData::Reg(registers), PtrInnerData::Num(num)) |
-                        (PtrInnerData::Num(num), PtrInnerData::Reg(registers)) => return Ok(PtrInner::Sum(registers, num)),
-                        (PtrInnerData::Num(num1), PtrInnerData::Num(num2)) => return Ok(PtrInner::Static(num1 + num2)),
-                    }
-                }else {
-                    // ext type
-                    match (token_left,token_right) {
-                        (PtrInnerData::Reg(registers1), PtrInnerData::Reg(registers2)) => return Ok(Self::ExtReg(registers1, registers2)),
-                        (PtrInnerData::Reg(registers), PtrInnerData::Num(num)) => return Ok(PtrInner::Ext(registers, num)),
-                        (PtrInnerData::Num(num), PtrInnerData::Reg(registers)) => return Ok(PtrInner::Extr(num, registers)),
-                        (PtrInnerData::Num(num1), PtrInnerData::Num(num2)) => return Ok(PtrInner::Static(num1 - num2)),
-                    }
-                }
-
+            AsmInner::Sum(a, b) => match (plain_item(a)?, plain_item(b)?) {
+                (Ok(r1), Ok(r2)) => PtrInner::SumReg(r1, r2),
+                (Ok(r), Err(n)) | (Err(n), Ok(r)) => PtrInner::Sum(r, n as usize),
+                (Err(n1), Err(n2)) => PtrInner::Static(n1.wrapping_add(n2) as usize),
             },
-        }
+            AsmInner::Sub(a, b) => match (plain_item(a)?, plain_item(b)?) {
+                (Ok(r1), Ok(r2)) => PtrInner::ExtReg(r1, r2),
+                (Ok(r), Err(n)) => PtrInner::Ext(r, n as usize),
+                (Err(n), Ok(r)) => PtrInner::Extr(n as usize, r),
+                (Err(n1), Err(n2)) => PtrInner::Static(n1.wrapping_sub(n2) as usize),
+            },
+        })
     }
-
-
 }
 
 impl Registers {
@@ -214,338 +208,43 @@ pub(crate) fn parse_register_type_to_op(a:OperandType) -> Option<Operands>{
 
 impl Operands{
     pub fn to_int(&self) -> Vec<u8>{
+        let typed = |tag: OperandType, inner: &PtrInner| {
+            // pointers end with the same operand code they start with
+            let mut v = vec![tag.clone() as u8];
+            v.extend(ptr_inner_bytes(inner));
+            v.push(tag as u8);
+            v
+        };
+        let reg = |t: OperandType| vec![t as u8];
         match self {
-            Operands::Static(l) => {
-                let mut v = vec![OperandType::Static.to_u8().unwrap()];
-                let mut l = trim_zeroes(l.to_be_bytes().to_vec());
-                v.push(l.len() as u8);
-                v.append(&mut l);
-                v
-            },
-            // Operands::String(l)=> {
-            //     let mut v = vec![OperandType::String.to_u8().unwrap()];
-            //     v.push(l.len() as u8);
-            //     let mut l = l.clone();
-            //     v.append(&mut l);
-            //     v
-            // },
-            Operands::RA => vec![OperandType::RA.to_u8().unwrap()],
-            Operands::RB => vec![OperandType::RB.to_u8().unwrap()],
-            Operands::RC => vec![OperandType::RC.to_u8().unwrap()],
-            Operands::RD => vec![OperandType::RD.to_u8().unwrap()],
-            Operands::RBP => vec![OperandType::RBP.to_u8().unwrap()],
-            Operands::RSP => vec![OperandType::RSP.to_u8().unwrap()],
-            Operands::R1  => vec![OperandType::R1.to_u8().unwrap()],
-            Operands::R2  => vec![OperandType::R2.to_u8().unwrap()],
-            Operands::R3  => vec![OperandType::R3.to_u8().unwrap()],
-            Operands::R4  => vec![OperandType::R4.to_u8().unwrap()],
-            Operands::R5  => vec![OperandType::R5.to_u8().unwrap()],
-            Operands::R6  => vec![OperandType::R6.to_u8().unwrap()],
-            Operands::AL  => vec![OperandType::AL.to_u8().unwrap()],
-            Operands::AH  => vec![OperandType::AH.to_u8().unwrap()],
-            Operands::BL  => vec![OperandType::BL.to_u8().unwrap()],
-            Operands::BH  => vec![OperandType::BH.to_u8().unwrap()],
-            Operands::CL  => vec![OperandType::CL.to_u8().unwrap()],
-            Operands::CH  => vec![OperandType::CH.to_u8().unwrap()],
-            Operands::DL  => vec![OperandType::DL.to_u8().unwrap()],
-            Operands::DH  => vec![OperandType::DH.to_u8().unwrap()],
-
-            Operands::Pointer(a) =>{
-                let mut v = vec![OperandType::Pointer.to_u8().unwrap()];
-                match a {
-                    PtrInner::Static(s) => {
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-                    },
-                    PtrInner::Reg(registers) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                    },
-                    PtrInner::Sum(registers, s) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'+');
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-
-                    },
-                    PtrInner::Ext(registers, s) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'-');
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-
-                    },
-                    PtrInner::Extr(s, registers) => {
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-                        v.push(b'-');
-                        v.push(registers.to_operand().to_u8().unwrap());
-
-                    },
-                    PtrInner::SumReg(registers, registers1) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'+');
-                        v.push(registers1.to_operand().to_u8().unwrap());
-
-                    },
-                    PtrInner::ExtReg(registers, registers1) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'-');
-                        v.push(registers1.to_operand().to_u8().unwrap());
-                    },
-                }
-                v.push(OperandType::BYTEPTR.to_u8().unwrap());
-                v
-            },
-            // pointers end with same operand code
-
-            Operands::BYTEPTR( _ptr_inner) => {
-                let mut v = vec![OperandType::BYTEPTR.to_u8().unwrap()];
-                match _ptr_inner {
-                    PtrInner::Static(s) => {
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-                    },
-                    PtrInner::Reg(registers) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                    },
-                    PtrInner::Sum(registers, s) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'+');
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-
-                    },
-                    PtrInner::Ext(registers, s) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'-');
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-
-                    },
-                    PtrInner::Extr(s, registers) => {
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-                        v.push(b'-');
-                        v.push(registers.to_operand().to_u8().unwrap());
-
-                    },
-                    PtrInner::SumReg(registers, registers1) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'+');
-                        v.push(registers1.to_operand().to_u8().unwrap());
-
-                    },
-                    PtrInner::ExtReg(registers, registers1) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'-');
-                        v.push(registers1.to_operand().to_u8().unwrap());
-                    },
-                }
-                v.push(OperandType::BYTEPTR.to_u8().unwrap());
-                v
-            },
-            // pointers end with same operand code
-            Operands::WORDPTR( _ptr_inner) => {
-                let mut v = vec![OperandType::WORDPTR.to_u8().unwrap()];
-                match _ptr_inner {
-                    PtrInner::Static(s) => {
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-                    },
-                    PtrInner::Reg(registers) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                    },
-                    PtrInner::Sum(registers, s) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'+');
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-
-                    },
-                    PtrInner::Ext(registers, s) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'-');
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-
-                    },
-                    PtrInner::Extr(s, registers) => {
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-                        v.push(b'-');
-                        v.push(registers.to_operand().to_u8().unwrap());
-
-                    },
-                    PtrInner::SumReg(registers, registers1) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'+');
-                        v.push(registers1.to_operand().to_u8().unwrap());
-
-                    },
-                    PtrInner::ExtReg(registers, registers1) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'-');
-                        v.push(registers1.to_operand().to_u8().unwrap());
-                    },
-                }
-                v.push(OperandType::WORDPTR.to_u8().unwrap());
-                v
-            },
-            Operands::DWORDPTR( _ptr_inner) => {
-                let mut v = vec![OperandType::DWORDPTR.to_u8().unwrap()];
-                match _ptr_inner {
-                    PtrInner::Static(s) => {
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-                    },
-                    PtrInner::Reg(registers) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                    },
-                    PtrInner::Sum(registers, s) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'+');
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-
-                    },
-                    PtrInner::Ext(registers, s) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'-');
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-
-                    },
-                    PtrInner::Extr(s, registers) => {
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-                        v.push(b'-');
-                        v.push(registers.to_operand().to_u8().unwrap());
-
-                    },
-                    PtrInner::SumReg(registers, registers1) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'+');
-                        v.push(registers1.to_operand().to_u8().unwrap());
-
-                    },
-                    PtrInner::ExtReg(registers, registers1) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'-');
-                        v.push(registers1.to_operand().to_u8().unwrap());
-                    },
-                }
-                v.push(OperandType::DWORDPTR.to_u8().unwrap());
-                v
-            },
-            Operands::QWORDPTR( _ptr_inner) => {
-                let mut v = vec![OperandType::QWORDPTR.to_u8().unwrap()];
-                match _ptr_inner {
-                    PtrInner::Static(s) => {
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-                    },
-                    PtrInner::Reg(registers) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                    },
-                    PtrInner::Sum(registers, s) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'+');
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-
-                    },
-                    PtrInner::Ext(registers, s) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'-');
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-
-                    },
-                    PtrInner::Extr(s, registers) => {
-                        let mut l = trim_zeroes(s.to_be_bytes().to_vec());
-                        // static opcode
-                        v.push(OperandType::Static.to_u8().unwrap());
-                        v.push(l.len() as u8);
-                        v.append(&mut l);
-                        v.push(b'-');
-                        v.push(registers.to_operand().to_u8().unwrap());
-                    },
-                    PtrInner::SumReg(registers, registers1) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'+');
-                        v.push(registers1.to_operand().to_u8().unwrap());
-
-                    },
-                    PtrInner::ExtReg(registers, registers1) => {
-                        v.push(registers.to_operand().to_u8().unwrap());
-                        v.push(b'-');
-                        v.push(registers1.to_operand().to_u8().unwrap());
-                    },
-                }
-                v.push(OperandType::QWORDPTR.to_u8().unwrap());
-                v
-            },
-            Operands::Null => vec![OperandType::NULL.to_u8().unwrap()],
-            Operands::Label(_) => vec![OperandType::NULL.to_u8().unwrap()],
+            Operands::Static(l) => static_bytes(*l as u64),
+            Operands::RA => reg(OperandType::RA),
+            Operands::RB => reg(OperandType::RB),
+            Operands::RC => reg(OperandType::RC),
+            Operands::RD => reg(OperandType::RD),
+            Operands::RBP => reg(OperandType::RBP),
+            Operands::RSP => reg(OperandType::RSP),
+            Operands::R1 => reg(OperandType::R1),
+            Operands::R2 => reg(OperandType::R2),
+            Operands::R3 => reg(OperandType::R3),
+            Operands::R4 => reg(OperandType::R4),
+            Operands::R5 => reg(OperandType::R5),
+            Operands::R6 => reg(OperandType::R6),
+            Operands::AL => reg(OperandType::AL),
+            Operands::AH => reg(OperandType::AH),
+            Operands::BL => reg(OperandType::BL),
+            Operands::BH => reg(OperandType::BH),
+            Operands::CL => reg(OperandType::CL),
+            Operands::CH => reg(OperandType::CH),
+            Operands::DL => reg(OperandType::DL),
+            Operands::DH => reg(OperandType::DH),
+            Operands::Pointer(a) => typed(OperandType::Pointer, a),
+            Operands::BYTEPTR(a) => typed(OperandType::BYTEPTR, a),
+            Operands::WORDPTR(a) => typed(OperandType::WORDPTR, a),
+            Operands::DWORDPTR(a) => typed(OperandType::DWORDPTR, a),
+            Operands::QWORDPTR(a) => typed(OperandType::QWORDPTR, a),
+            Operands::Null => reg(OperandType::NULL),
+            Operands::Label(_) => reg(OperandType::NULL),
         }
     }
 }
@@ -614,16 +313,14 @@ pub fn parse_opcode<S:Into<String>>(a:S) -> Option<OpCodes>{
         "jlt" => Some(OpCodes::Jlt),
         "jge" => Some(OpCodes::Jge),
         "jle" => Some(OpCodes::Jle),
+        "js" => Some(OpCodes::Js),
+        "lea" => Some(OpCodes::Lea),
         "or" => Some(OpCodes::Or),
         "nor" => Some(OpCodes::Nor),
         "xor" => Some(OpCodes::Xor),
         "and" => Some(OpCodes::And),
         "nand" => Some(OpCodes::Nand),
         "nop" => Some(OpCodes::Nop),
-
-
-        
-        
         _ => None
     }
 }

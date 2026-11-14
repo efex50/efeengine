@@ -1,24 +1,25 @@
 use std::path::Path;
 
-use crate::{prelude::parse_from_file, runtime::program::thread::PThread};
+use crate::{prelude::parse_from_file, runtime::host::Host, runtime::program::thread::PThread};
 
 use super::ProgramRuntime;
 
 
 impl ProgramRuntime{
+    /// a runtime that writes to the process stdout
     pub fn new() -> Self{
         Self::default()
     }
 
+    /// a runtime that sends output and sounds to `host`
+    pub fn with_host(host:Box<dyn Host>) -> Self{
+        Self{ host, ..Self::default() }
+    }
+
     pub fn compile_from_file<S:Into<String>>(path:S) -> Self{
-        
         let v = parse_from_file(path).unwrap();
         let mut slf = Self::default();
-
-        slf.program_size = v.len();
-        slf.init_program();
-
-        slf.program.write(0, v);
+        slf.load_from_vec(v);
         slf
     }
 
@@ -27,20 +28,13 @@ impl ProgramRuntime{
         let path:String = a.into();
         let path = Path::new(&path);
         let v = std::fs::read(path).unwrap();
-        
-        self.program_size = v.len();
-        self.init_program();
-        
-        self.program.write(0, v);
+        self.load_from_vec(v);
     }
 
 
     pub fn load_from_vec(&mut self,a:Vec<u8>){
         self.program_size = a.len();
-
         self.init_program();
-
-
         self.program.write(0, a);
     }
 
@@ -56,23 +50,13 @@ impl ProgramRuntime{
 
 
     fn init_program(&mut self){
-
-
         let mut main_thread = PThread::default();
-
-        //new
         main_thread.registers.rsp = self.program_size + 2;
-        main_thread.program = &mut self.program;
+        main_thread.stack_base = self.program_size + 2;
         main_thread.id = 0;
 
-        main_thread.stdin = &mut self.stdin;
-        main_thread.stderr = &mut self.stderr;
-        main_thread.stdout = &mut self.stdout;
-
+        self.threads.clear();
         self.threads.push(main_thread);
-
-        //dbg!(&self);
-
     }
 
 }

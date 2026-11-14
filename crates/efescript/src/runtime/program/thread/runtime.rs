@@ -1,181 +1,77 @@
-use crate::{as_be_bytes, instruction::Operands, nasm_efe::OperandType, runtime::{data_funs::get_inner_ptr,Instruction}};
+use efepages::page::Page;
 use num_traits::FromPrimitive;
 
-use crate::{ops::OpCodes, runtime::{parse_register_type_to_op, SimpleOperands}};
+use crate::{
+    instruction::Operands,
+    ops::OpCodes,
+    runtime::{data_funs::{decode_operand, read_u8}, Instruction},
+};
 
-use super::PThread;
+use super::{Ctx, PThread, TickSignal};
 
 
 impl PThread{
-    fn get_operand(&mut self) -> Option<Operands>{
-
-        let prg = unsafe {
-            &mut *self.program
-        };
-
-        let l = prg.read(self.counter, 1).try_into().unwrap();
-        let l = u8::from_be_bytes(l);
-
-        
-
-        let lo = OperandType::from_u8(l).unwrap();
-        
-
-        let l = SimpleOperands::from_operand(lo.clone());
-        let op = match l {
-            SimpleOperands::Reg => {
-                let ll = parse_register_type_to_op(lo).unwrap();
-                ll
-            }, 
-            SimpleOperands::Static => {
-                self.counter +=1;
-
-                let len = prg.read(self.counter, 1).try_into().unwrap();
-                let len = u8::from_be_bytes(len);
-    
-                if len == 0 {
-                    Operands::Static(0)
-                }else{
-                    self.counter +=1;
-                    let a = prg.read(self.counter, len as usize);
-                    let a = as_be_bytes!(usize a);
-                    let a = usize::from_be_bytes(a);
-                    self.counter += len as usize -1;
-                    Operands::Static(a)
-                }
-            },
-            SimpleOperands::String => todo!(),
-            SimpleOperands::Ptr => {
-                let innerptr = get_inner_ptr(&mut self.counter,prg);
-                
-                
-                innerptr                    
-            },
-            SimpleOperands::Nop => {Operands::Null},
-            SimpleOperands::PushPop => {
-                todo!()
-            },
-        };
-        Some(op)
-
-    } 
-
-    fn get_instruction(&mut self) -> Option<Instruction>{
-        let prg = unsafe {
-            &mut *self.program
-        };
-        let op = prg.read(self.counter, 1).try_into().unwrap();
-        
-
-        let op = u8::from_be_bytes(op);
-    
-        if op == 0 {return None;}
-        let code = match OpCodes::from_u8(op){
-            Some(some) => some,
-            None => {
-                dbg!(op,self.counter);
-                eprintln!("{:?}",self.program);
-                panic!("none çıktı usta");
-            },
-        };
-        match code {
+    /// Decodes the instruction at `self.counter` and advances `self.counter` past it.
+    /// `Ok(None)` is the end-of-program byte.
+    fn get_instruction(&mut self, prg: &Page) -> Result<Option<Instruction>, String>{
+        let start = self.counter;
+        let mut pos = start;
+        let op = read_u8(prg, &mut pos)?;
+        if op == 0 {return Ok(None);}
+        let code = OpCodes::from_u8(op)
+            .ok_or_else(|| format!("unknown opcode {op:#04x} at address {start:#x}"))?;
+        let (operandl, operandr) = match code {
             OpCodes::Mov |
-            OpCodes::Add8 |
-            OpCodes::Add16 |
-            OpCodes::Add32 |
-            OpCodes::Add64 |
-            OpCodes::Sub8 |
-            OpCodes::Sub16 |
-            OpCodes::Sub32 |
-            OpCodes::Sub64 |
-            OpCodes::Or |
-            OpCodes::Xor |
-            OpCodes::And |
-            OpCodes::Nand |
-            OpCodes::Nor |
+            OpCodes::Add8 | OpCodes::Add16 | OpCodes::Add32 | OpCodes::Add64 |
+            OpCodes::Sub8 | OpCodes::Sub16 | OpCodes::Sub32 | OpCodes::Sub64 |
+            OpCodes::Or | OpCodes::Xor | OpCodes::And | OpCodes::Nand | OpCodes::Nor |
+            OpCodes::Lea |
             OpCodes::Cmp  => {
-                self.counter += 1;
-                //left
-                let lop = self.get_operand().unwrap();
-                
-                self.counter += 1;
-                //left
-                let rop = self.get_operand().unwrap();
-                self.counter += 1;
-                return Some(Instruction{
-                    opcode:code,
-                    operandl:lop,
-                    operandr:rop
-                })        
-
+                let l = decode_operand(prg, &mut pos)?;
+                let r = decode_operand(prg, &mut pos)?;
+                (l, r)
             },
             OpCodes::Test |
             OpCodes::Call |
-            OpCodes::Push8 |
-            OpCodes::Push16 |
-            OpCodes::Push32 |
-            OpCodes::Push64 |
-            OpCodes::Pop8 |
-            OpCodes::Pop16 |
-            OpCodes::Pop32 |
-            OpCodes::Pop64 |
-            OpCodes::Jmp |
-            OpCodes::Je |
-            OpCodes::Jne |
-            OpCodes::Jgt |
-            OpCodes::Jlt |
-            OpCodes::Jle |
-            OpCodes::Jge |
-            OpCodes::Jz |
-            OpCodes::Js |
-            OpCodes::Jnz => {
-                self.counter += 1;
-                //left
-                let lop = self.get_operand().unwrap();
-                self.counter += 1;
-                return Some(Instruction{
-                    opcode:code,
-                    operandl:lop,
-                    operandr:Operands::Null
-                })        
+            OpCodes::Push8 | OpCodes::Push16 | OpCodes::Push32 | OpCodes::Push64 |
+            OpCodes::Pop8 | OpCodes::Pop16 | OpCodes::Pop32 | OpCodes::Pop64 |
+            OpCodes::Jmp | OpCodes::Je | OpCodes::Jne | OpCodes::Jgt | OpCodes::Jlt |
+            OpCodes::Jle | OpCodes::Jge | OpCodes::Jz | OpCodes::Js | OpCodes::Jnz => {
+                (decode_operand(prg, &mut pos)?, Operands::Null)
             },
-            OpCodes::Ret |
-            OpCodes::Nop |
-            OpCodes::SysCall => {
-                self.counter +=1;
-                return Some(Instruction{
-                    opcode:code,
-                    operandl:Operands::Null,
-                    operandr:Operands::Null,
-                });
-    
-            },
-            OpCodes::Lea => todo!(),
-        }
-    }
-
-    /// runs the program until end
-    pub fn start(&mut self){
-        loop {
-            match self.tick() {
-                Some(_) => (),
-                None => break,
+            OpCodes::Ret | OpCodes::Nop | OpCodes::SysCall => (Operands::Null, Operands::Null),
+        };
+        if code == OpCodes::Lea {
+            match operandr {
+                Operands::Pointer(_) | Operands::BYTEPTR(_) | Operands::WORDPTR(_) |
+                Operands::DWORDPTR(_) | Operands::QWORDPTR(_) => (),
+                _ => return Err(format!("lea at {start:#x} needs a memory operand")),
             }
         }
+        self.counter = pos;
+        Ok(Some(Instruction{ opcode:code, operandl, operandr }))
+    }
 
-    } 
+    /// runs the program until end, finish or fault
+    pub fn start(&mut self, ctx: &mut Ctx) -> TickSignal{
+        loop {
+            match self.tick(ctx) {
+                TickSignal::Continue => (),
+                other => return other,
+            }
+        }
+    }
 
     /// process 1 instruction
-    pub fn tick(&mut self) -> Option<()>{
-        let i = self.get_instruction();
-        let i = match i {
-            Some(some) => {
-                some
-            },
-            None => return None,
+    pub fn tick(&mut self, ctx: &mut Ctx) -> TickSignal{
+        let i = match self.get_instruction(ctx.page) {
+            Ok(Some(i)) => i,
+            Ok(None) => return TickSignal::End,
+            Err(e) => return TickSignal::Fault(e),
         };
-        self.handle_opcodes(&i);
-        return Some(());
+        match self.handle_opcodes(ctx, &i) {
+            Ok(sig) => sig,
+            Err(e) => TickSignal::Fault(e),
+        }
     }
 }
-

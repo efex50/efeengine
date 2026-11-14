@@ -6,46 +6,36 @@ pub mod opcode_funs;
 use efepages::page::Page;
 
 use super::{PFlags, PRegisters};
+use crate::runtime::host::Host;
 
 
-#[derive(Debug)]
+/// Everything a thread needs from its runtime while it executes.
+/// Passed as an argument to every tick, so threads hold no pointers into the runtime.
+pub struct Ctx<'a> {
+    pub page: &'a mut Page,
+    pub host: &'a mut dyn Host,
+}
+
+#[derive(Debug, Default)]
 pub struct PThread{
     /// id of the thread
     pub id:u32,
     pub counter:usize,
     pub registers:PRegisters,
     pub flags:PFlags,
-
-
-    pub stdin: *mut Vec<u8>,
-    pub stdout:*mut Vec<u8>,
-    pub stderr:*mut Vec<u8>,
-    // unsafe
-    pub program:*mut Page
-}
-impl Default for PThread {
-    fn default() -> Self {
-        Self { 
-            id:         Default::default(),
-            registers:  Default::default(),
-            flags:      Default::default(),
-            counter:    Default::default(), 
-            stdin:   0 as _,
-            stdout:  0 as _,
-            program: 0 as _,
-            stderr:  0 as _,
-        }
-    }
+    /// lowest valid stack address (pop/ret below it is a fault)
+    pub stack_base:usize,
 }
 
-
-
-pub enum SyscallSignal{
-    Ok,
+/// What one tick did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TickSignal{
+    /// an instruction ran
+    Continue,
+    /// the end-of-program byte (0) was reached
+    End,
+    /// the program called syscall Finish with this code
     Finish(u8),
-    Err(SyscallError),
-}
-#[repr(u8)]
-pub enum SyscallError{
-    Todo
+    /// the program did something invalid; the message says what
+    Fault(String),
 }

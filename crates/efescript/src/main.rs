@@ -1,83 +1,78 @@
-use std::env::args;
 use efescript::prelude::*;
 
+const USAGE: &str = r#"usage: efescript <file.efe|file.efec> [-o out] [-d] [-r]
 
-fn main() 
-{   
-    let mut v: Vec<u8> = Vec::new();
-    
+  efescript prog.efe            assemble and run
+  efescript prog.efec           run precompiled bytes
+  efescript prog.efe -o out     assemble to the file `out`, do not run
+  -d    print the runtime state after the run
+  -r    print the memory usage after the run
 
-    let args:Vec<String> = args().map(|d| d).collect();
-    if args.len() < 2 {
-        print_help();
-        std::process::exit(1);
-    }
+exit code: the Finish code of the program (0 at the end of the program),
+2 for a missing file or an assembly error, 3 for a runtime error
+"#;
 
-    let f = &args[1];
-    let mut p = ProgramRuntime::new();
+fn fail(msg: String) -> ! {
+    eprintln!("efescript: {msg}");
+    std::process::exit(2);
+}
 
-    let f = parse_from_file(f).unwrap();
-    std::fs::write(std::path::Path::new("./out.efec"), &f).unwrap();
-    p.load_from_vec(f);
-    //dbg!(&p.counter);
-    p.run_all_nonstop();
-    //dbg!(&p.counter);
-    if let Some(x) = args.get(2) {
-        match x.as_str(){
-            "-d" => println!("{:?}",p),
-            "-r" => println!("ram usage :{:?} bytes",p.program.page.len() * efepages::vars::PAGE_SIZE ),
-            _=>()
+fn main() {
+    let mut file: Option<String> = None;
+    let mut out: Option<String> = None;
+    let (mut dump, mut ram) = (false, false);
+
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-d" => dump = true,
+            "-r" => ram = true,
+            "-o" => match args.next() {
+                Some(o) => out = Some(o),
+                None => fail("-o needs a file name".to_string()),
+            },
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return;
+            }
+            _ if file.is_none() => file = Some(a),
+            _ => fail(format!("unexpected argument `{a}`")),
         }
     }
+    let Some(file) = file else {
+        eprintln!("{USAGE}");
+        std::process::exit(1);
+    };
+
+    let raw = std::fs::read(&file).unwrap_or_else(|e| fail(format!("{file}: {e}")));
+    let bytes = if file.ends_with(".efec") {
+        raw
+    } else {
+        let src = String::from_utf8(raw).unwrap_or_else(|_| fail(format!("{file}: not valid UTF-8")));
+        parse_str(src).unwrap_or_else(|e| fail(format!("{file}: {e:?}")))
+    };
+
+    if let Some(o) = out {
+        std::fs::write(&o, &bytes).unwrap_or_else(|e| fail(format!("{o}: {e}")));
+        return;
+    }
+
+    let mut p = ProgramRuntime::new();
+    p.load_from_vec(bytes);
+    let result = p.run();
+    if dump {
+        println!("{:?}", p);
+    }
+    if ram {
+        println!("ram usage :{:?} bytes", p.program.page.len() * efepages::vars::PAGE_SIZE);
+    }
+    let code = match result {
+        RunResult::Finished(c) => c as i32,
+        RunResult::EndOfProgram | RunResult::LimitReached => 0,
+        RunResult::Fault(_) => 3,
+    };
+    std::process::exit(code);
 }
-
-
-
-
-fn print_help(){
-    println!(
-    r#"
-    uygulamayı kullanmak için bir program seçin
-
-    ör: efescript test.efe
-    
-    efe.c olmaz
-    
-    -d // programın debug çıktısını gösterir
-    -r // programın kullandığı hafızayı byte cinsinden gösterir
-
-    "#
-    )
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[allow(warnings)]
 mod tests{
