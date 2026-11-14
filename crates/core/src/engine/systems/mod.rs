@@ -10,11 +10,11 @@ pub fn add_system(){
 
 
 pub trait GameSystem{
-    fn init(){}
-    fn _update(){}
-    fn _physics_update(){}
-    fn _render_update(){}
-    fn _exit(){}
+    fn init(&mut self){}
+    fn engin_update(&mut self){}
+    fn engin_physics_update(&mut self){}
+    fn engin_render_update(&mut self){}
+    fn engin_exit(&mut self){}
 }
 
 
@@ -26,27 +26,6 @@ mod tests{
     use std::alloc;
 
     use hecs::{Entity, World};
-    use pyo3::{prelude::*, types::PyDict};
-
-
-    #[test]
-    fn test1()
-    {
-        Python::attach(|py|{
-            py.import("sys");
-            let time_module = py.import("time").unwrap();            let locals = PyDict::new(py);
-            locals.set_item("time", time_module);
-            py.run(cr#"
-time.sleep(2)
-print('sa')
-                "#, None, Some(&locals)).unwrap();
-            py.run(cr#"
-time.sleep(2)
-print('sa')
-                "#, None, Some(&locals)).unwrap();
-        });
-        println!("end")
-    }
 
     #[test]
     fn hecs_test(){
@@ -75,22 +54,4 @@ print('sa')
         println!("{:?}",world.get::<&i32>(b).unwrap());
     }
 
-
-
-    struct ScriptComponent{
-
-    }
-    impl ScriptComponent {
-        pub fn new() -> Self {
-
-            todo!();
-
-        }
-    }
-
-    #[test]
-    fn script_test(){
-        let world  = hecs::World::new();
-        
-    }
 }
