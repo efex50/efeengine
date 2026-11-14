@@ -25,7 +25,15 @@ impl RendererState {
             backends: wgpu::Backends::GL | wgpu::Backends::BROWSER_WEBGPU,
             ..Default::default()
         });
-        let surface = instance.create_surface(window.clone()).unwrap();
+        // The safe `create_surface` needs a `Send + Sync` window handle, which an
+        // SDL window is not (it must stay on the main thread).
+        // SAFETY: the window's raw handles stay valid for the whole life of the
+        // surface: the `Arc<GameWindowManager>` is stored in `self.window`, which is
+        // declared after `surface` and therefore dropped after it.
+        let surface = unsafe {
+            let target = wgpu::SurfaceTargetUnsafe::from_window(&*window).unwrap();
+            instance.create_surface_unsafe(target).unwrap()
+        };
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptionsBase {
             power_preference: wgpu::PowerPreference::default(),
             force_fallback_adapter: false,
@@ -193,6 +201,11 @@ impl SurfaceManager {
                     .unwrap();
                 instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas)).unwrap()
             }
+            // SAFETY: the returned surface is stored in `window.surface_manager`,
+            // which `GameWindowManager` declares before (and so drops before) the
+            // inner window whose raw handles it uses. The window never moves out of
+            // its owner while the surface exists, and is not `Send`, so both stay on
+            // the main thread.
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let target = wgpu::SurfaceTargetUnsafe::from_window(window).unwrap();

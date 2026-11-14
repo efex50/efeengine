@@ -21,11 +21,13 @@ pub enum WindowEvents{
         scancode:Option<PhysicalKey>,
         keymod:KeyMod,
         raw:u16
+    },
+    /// Window drawable size changed, in physical pixels.
+    Resized{
+        window_id:u32,
+        width:u32,
+        height:u32
     }
-}
-
-pub enum WindowEvent{
-    
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash,Serialize,Deserialize)]

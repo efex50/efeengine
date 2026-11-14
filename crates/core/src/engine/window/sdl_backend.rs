@@ -1,23 +1,17 @@
-use std::sync::{Arc, Mutex};
-
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use sdl3::{EventPump, VideoSubsystem, pixels::Color,event::Event as SdlEvent};
-use sdl3_sys::scancode;
+use sdl3::{EventPump, event::Event as SdlEvent};
 
 use crate::Message;
 
-use crate::{MESSAGE_SYSTEM, engine::window::{InnerWindow, sdl_backend}, global_alert, global_warn, send_message, window::events::{KeyCode, KeyMod}};
-pub type SdlContext = Arc<Mutex<sdl3::Sdl>>;
+use crate::{engine::window::InnerWindow, global_warn, send_message, window::events::{KeyCode, KeyMod}};
 
-
-struct SendEventPump(EventPump);
-unsafe impl Send for SendEventPump {}
-unsafe impl Sync for SendEventPump {}
-
+/// SDL window + event pump. Neither is `Send`/`Sync`: SDL requires windows and
+/// event polling to stay on the main thread, so this type must not leave it.
 pub struct SdlWindowManager{
-    sdlctx:SdlContext,
     main_window:sdl3::video::Window,
-    event_pump:Option<SendEventPump>
+    event_pump:EventPump,
+    /// Keeps the SDL context alive for as long as the window exists.
+    _sdl:sdl3::Sdl,
 }
 
 impl SdlWindowManager {
@@ -37,11 +31,10 @@ impl SdlWindowManager {
 
 
         let pump = s.event_pump().unwrap();
-        let sdl = Arc::new(Mutex::new(s));
         Self{
-            sdlctx: sdl,
             main_window: window,
-            event_pump:Some(SendEventPump(pump))
+            event_pump: pump,
+            _sdl: s,
         }
     }
 }
@@ -50,45 +43,45 @@ impl InnerWindow for SdlWindowManager {
     fn set_title(&mut self,title:String) {
         self.main_window.set_title(&title);        
     }
+    /// Drawable size in physical pixels (matches the wgpu surface on HiDPI).
     fn size(&self) -> (u32, u32) {
-        self.main_window.size()
+        self.main_window.size_in_pixels()
     }
     
     fn poll_events(&mut self) {
-        if let Some(ref mut pump_wrapper) = self.event_pump{
-            // Olayları tüket (pump) ki OS pencerenin donduğunu sanmasın
-            for _event in pump_wrapper.0.poll_iter() {
-                match _event {
-                    SdlEvent::Quit { timestamp } => {
-                        send_message(Message::Kill);
-                        global_warn("warn: killing the game");
-                    },
-                    SdlEvent::KeyDown { timestamp, window_id, keycode, scancode, keymod, repeat, which, raw } => {
-                        let engine_keycode = keycode.map(KeyCode::from);
-                        let engine_scancode = scancode.map(KeyCode::from);
-                        send_message(Message::WindowEvent(super::events::WindowEvents::KeyDown { timestamp, window_id, key_code:engine_keycode , scancode:engine_scancode, keymod: KeyMod::from(keymod), raw }));
-                    },
-                    SdlEvent::KeyUp { timestamp, window_id, keycode, scancode, keymod, repeat, which, raw } => {
-                        let engine_keycode = keycode.map(KeyCode::from);
-                        let engine_scancode = scancode.map(KeyCode::from);
-                        send_message(Message::WindowEvent(super::events::WindowEvents::KeyUp { timestamp, window_id, key_code: engine_keycode, scancode: engine_scancode, keymod: KeyMod::from(keymod), raw }));
-                    }
-
-                    _ => {
-                        global_alert(&format!("event got! {:?}",_event));
-                    }
+        // Olayları tüket (pump) ki OS pencerenin donduğunu sanmasın
+        for event in self.event_pump.poll_iter() {
+            match event {
+                SdlEvent::Quit { timestamp } => {
+                    send_message(Message::Kill);
+                    global_warn("warn: killing the game");
+                },
+                SdlEvent::KeyDown { timestamp, window_id, keycode, scancode, keymod, repeat, which, raw } => {
+                    let engine_keycode = keycode.map(KeyCode::from);
+                    let engine_scancode = scancode.map(KeyCode::from);
+                    send_message(Message::WindowEvent(super::events::WindowEvents::KeyDown { timestamp, window_id, key_code:engine_keycode , scancode:engine_scancode, keymod: KeyMod::from(keymod), raw }));
+                },
+                SdlEvent::KeyUp { timestamp, window_id, keycode, scancode, keymod, repeat, which, raw } => {
+                    let engine_keycode = keycode.map(KeyCode::from);
+                    let engine_scancode = scancode.map(KeyCode::from);
+                    send_message(Message::WindowEvent(super::events::WindowEvents::KeyUp { timestamp, window_id, key_code: engine_keycode, scancode: engine_scancode, keymod: KeyMod::from(keymod), raw }));
                 }
-                // Burada ileride klavye/mouse eventlerini işleyebilirsin
-                // Örn: Message::KeyDown gönderilebilir
+                // Pixel size (not logical size) so the surface matches the drawable on HiDPI.
+                SdlEvent::Window { window_id, win_event: sdl3::event::WindowEvent::PixelSizeChanged(w, h), .. } => {
+                    send_message(Message::WindowEvent(super::events::WindowEvents::Resized {
+                        window_id,
+                        width: w.max(0) as u32,
+                        height: h.max(0) as u32,
+                    }));
+                }
+
+                _ => {}
             }
-        } 
+        }
     }
 
 }
 
-
-unsafe impl Send for SdlWindowManager {}
-unsafe impl Sync for SdlWindowManager {}
 
 impl HasDisplayHandle for SdlWindowManager {
     fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {

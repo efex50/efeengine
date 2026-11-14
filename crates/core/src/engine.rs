@@ -4,7 +4,7 @@ use once_cell::sync::{Lazy, OnceCell};
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::{debug_info, engine::{messages::{Message}, window::GameWindowManager}, global_warn, log::{Logger, NewDefaultLogger}, recv_messages, renderer::GraphicsContext, set_global_logger, window::WindowManager, world::EngineWorld};
+use crate::{debug_info, engine::{messages::{Message}, window::{GameWindowManager, events::WindowEvents}}, log::{Logger, NewDefaultLogger}, recv_messages, renderer::GraphicsContext, set_global_logger, window::WindowManager, world::EngineWorld};
 use crate::{global_info, thread_pool::init_global_pool_auto};
 pub mod window;
 pub mod messages;
@@ -116,7 +116,11 @@ impl Engine {
                 Message::Log(log_msg) => {
                     self.logger.log(&log_msg);
                 },
-                Message::WindowEvent(k) => global_warn("Todo window event"),
+                Message::WindowEvent(WindowEvents::Resized { width, height, .. }) => {
+                    self.resize_surface((width, height));
+                }
+                // Key events etc. are not consumed by the engine yet.
+                Message::WindowEvent(_) => {}
             }
         }
 
@@ -140,19 +144,37 @@ impl Engine {
     pub fn render(&mut self){
         
     }
+
+    /// Reconfigure the window surface to `size` (physical pixels).
+    /// No-op without a graphics context/surface, or for a 0x0 (minimized) size.
+    fn resize_surface(&mut self, size: (u32, u32)) {
+        if size.0 == 0 || size.1 == 0 {
+            return;
+        }
+        if let (Some(context), Some(sm)) = (&self.graphics_context, &mut self.windows.surface_manager) {
+            sm.resize(size, &context.device);
+        }
+    }
     
     pub fn tick(&mut self){
-                
-        self.handle_messages();
+        // Poll first so input/resize events from this frame are handled this frame.
         self.windows.poll_events();
+        self.handle_messages();
         // Çizim Mantığı:
+        let mut render_result = Ok(());
         if let Some(ref context) = self.graphics_context {
             if let Some(ref mut sm) = self.windows.surface_manager {
-                if let Err(e) = sm.render(&context.device, &context.queue,&self.state) {
-                     // Hata yönetimi (SurfaceLost vb.)
-                     self.logger.error(&format!("Render error: {:?}", e));
-                }
+                render_result = sm.render(&context.device, &context.queue,&self.state);
             }
+        }
+        match render_result {
+            Ok(()) => {}
+            // Surface no longer matches the window: reconfigure, next frame renders.
+            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
+                let size = self.windows.size();
+                self.resize_surface(size);
+            }
+            Err(e) => self.logger.error(&format!("Render error: {:?}", e)),
         }
         
     }

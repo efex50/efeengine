@@ -12,7 +12,9 @@ pub mod events;
 
 use crate::engine::renderer::SurfaceManager;
 
-pub trait InnerWindow:Send + Sync + HasWindowHandle + HasDisplayHandle{
+/// Platform window. Deliberately not `Send`/`Sync`: native (SDL) windows and the
+/// event pump must stay on the main thread.
+pub trait InnerWindow: HasWindowHandle + HasDisplayHandle{
     #[cfg(target_family = "wasm")]
     fn set_canvas_id(&mut self,canvas_id:String);
     fn set_title(&mut self,title:String);
@@ -25,13 +27,12 @@ pub trait WindowManager{
     fn set_title(&mut self,title:String);
 
 }
-unsafe impl Send for GameWindowManager {}
-unsafe impl Sync for GameWindowManager {}
-
-
 pub struct GameWindowManager{
-    inner: Box<dyn InnerWindow>,
+    // NOTE: field order matters. Fields drop in declaration order, and the
+    // surface was created from `inner`'s raw window handle, so it must be
+    // dropped before the window it renders to.
     pub surface_manager: Option<SurfaceManager>,
+    inner: Box<dyn InnerWindow>,
 }
 
 impl GameWindowManager {
@@ -44,8 +45,8 @@ impl GameWindowManager {
         let w = sdl_backend::SdlWindowManager::new(title.clone());
         
         return Self {
-            inner:Box::new(w),
             surface_manager: None, // Başlangıçta yok
+            inner:Box::new(w),
         };
     }
     pub fn poll_events(&mut self ){
