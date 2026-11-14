@@ -3,36 +3,37 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use once_cell::sync::Lazy;
 
-use crate::LogMsg;
+use crate::{LogMsg, engine, window::events::WindowEvents};
 
 /// Global engine message queue: an unbounded multi-producer channel.
-/// Anything (JS, the window backend, scripts) can send; the engine drains it once per tick.
-pub static MESSAGES: Lazy<(flume::Sender<Message>, flume::Receiver<Message>)> =
-    Lazy::new(flume::unbounded);
+/// Anything (JS, the window backend, scripts, worker threads) can send;
+/// the engine drains it once per tick.
+pub type MessageVecType = Lazy<(flume::Sender<Message>,flume::Receiver<Message>)>;
+
+pub static MESSAGE_SYSTEM:MessageVecType = Lazy::new(flume::unbounded);
 
 /// Get a sender handle that can be cloned and moved to other threads.
 pub fn message_sender() -> flume::Sender<Message> {
-    MESSAGES.0.clone()
+    MESSAGE_SYSTEM.0.clone()
 }
 
 /// Queue a message for the engine to handle on its next tick.
-pub fn push_message(message: Message) {
+pub fn send_message(msg:Message){
     // The receiver lives in a static and is never dropped, so sending cannot fail.
-    let _ = MESSAGES.0.send(message);
+    let _ = MESSAGE_SYSTEM.0.send(msg);
 }
-
 /// Take every message that is queued right now.
 /// Messages sent while the returned iterator is being consumed are kept for the next call.
-pub(crate) fn drain_messages() -> flume::Drain<'static, Message> {
-    MESSAGES.1.drain()
+pub fn recv_messages() -> flume::Drain<'static, engine::messages::Message>{
+    let a = MESSAGE_SYSTEM.1.drain();
+    return a
 }
 
 
-
-#[cfg_attr(target_family = "wasm", derive(TS))]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message{
     SetFrameRate(f32),
+    WindowEvent(WindowEvents),
     Start,
     Stop,
     Kill,
@@ -55,7 +56,7 @@ mod wasm_message_handler{
     pub fn send_message(message:JsValue) -> Result<(), JsValue>{
         
         let message: Message = serde_wasm_bindgen::from_value(message)?;
-        push_message(message);
+        super::send_message(message);
         Ok(())
     }
 }

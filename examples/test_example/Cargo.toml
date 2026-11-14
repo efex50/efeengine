@@ -11,9 +11,14 @@ name = "native"
 path = "src/lib.rs"
 
 
+[package.metadata.vcpkg]
+git = "https://github.com/microsoft/vcpkg"
+rev = "4c1db68"
+dependencies = ["sdl3"]
+
+
 [dependencies]
-efeengine-core = { path = "../../crates/core" }
+efeengine-core = { path = "../../crates/core", features = [
+    #"debug_log",
+    ]}
 
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"

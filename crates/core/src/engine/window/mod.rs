@@ -6,6 +6,9 @@ pub mod web_backend;
 
 #[cfg(not(target_family = "wasm"))]
 pub mod sdl_backend;
+#[cfg(not(target_family = "wasm"))]
+mod sdl_impls;
+pub mod events;
 
 use crate::engine::renderer::SurfaceManager;
 
@@ -16,23 +19,29 @@ pub trait InnerWindow:Send + Sync + HasWindowHandle + HasDisplayHandle{
     fn size(&self) -> (u32, u32);
     fn poll_events(&mut self);
 }
-unsafe impl Send for GameWindow {}
-unsafe impl Sync for GameWindow {}
+pub trait WindowManager{
+    fn size(&self) -> (u32,u32);
+    fn poll_events(&mut self);
+    fn set_title(&mut self,title:String);
+
+}
+unsafe impl Send for GameWindowManager {}
+unsafe impl Sync for GameWindowManager {}
 
 
-pub struct GameWindow{
-    pub inner: Box<dyn InnerWindow>,
+pub struct GameWindowManager{
+    inner: Box<dyn InnerWindow>,
     pub surface_manager: Option<SurfaceManager>,
 }
 
-impl GameWindow {
+impl GameWindowManager {
     pub fn new(
         title:String
     ) -> Self {
         #[cfg(target_family = "wasm")]
         let w = web_backend::WebWindow::new(title);
         #[cfg(not(target_family = "wasm"))]
-        let w = sdl_backend::SdlWindow::new(title.clone());
+        let w = sdl_backend::SdlWindowManager::new(title.clone());
         
         return Self {
             inner:Box::new(w),
@@ -42,19 +51,36 @@ impl GameWindow {
     pub fn poll_events(&mut self ){
         self.inner.poll_events();
     }
+    #[cfg(target_family = "wasm")]
+    pub fn set_canvas_id(&mut self, canvas_id:String){
+        self.inner.set_canvas_id(canvas_id);
+    }
 
     
 }
 
+impl WindowManager for GameWindowManager {
+    fn size(&self) -> (u32,u32) {
+        self.inner.size()
+    }
+    
+    fn poll_events(&mut self) {
+        self.inner.poll_events();
+    }
+    
+    fn set_title(&mut self,title:String) {
+        self.inner.set_title(title);
+    }
+}
 
 // GameWindow üzerinden handle'lara erişim sağlamak için delegasyon yapıyoruz
-impl HasWindowHandle for GameWindow {
+impl HasWindowHandle for GameWindowManager {
     fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
         self.inner.window_handle()
     }
 }
 
-impl HasDisplayHandle for GameWindow {
+impl HasDisplayHandle for GameWindowManager {
     fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
         self.inner.display_handle()
     }

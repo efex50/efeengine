@@ -14,6 +14,14 @@ Monorepo for the efe game engine.
 The core crate is named `efeengine-core` rather than `core` because a crate called
 `core` would clash with Rust's built-in `core` library.
 
+## Branches
+
+- `main`: the merged `main` branches of all projects.
+- `world`: `main` plus realgameengine's `world` branch (hecs ECS, thread pool, window
+  events). It uses nightly Rust (`rust-toolchain`) and wasm threads
+  (`.cargo/config.toml`: atomics, shared memory, `-Z build-std`), and links the
+  system SDL3 instead of building it from source.
+
 ## Building
 
 Native builds compile SDL3 from source, so you need a C compiler and CMake
