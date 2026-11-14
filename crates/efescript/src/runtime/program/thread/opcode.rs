@@ -1,6 +1,6 @@
 use num_traits::Zero;
 
-use crate::{ops::OpCodes, runtime::Instuction};
+use crate::{ops::OpCodes, runtime::Instruction};
 use super::{PThread, SyscallSignal};
 
 
@@ -13,7 +13,7 @@ pub enum HandleSignal{
 
 impl PThread{
     
-pub(super) fn handle_opcodes(&mut self,i:&Instuction) -> HandleSignal{
+pub(super) fn handle_opcodes(&mut self,i:&Instruction) -> HandleSignal{
 
     let prg = unsafe {
         &mut *self.program

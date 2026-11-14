@@ -11,7 +11,7 @@ pub enum SysCalls{
     /// 
     /// prints the char as utf8 encoded 
     /// 
-    /// 4 bytes on 32 bit systens 8 on 64 bit
+    /// 4 bytes on 32 bit systems 8 on 64 bit
     Printchar = 0,
 
     /// rust style print!
@@ -20,7 +20,7 @@ pub enum SysCalls{
     /// 
     /// ebx -> pointer
     /// 
-    /// ecx -> lenght of string
+    /// ecx -> length of string
     /// 
     Print,
 
@@ -30,7 +30,7 @@ pub enum SysCalls{
     /// 
     /// ebx -> pointer
     /// 
-    /// ecx -> lenght of string
+    /// ecx -> length of string
     /// 
     Println,
     
@@ -57,7 +57,7 @@ pub enum SysCalls{
     /// 
     /// ebx -> pointer
     /// 
-    /// ecx -> lenght of string
+    /// ecx -> length of string
     /// 
     /// returns:
     /// 
@@ -72,10 +72,10 @@ pub enum SysCalls{
     /// 
     /// ebx -> pointer of str
     /// 
-    /// ecx -> lenght of str
+    /// ecx -> length of str
     Readln,
 
-    /// Reads console for string unitil break char from edx read input max len :usize
+    /// Reads console for string until break char from edx read input max len :usize
     ///
     /// writes on stack
     /// 
@@ -83,7 +83,7 @@ pub enum SysCalls{
     /// 
     /// ebx -> pointer of str
     /// 
-    /// ecx -> lenght of str
+    /// ecx -> length of str
     /// 
     /// edx -> line break u8 sign
     ReadCon,
@@ -96,7 +96,7 @@ pub enum SysCalls{
     /// 
     /// eg "./file.txt", "/home/user/data/file.txt"
     /// 
-    /// ecx -> lenght of the path name
+    /// ecx -> length of the path name
     /// 
     /// returns:
     /// 
@@ -111,13 +111,13 @@ pub enum SysCalls{
     /// 
     /// ebx -> pointer of data
     /// 
-    /// ecx -> lenght of data
+    /// ecx -> length of data
     /// 
     /// edx -> pointer of the name to the fs
     /// 
     /// eg "./file.txt", "/home/user/data/file.txt"
     /// 
-    /// r1 -> lenght of the path name
+    /// r1 -> length of the path name
     WriteFs,
 
     /// Heap alloc
@@ -139,13 +139,13 @@ pub enum SysCalls{
     /// 
     Flush,
 
-    /// exits the progran
+    /// exits the program
     /// 
     /// takes:
     /// 
     /// ebx -> statuscode
     /// 
-    /// 0 = succes 1 = fail
+    /// 0 = success 1 = fail
     Finish = 5050, 
 
 

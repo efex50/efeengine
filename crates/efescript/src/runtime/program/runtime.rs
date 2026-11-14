@@ -2,7 +2,7 @@ use super::{thread::PThread, ProgramRuntime};
 
 impl ProgramRuntime{
 
-    /// runs the program untill end
+    /// runs the program until end
     pub fn run_all_nonstop(&mut self){
         'main:loop {
             let threads = unsafe {

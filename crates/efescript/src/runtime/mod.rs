@@ -7,7 +7,7 @@ pub mod allocator;
 
 use crate::{nasm_efe::OperandType, *};
 use nasm_efe::nasm_funs::parse_register_type_to_op;
-use crate::instruction::Instuction;
+use crate::instruction::Instruction;
 
 
 #[derive(Debug,PartialEq)]

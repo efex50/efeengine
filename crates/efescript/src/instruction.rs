@@ -5,7 +5,7 @@ use crate::ops::OpCodes;
 
 
 #[derive(Debug)]
-pub(crate) struct Instuction{
+pub(crate) struct Instruction{
     pub opcode:OpCodes,
     pub operandl:Operands,
     pub operandr:Operands,

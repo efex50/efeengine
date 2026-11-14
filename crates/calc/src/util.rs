@@ -36,7 +36,7 @@ pub(crate) fn _check_fix_type(str:&str)-> Result<FixType,()>{
     if let Some(last) = chars.last(){
         if symbols.contains(&last.as_str()){
             if chars.len() > 1{
-                return Ok(FixType::PostFıx);
+                return Ok(FixType::Postfix);
             }
         }
     }
@@ -44,23 +44,23 @@ pub(crate) fn _check_fix_type(str:&str)-> Result<FixType,()>{
     let first = &chars[0];
     if symbols.contains(&first.as_str()){
         if first == "*" || first == "/" {
-            return Ok(FixType::PreFıx);
+            return Ok(FixType::Prefix);
         }
         if first == "-" || first == "+"{
             if chars.len() > 2 {
                 let third = &chars[2];
 
                 if !symbols.contains(&third.as_str()){
-                    return Ok(FixType::PreFıx);
+                    return Ok(FixType::Prefix);
                 }
             }else {
-                return Ok(FixType::PreFıx);
+                return Ok(FixType::Prefix);
             }
         }
     }
     for x in &chars {
         if symbols.contains(&x.as_str()) {
-            return Ok(FixType::Infıx);
+            return Ok(FixType::Infix);
         };
     }
 
@@ -81,7 +81,7 @@ pub(crate) fn check_fix_type(str: &str) -> Result<FixType, ()> {
     if let Some(last) = chars.last() {
         if symbols.contains(&last.as_str()) && last != ")" {
             if chars.len() > 1 {
-                return Ok(FixType::PostFıx);
+                return Ok(FixType::Postfix);
             }
         }
     }
@@ -89,33 +89,33 @@ pub(crate) fn check_fix_type(str: &str) -> Result<FixType, ()> {
     let first = &chars[0];
     if symbols.contains(&first.as_str()) {
         if first == "(" {
-            return Ok(FixType::Infıx);
+            return Ok(FixType::Infix);
         }
 
         if first == "*" || first == "/" {
-            return Ok(FixType::PreFıx);
+            return Ok(FixType::Prefix);
         }
 
         if first == "-" || first == "+" {
             if chars.len() > 1 {
                 let second = &chars[1];
                 if symbols.contains(&second.as_str()) && second != "(" {
-                    return Ok(FixType::PreFıx);
+                    return Ok(FixType::Prefix);
                 }
             }
 
             if chars.len() > 2 {
                 let third = &chars[2];
                 if !symbols.contains(&third.as_str()) {
-                    return Ok(FixType::PreFıx);
+                    return Ok(FixType::Prefix);
                 }
             } else if chars.len() == 2 {
-                return Ok(FixType::PreFıx);
+                return Ok(FixType::Prefix);
             }
         }
     }
 
-    Ok(FixType::Infıx)
+    Ok(FixType::Infix)
 }
 
 

@@ -2,14 +2,14 @@ use std::collections::HashMap;
 
 use num_traits::ToPrimitive;
 
-use crate::{funs::trim_zeroes, instruction::Instuction, ops::OpCodes};
+use crate::{funs::trim_zeroes, instruction::Instruction, ops::OpCodes};
 
 use super::PreCompile;
 
 #[derive(Debug)]
 enum Objects {
     Instruction {
-        i: Instuction,
+        i: Instruction,
         len: usize,
     },
     Jump {
@@ -144,7 +144,7 @@ impl Data {
         }
     }
 
-    pub fn to_porgram(&self) -> Vec<u8> {
+    pub fn to_program(&self) -> Vec<u8> {
         let mut p = Vec::new();
 
         for x in &self.v {

@@ -134,7 +134,7 @@ impl PThread{
                 std::fs::write(pth, to_write).unwrap();
             },
             SysCalls::HeapAlloc => {
-                todo!("TODO! creates pages untill finds the end page");
+                todo!("TODO! creates pages until finds the end page");
                 let size = self.registers.rb;
                 if size == 0{
                     panic!("Heap size cannot be zero");

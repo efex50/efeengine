@@ -171,7 +171,7 @@ pub enum TreeType{
 
 #[derive(Debug)]
 pub enum FixType{
-    Infıx,
-    PostFıx,
-    PreFıx,
+    Infix,
+    Postfix,
+    Prefix,
 }

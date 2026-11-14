@@ -5,30 +5,30 @@ use crate::{types::{ FixType, Number, Symbols, TreeTokens, TreeType}, util::{as_
 macro_rules! add_fix {
     (pre $fixtype:ident $str:ident $t:expr ) => {
         match $fixtype {
-            FixType::Infıx => (),
-            FixType::PostFıx => (),
-            FixType::PreFıx => $str.push($t),
+            FixType::Infix => (),
+            FixType::Postfix => (),
+            FixType::Prefix => $str.push($t),
         }
     };
     (post $fixtype:ident $str:ident $t:expr) => {
         match $fixtype {
-            FixType::Infıx => (),
-            FixType::PostFıx => $str.push($t),
-            FixType::PreFıx => (),
+            FixType::Infix => (),
+            FixType::Postfix => $str.push($t),
+            FixType::Prefix => (),
         }
     };
     (prepo $fixtype:ident $str:ident $t:expr) => {
         match $fixtype {
-            FixType::Infıx => (),
-            FixType::PostFıx => $str.push($t),
-            FixType::PreFıx => $str.push($t),
+            FixType::Infix => (),
+            FixType::Postfix => $str.push($t),
+            FixType::Prefix => $str.push($t),
         }
     };
     (infix $fixtype:ident $str:ident $t:expr) => {
         match $fixtype {
-            FixType::Infıx => $str.push($t),
-            FixType::PostFıx => (),
-            FixType::PreFıx => (),
+            FixType::Infix => $str.push($t),
+            FixType::Postfix => (),
+            FixType::Prefix => (),
         }
     }
 }
@@ -38,15 +38,15 @@ macro_rules! add_fix {
 pub struct Tree{
     pub inner : Option<Box::<TreeType>>,
     pub variables : HashMap<String,Number>,
-    seperator:char,
+    separator:char,
 }
 
 // parsing and printing
 impl Tree {
 
-    pub fn new(seperator:impl Into<char>) -> Self{
+    pub fn new(separator:impl Into<char>) -> Self{
         
-        Self { inner: None, variables: HashMap::new(),seperator:seperator.into() }
+        Self { inner: None, variables: HashMap::new(),separator:separator.into() }
     }
     pub fn set_var<T: Into<Number>>(&mut self, name: impl Into<String>, val: T) -> Option<Number> {
         self.variables.insert(name.into(), val.into())
@@ -73,9 +73,9 @@ impl Tree {
         let tokens = Self::tokenize(chars);
 
         let a = match fixtype {
-            FixType::Infıx => Self::parse_infix_main(&tokens,0),
-            FixType::PostFıx => Self::parse_postfix(&tokens,&mut (tokens.len()-1)),
-            FixType::PreFıx => Self::parse_prefix(&tokens,&mut 0),
+            FixType::Infix => Self::parse_infix_main(&tokens,0),
+            FixType::Postfix => Self::parse_postfix(&tokens,&mut (tokens.len()-1)),
+            FixType::Prefix => Self::parse_prefix(&tokens,&mut 0),
         };
         if let Ok(a) = a {
             self.inner= Some(Box::new(a));
@@ -276,7 +276,7 @@ impl Tree {
     pub fn prefixprint(&self) -> Result<String,()>{
         let str: String ;
         if let Some(inner) = &self.inner{
-            str = Self::print_inner(&*inner,&FixType::PreFıx,self.seperator)
+            str = Self::print_inner(&*inner,&FixType::Prefix,self.separator)
         }else {
             return Err(());
         }
@@ -285,7 +285,7 @@ impl Tree {
     pub fn postfixprint(&self) -> Result<String,()>{
         let str: String ;
         if let Some(inner) = &self.inner{
-            str = Self::print_inner(&*inner,&FixType::PostFıx,self.seperator)
+            str = Self::print_inner(&*inner,&FixType::Postfix,self.separator)
         }else {
             return Err(());
         }
@@ -294,14 +294,14 @@ impl Tree {
     pub fn infixprint(&self) -> Result<String,()>{
         let str: String ;
         if let Some(inner) = &self.inner{
-            str = Self::print_inner(&*inner,&FixType::Infıx,self.seperator)
+            str = Self::print_inner(&*inner,&FixType::Infix,self.separator)
         }else {
             return Err(());
         }
         Ok(str)
     }
 
-    fn print_inner(tree:&TreeType,fixtype:&FixType,seperator:char) -> String{
+    fn print_inner(tree:&TreeType,fixtype:&FixType,separator:char) -> String{
         let mut str = String::new();
 
         match tree {
@@ -313,20 +313,20 @@ impl Tree {
             },
             TreeType::Plus(left, right) => {
                 add_fix!(pre fixtype str '+');
-                let l = Self::print_inner(left,fixtype,seperator);
-                let r = Self::print_inner(right,fixtype,seperator);
+                let l = Self::print_inner(left,fixtype,separator);
+                let r = Self::print_inner(right,fixtype,separator);
                 str.push_str(&l);
                 add_fix!(infix fixtype str '+');
-                add_fix!(prepo fixtype str seperator );
+                add_fix!(prepo fixtype str separator );
                 str.push_str(&r);
                 add_fix!(post fixtype str '+');
             },
             TreeType::Sub(left, right) => {
                 add_fix!(pre fixtype str '-');
-                let l = Self::print_inner(left,fixtype,seperator);
+                let l = Self::print_inner(left,fixtype,separator);
                 
-                let r_raw = Self::print_inner(right, fixtype, seperator);
-                let r = if let FixType::Infıx = fixtype{
+                let r_raw = Self::print_inner(right, fixtype, separator);
+                let r = if let FixType::Infix = fixtype{
                     match **right {
                     TreeType::Plus(_, _) | TreeType::Sub(_, _) => format!("({})", r_raw),
                     _ => r_raw
@@ -336,17 +336,17 @@ impl Tree {
                 };
                 str.push_str(&l);
                 add_fix!(infix fixtype str '-');
-                add_fix!(prepo fixtype str seperator);
+                add_fix!(prepo fixtype str separator);
                 str.push_str(&r);
                 add_fix!(post fixtype str '-');
             },
             TreeType::Mul(left, right) => {
                 add_fix!(pre fixtype str '*');
 
-                let l_raw = Self::print_inner(left, fixtype,seperator);
-                let r_raw = Self::print_inner(right, fixtype,seperator);
+                let l_raw = Self::print_inner(left, fixtype,separator);
+                let r_raw = Self::print_inner(right, fixtype,separator);
                 // parantez
-                let (l,r) = if let FixType::Infıx = fixtype{
+                let (l,r) = if let FixType::Infix = fixtype{
                     let l_new = match **left {
                         TreeType::Plus(_, _) | TreeType::Sub(_, _) => format!("({})", l_raw),
                         _ => l_raw
@@ -362,16 +362,16 @@ impl Tree {
 
                 str.push_str(&l);
                 add_fix!(infix fixtype str '*');
-                add_fix!(prepo fixtype str seperator);
+                add_fix!(prepo fixtype str separator);
                 str.push_str(&r);
                 add_fix!(post fixtype str '*');
             },
             TreeType::Div(left, right) => {
                 add_fix!(pre fixtype str '/');
-                let l_raw = Self::print_inner(left, fixtype,seperator);
-                let r_raw = Self::print_inner(right, fixtype,seperator);
+                let l_raw = Self::print_inner(left, fixtype,separator);
+                let r_raw = Self::print_inner(right, fixtype,separator);
 
-                let (l, r) = if let FixType::Infıx = fixtype {
+                let (l, r) = if let FixType::Infix = fixtype {
                     let l_new = match **left {
                         TreeType::Plus(_, _) | TreeType::Sub(_, _) => format!("({})", l_raw),
                         _ => l_raw
@@ -385,13 +385,13 @@ impl Tree {
                     (l_raw, r_raw)
                 };                str.push_str(&l);
                 add_fix!(infix fixtype str '/');
-                add_fix!(prepo fixtype str seperator);
+                add_fix!(prepo fixtype str separator);
                 str.push_str(&r);
                 add_fix!(post fixtype str '/');
             },
             TreeType::Brac(left) => {
                 add_fix!(infix fixtype str '(');
-                let l = Self::print_inner(left,fixtype,seperator);
+                let l = Self::print_inner(left,fixtype,separator);
                 str.push_str(&l);
                 add_fix!(infix fixtype str ')');
             },

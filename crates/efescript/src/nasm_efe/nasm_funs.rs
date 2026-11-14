@@ -8,7 +8,7 @@ use super::{OperandType, ParseErr};
 
 enum PtrInnerState{
     Single,
-    /// true = Summmary, else Extraction
+    /// true = Summary, else Extraction
     SumOrExt(bool),
 }
 

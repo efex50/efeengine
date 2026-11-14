@@ -1,6 +1,6 @@
 use crate::funs::as_usize;
-use crate::instruction::{Instuction, Operands, PtrInner};
-use crate::compiler::ast::lexer::{LexerTokenType, LexerTokens, LineColmn};
+use crate::instruction::{Instruction, Operands, PtrInner};
+use crate::compiler::ast::lexer::{LexerTokenType, LexerTokens, LineColumn};
 use crate::nasm_efe::nasm_funs::{parse_opcode, parse_register_type_to_op};
 use crate::ops::OpCodes;
 use num_derive::{FromPrimitive, ToPrimitive};
@@ -12,7 +12,7 @@ pub mod nasm_funs;
 
 #[derive(Debug)]
 pub(crate) enum PreCompile {
-    I(Instuction),
+    I(Instruction),
     L(String),
 }
 
@@ -27,7 +27,7 @@ macro_rules! ifeof {
 }
 
 
-impl Instuction {
+impl Instruction {
     pub fn get_len(&self) -> usize {
         let mut len = 1;
         if self.operandl != Operands::Null {
@@ -57,12 +57,12 @@ impl Instuction {
 #[derive(Debug)]
 pub enum ParseErr {
     NoData,
-    WrongToken(LineColmn),
-    WrongOpCode(String, LineColmn),
-    WrongOperand(String, LineColmn),
-    ErrLabelName(LineColmn),
+    WrongToken(LineColumn),
+    WrongOpCode(String, LineColumn),
+    WrongOperand(String, LineColumn),
+    ErrLabelName(LineColumn),
     EOF,
-    WrongPtrInner(String, LineColmn),
+    WrongPtrInner(String, LineColumn),
 }
 
 
@@ -72,7 +72,7 @@ pub enum ParseErr {
 
 /// Bir sonraki token'ı iterator'dan çeker, EOF kontrolü yapar ve `get_inner_str`
 /// döndürmesi beklenen token'ın içeriğini string olarak verir.
-fn next_ident<I>(iter: &mut I, pos_hint: LineColmn) -> Result<(String, LineColmn), ParseErr>
+fn next_ident<I>(iter: &mut I, pos_hint: LineColumn) -> Result<(String, LineColumn), ParseErr>
 where
     I: Iterator<Item = LexerTokens>,
 {
@@ -86,7 +86,7 @@ where
 
 /// `[reg + offset]` veya `[addr]` gibi pointer iç token listesini toplar ve
 /// `PtrInner`'a dönüştürür.
-fn parse_ptr_inner<I>(iter: &mut I, open_brl_pos: LineColmn) -> Result<PtrInner, ParseErr>
+fn parse_ptr_inner<I>(iter: &mut I, open_brl_pos: LineColumn) -> Result<PtrInner, ParseErr>
 where
     I: Iterator<Item = LexerTokens>,
 {
@@ -263,7 +263,7 @@ fn parse_str_to_instructions(str: String) -> Result<Vec<PreCompile>, ParseErr> {
                             if_eof(&rtok)?;
                             let operandr = parse_operand_from_token(&mut iter_t, &rtok)?;
 
-                            program.push(PreCompile::I(Instuction {
+                            program.push(PreCompile::I(Instruction {
                                 opcode,
                                 operandl,
                                 operandr,
@@ -288,7 +288,7 @@ fn parse_str_to_instructions(str: String) -> Result<Vec<PreCompile>, ParseErr> {
                             dbg!("sa");
                             let operandl = parse_operand_from_token(&mut iter_t, &ltok)?;
 
-                            program.push(PreCompile::I(Instuction {
+                            program.push(PreCompile::I(Instruction {
                                 opcode,
                                 operandl,
                                 operandr: Operands::Null,
@@ -312,7 +312,7 @@ fn parse_str_to_instructions(str: String) -> Result<Vec<PreCompile>, ParseErr> {
                             if label.token_type.get_inner_str().is_none() {
                                 return Err(ParseErr::ErrLabelName(label.pos.start));
                             }
-                            program.push(PreCompile::I(Instuction {
+                            program.push(PreCompile::I(Instruction {
                                 opcode,
                                 operandl: Operands::Label(
                                     label.token_type.get_inner_str_owned().unwrap(),
@@ -323,7 +323,7 @@ fn parse_str_to_instructions(str: String) -> Result<Vec<PreCompile>, ParseErr> {
 
                         // Operandsız komutlar
                         OpCodes::Ret | OpCodes::SysCall | OpCodes::Nop => {
-                            program.push(PreCompile::I(Instuction {
+                            program.push(PreCompile::I(Instruction {
                                 opcode,
                                 operandl: Operands::Null,
                                 operandr: Operands::Null,
@@ -442,7 +442,7 @@ pub fn parse_str<S: Into<String>>(str: S) -> Result<Vec<u8>, ParseErr> {
     data.r2();
     data.r2();
 
-    Ok(data.to_porgram())
+    Ok(data.to_program())
 }
 
 pub fn parse_from_file<S: Into<String>>(f: S) -> Result<Vec<u8>, ParseErr> {

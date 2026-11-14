@@ -1,4 +1,4 @@
-use crate::{as_be_bytes, instruction::Operands, nasm_efe::OperandType, runtime::{data_funs::get_inner_ptr,Instuction}};
+use crate::{as_be_bytes, instruction::Operands, nasm_efe::OperandType, runtime::{data_funs::get_inner_ptr,Instruction}};
 use num_traits::FromPrimitive;
 
 use crate::{ops::OpCodes, runtime::{parse_register_type_to_op, SimpleOperands}};
@@ -60,7 +60,7 @@ impl PThread{
 
     } 
 
-    fn get_instruction(&mut self) -> Option<Instuction>{
+    fn get_instruction(&mut self) -> Option<Instruction>{
         let prg = unsafe {
             &mut *self.program
         };
@@ -102,7 +102,7 @@ impl PThread{
                 //left
                 let rop = self.get_operand().unwrap();
                 self.counter += 1;
-                return Some(Instuction{
+                return Some(Instruction{
                     opcode:code,
                     operandl:lop,
                     operandr:rop
@@ -133,7 +133,7 @@ impl PThread{
                 //left
                 let lop = self.get_operand().unwrap();
                 self.counter += 1;
-                return Some(Instuction{
+                return Some(Instruction{
                     opcode:code,
                     operandl:lop,
                     operandr:Operands::Null
@@ -143,7 +143,7 @@ impl PThread{
             OpCodes::Nop |
             OpCodes::SysCall => {
                 self.counter +=1;
-                return Some(Instuction{
+                return Some(Instruction{
                     opcode:code,
                     operandl:Operands::Null,
                     operandr:Operands::Null,
@@ -154,7 +154,7 @@ impl PThread{
         }
     }
 
-    /// runs the program untill end
+    /// runs the program until end
     pub fn start(&mut self){
         loop {
             match self.tick() {
