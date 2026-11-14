@@ -189,7 +189,7 @@ Goal: replace the placeholder. The same scene renders, animates and resizes corr
 | Logging | Use `log` levels (`env_logger` is declared but unused). On a 1-core web build, use a direct logger instead of the worker logger. | soon |
 | Profiling | `tracing`/`puffin` spans around each stage | later |
 | Hot reload | Native file watcher for assets and shaders | later |
-| Tooling | Rewrite `build.py` as a Rust `xtask` crate (`cargo xtask run test_example web`); details in the notes. Optional. | when convenient |
+| Tooling | ✅ Done: `cargo xtask` (`xtask/`) is a Rust port of `build.py`, adding `serve` and `--host`. Still to decide: keep both, or delete `build.py` and `scripts/*.py`. | decide |
 | Web publishing | GitHub Pages deploy using the `coi-serviceworker` workaround (Pages can't send COOP/COEP headers), or Netlify/Cloudflare using `_headers` | when there's something to show |
 | Docs | Keep `structure.md` files current, write a "making a game" guide, more examples | ongoing |
 
