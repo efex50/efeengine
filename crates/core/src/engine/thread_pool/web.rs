@@ -4,11 +4,15 @@ use js_sys::Array;
 use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 use web_sys::WorkerOptions;
 
-use crate::{WASM_PATH, debug_info, global_info, thread::Jobs, thread_pool::{KillGate, ThreadPoolTrait}};
+use crate::{debug_info, global_info, thread::Jobs, thread_pool::{KillGate, ThreadPoolTrait}};
 
 /// Web Worker pool. Same design as the native one: one shared flume channel,
 /// shrink = `Kill` jobs. Nothing here ever blocks the main thread: exited workers
 /// are only `terminate()`d (by dropping them) on the next resize call.
+///
+/// If the wasm JS path is not known when the pool is created (`url` is `None`), the
+/// pool has no workers. `worker_amount` is then 0, and jobs sent to it stay queued
+/// and never run, so a `JobHandle::join` on them blocks. A warning is logged.
 pub struct ThreadPool{
     receiver:flume::Receiver<Jobs>,
     sender:flume::Sender<Jobs>,
@@ -17,7 +21,7 @@ pub struct ThreadPool{
     target:AtomicUsize,
     next_id:AtomicUsize,
     kills:Arc<KillGate>,
-    url:String,
+    url:Option<String>,
     dedicated_workers:Arc<Mutex<Vec<Worker>>>,
 
 }
@@ -33,21 +37,26 @@ impl ThreadPool {
 
 impl ThreadPoolTrait for ThreadPool{
     fn new(cores:usize) -> Self {
-        assert!(cores > 0);
+        let cores = cores.max(1);
         let (tx,rx) = flume::unbounded::<Jobs>();
         let mut workers = Vec::with_capacity(cores);
         let kills = Arc::new(KillGate::default());
 
         let url = gen_url(WorkerType::Standart);
-
-        for x in 0..cores{
-            let worker = Worker::new(x, rx.clone(),&url, Some(kills.clone()));
-            workers.push(worker);
-        };
+        match &url {
+            Some(url) => {
+                for x in 0..cores{
+                    if let Some(worker) = Worker::new(x, rx.clone(),url, Some(kills.clone())) {
+                        workers.push(worker);
+                    }
+                };
+            }
+            None => log::warn!("web thread pool created with no workers: jobs will not run"),
+        }
         Self {
             dedicated_workers:Arc::new(Mutex::new(Vec::new())),
+            target:AtomicUsize::new(workers.len()),
             workers:Mutex::new(workers),
-            target:AtomicUsize::new(cores),
             next_id:AtomicUsize::new(cores),
             kills,
             url,
@@ -69,13 +78,26 @@ impl ThreadPoolTrait for ThreadPool{
         let mut workers = self.workers.lock().unwrap();
         Self::prune(&mut workers);
         let cur = self.target.load(Ordering::SeqCst);
+        let Some(url) = self.url.as_deref() else {
+            // No worker script URL: nothing can be spawned, so the pool stays empty.
+            log::warn!("web thread pool has no workers (no wasm JS path); resize ignored");
+            self.target.store(0, Ordering::SeqCst);
+            return;
+        };
+        let mut new_target = new_size;
         if new_size > cur {
             let need = new_size - cur;
             let cancelled = self.kills.cancel(need);
+            let mut created = 0;
             for _ in 0..need - cancelled {
                 let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-                workers.push(Worker::new(id, self.receiver.clone(), &self.url, Some(self.kills.clone())));
+                if let Some(w) = Worker::new(id, self.receiver.clone(), url, Some(self.kills.clone())) {
+                    workers.push(w);
+                    created += 1;
+                }
             }
+            // Count only what actually exists (worker creation can fail).
+            new_target = cur + cancelled + created;
         } else if new_size < cur {
             let n = cur - new_size;
             self.kills.request(n);
@@ -83,7 +105,7 @@ impl ThreadPoolTrait for ThreadPool{
                 let _ = self.sender.send(Jobs::Kill);
             }
         }
-        self.target.store(new_size, Ordering::SeqCst);
+        self.target.store(new_target, Ordering::SeqCst);
     }
 
     fn worker_amount(&self) -> usize {
@@ -93,21 +115,45 @@ impl ThreadPoolTrait for ThreadPool{
     fn new_dedicated_worker(&self) -> super::WorkerHandle {
         let (tx,rx) = flume::unbounded::<Jobs>();
         let mut ex = self.dedicated_workers.lock().unwrap();
-        // the new workers has id +31000 
-        let w = Worker::new(ex.len() + 31000, rx, &gen_url(WorkerType::Standart), None);
-        ex.push(w);
+        match gen_url(WorkerType::Standart) {
+            Some(url) => {
+                // the new workers has id +31000
+                match Worker::new(ex.len() + 31000, rx, &url, None) {
+                    Some(w) => ex.push(w),
+                    // `rx` was moved into the failed worker and dropped: jobs sent are discarded.
+                    None => log::warn!("dedicated web worker could not be created; its jobs are discarded"),
+                }
+            }
+            None => {
+                // No script URL: the worker is not created and `rx` is dropped, so jobs
+                // sent through this handle are discarded.
+                log::warn!("dedicated web worker not created (no wasm JS path); its jobs are discarded");
+            }
+        }
         super::WorkerHandle{sender:tx}
 
     }
 }
 
 
-fn gen_url(ty:WorkerType) -> String{
+fn gen_url(ty:WorkerType) -> Option<String>{
+    let Some(js_path) = crate::engine::config::wasm_js_path() else {
+        log::warn!("wasm JS path is not set; cannot create a web worker");
+        return None;
+    };
     let module_path= {
-        let window = web_sys::window().expect("Global window objesi bulunamadı");
-        let href = window.location().href().expect("Location href alınamadı");
-        let url = web_sys::Url::new_with_base(&format!("{}",WASM_PATH.get().unwrap()), &href)
-            .expect("URL parse edilemedi");
+        let Some(window) = web_sys::window() else {
+            log::warn!("global window object not found; cannot create a web worker");
+            return None;
+        };
+        let Ok(href) = window.location().href() else {
+            log::warn!("location href could not be read; cannot create a web worker");
+            return None;
+        };
+        let Ok(url) = web_sys::Url::new_with_base(js_path, &href) else {
+            log::warn!("worker URL could not be parsed; cannot create a web worker");
+            return None;
+        };
         url.href()
     };
 
@@ -123,11 +169,18 @@ fn gen_url(ty:WorkerType) -> String{
     let mut options = web_sys::BlobPropertyBag::new();
     options.set_type("application/javascript");
             
-    let blob = web_sys::Blob::new_with_str_sequence_and_options(&blob_parts, &options)
-        .expect("worker blob oluşturma hatası");
+    let Ok(blob) = web_sys::Blob::new_with_str_sequence_and_options(&blob_parts, &options) else {
+        log::warn!("worker blob could not be created");
+        return None;
+    };
 
-    web_sys::Url::create_object_url_with_blob(&blob)
-        .expect("worker blob url oluşturma hatası") 
+    match web_sys::Url::create_object_url_with_blob(&blob) {
+        Ok(url) => Some(url),
+        Err(_) => {
+            log::warn!("worker blob URL could not be created");
+            None
+        }
+    }
 
 }
 
@@ -159,31 +212,42 @@ enum WorkerType{
 }
 
 impl Worker{
-    fn new(id:usize,rx:flume::Receiver<Jobs>,url:&String,kills:Option<Arc<KillGate>>) -> Self{
-
-
+    /// `None` when the browser refuses to create or message the worker (CSP, no module workers).
+    fn new(id:usize,rx:flume::Receiver<Jobs>,url:&str,kills:Option<Arc<KillGate>>) -> Option<Self>{
         let module = wasm_bindgen::module();
         let memory = wasm_bindgen::memory();
         let done = Arc::new(AtomicBool::new(false));
-        let init_data = Box::new(WorkerInit { id, rx, kills, done: done.clone() });
 
         let mut workeropt = WorkerOptions::new();
         workeropt.set_type(web_sys::WorkerType::Module);
-        let worker = web_sys::Worker::new_with_options(url,&workeropt)
-            .expect("worker oluşturulamadı");
-        let mut msg_object = js_sys::Map::new();
+        let worker = match web_sys::Worker::new_with_options(url,&workeropt) {
+            Ok(w) => w,
+            Err(err) => {
+                log::warn!("web worker could not be created: {err:?}");
+                return None;
+            }
+        };
+        let init_data = Box::new(WorkerInit { id, rx, kills, done: done.clone() });
         let ptr = Box::into_raw(init_data) as usize;
+        let mut msg_object = js_sys::Map::new();
 
         msg_object.set(&JsValue::from_str("memory"), &memory);
         msg_object.set(&JsValue::from_str("id"), &JsValue::from(id));
         msg_object.set(&JsValue::from_str("module"), &module);
-        msg_object.set(&JsValue::from_str("ptr"), &JsValue::from((ptr as usize)));
-        worker.post_message(&msg_object);
-        Self { 
+        msg_object.set(&JsValue::from_str("ptr"), &JsValue::from(ptr));
+        if let Err(err) = worker.post_message(&msg_object) {
+            log::warn!("web worker init message failed: {err:?}");
+            // SAFETY: `ptr` came from `Box::into_raw` above and the message was not delivered,
+            // so the worker never takes ownership of it.
+            drop(unsafe { Box::from_raw(ptr as *mut WorkerInit) });
+            worker.terminate();
+            return None;
+        }
+        Some(Self {
             worker,
             id,
             done,
-        }
+        })
     }
 }
 

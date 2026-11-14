@@ -1,3 +1,10 @@
+//! Thread pool for background jobs.
+//!
+//! Jobs run on other threads: native OS threads, or Web Workers on wasm32.
+//! wgpu objects, SDL windows and the event pump, and DOM objects (`web_sys`
+//! handles, closures) must stay on the main thread and must never be moved into
+//! pool jobs. Only `Send` data crosses.
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use once_cell::sync::Lazy;
@@ -87,6 +94,8 @@ pub fn init_global_pool_auto() {
 
 
 
+/// Handle to a dedicated worker. Not `Clone`: dropping it sends `Jobs::Kill`, which
+/// stops the worker after the jobs already queued before it.
 pub struct WorkerHandle{
     sender:flume::Sender<Jobs>,
 }
@@ -102,6 +111,13 @@ impl WorkerHandle {
         };
         self.sender.send(Jobs::Job(Box::new(wrapper)));
         JobHandle { rx }
+    }
+}
+impl Drop for WorkerHandle {
+    fn drop(&mut self) {
+        // Dedicated workers have no kill gate, so this always stops them. The send
+        // fails (harmlessly) if the worker is already gone.
+        let _ = self.sender.send(Jobs::Kill);
     }
 }
 

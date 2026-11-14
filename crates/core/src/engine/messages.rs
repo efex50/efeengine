@@ -3,11 +3,12 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use once_cell::sync::Lazy;
 
-use crate::{LogMsg, engine, window::events::WindowEvents};
+use crate::{LogMsg, engine};
 
-/// Global engine message queue: an unbounded multi-producer channel.
-/// Anything (JS, the window backend, scripts, worker threads) can send;
-/// the engine drains it once per tick.
+/// Global message queue: an unbounded multi-producer channel for JS, workers and scripts.
+///
+/// Each `Engine` also owns a private queue (`Engine::sender()`). Only a non-headless engine
+/// drains this global one (once per frame); headless engines read only their own queue.
 pub type MessageVecType = Lazy<(flume::Sender<Message>,flume::Receiver<Message>)>;
 
 pub static MESSAGE_SYSTEM:MessageVecType = Lazy::new(flume::unbounded);
@@ -17,7 +18,7 @@ pub fn message_sender() -> flume::Sender<Message> {
     MESSAGE_SYSTEM.0.clone()
 }
 
-/// Queue a message for the engine to handle on its next tick.
+/// Queue a message on the global queue; a (non-headless) engine handles it on its next frame.
 pub fn send_message(msg:Message){
     // The receiver lives in a static and is never dropped, so sending cannot fail.
     let _ = MESSAGE_SYSTEM.0.send(msg);
@@ -35,7 +36,6 @@ pub enum Message{
     SetFrameRate(f32),
     /// Resize the global thread pool (clamped to >= 1).
     SetThreads(usize),
-    WindowEvent(WindowEvents),
     Start,
     Stop,
     Kill,

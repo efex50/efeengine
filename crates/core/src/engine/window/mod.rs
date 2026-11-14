@@ -1,5 +1,5 @@
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-
+use std::collections::VecDeque;
 
 #[cfg(target_family = "wasm")]
 pub mod web_backend;
@@ -10,8 +10,11 @@ mod web_impls;
 pub mod sdl_backend;
 #[cfg(not(target_family = "wasm"))]
 mod sdl_impls;
-pub mod events;
+pub mod headless;
 
+use crate::engine::config::EngineConfig;
+use crate::engine::error::EngineError;
+use crate::engine::input::{GamepadState, InputEvent};
 use crate::engine::renderer::SurfaceManager;
 
 /// Platform window. Deliberately not `Send`/`Sync`: native (SDL) windows and the
@@ -24,17 +27,43 @@ pub trait InnerWindow: HasWindowHandle + HasDisplayHandle{
     #[cfg(target_family = "wasm")]
     fn canvas_id(&self) -> &str;
     fn set_title(&mut self,title:String);
+    /// Drawable size in physical pixels.
     fn size(&self) -> (u32, u32);
     /// Physical pixels per logical pixel (DPI scale / devicePixelRatio).
     fn scale_factor(&self) -> f64 { 1.0 }
-    fn poll_events(&mut self);
+    /// Size in logical pixels. Default: `size() / scale_factor()`, rounded.
+    fn logical_size(&self) -> (u32, u32) {
+        let (w, h) = self.size();
+        let s = self.scale_factor();
+        if s > 0.0 {
+            ((w as f64 / s).round() as u32, (h as f64 / s).round() as u32)
+        } else {
+            (w, h)
+        }
+    }
+    /// APPEND this poll's events to `out` (never clear it). The first call also emits the
+    /// initial `Window(Resized)` + `Window(ScaleFactorChanged)`.
+    fn poll_events(&mut self, out: &mut Vec<InputEvent>);
+    /// Start/stop OS text input (Text events). Default no-op.
+    fn set_text_input(&mut self, _enabled: bool) {}
+    /// Show/hide the cursor over the window. Default no-op.
+    fn set_cursor_visible(&mut self, _visible: bool) {}
+    /// Grab the pointer: relative mouse mode (native) / pointer lock (web). Default no-op.
+    fn set_cursor_grab(&mut self, _grab: bool) {}
+    /// Write the current gamepad snapshot into `state` (connect/update/retain). Default no-op.
+    fn poll_gamepads(&mut self, _state: &mut GamepadState) {}
 }
 pub trait WindowManager{
     fn size(&self) -> (u32,u32);
     fn scale_factor(&self) -> f64;
-    fn poll_events(&mut self);
+    fn logical_size(&self) -> (u32, u32);
+    /// Injected events first, then the backend's own.
+    fn poll_events(&mut self, out: &mut Vec<InputEvent>);
     fn set_title(&mut self,title:String);
-
+    fn set_text_input(&mut self, enabled: bool);
+    fn set_cursor_visible(&mut self, visible: bool);
+    fn set_cursor_grab(&mut self, grab: bool);
+    fn poll_gamepads(&mut self, state: &mut GamepadState);
 }
 pub struct GameWindowManager{
     // NOTE: field order matters. Fields drop in declaration order, and the
@@ -42,24 +71,34 @@ pub struct GameWindowManager{
     // dropped before the window it renders to.
     pub surface_manager: Option<SurfaceManager>,
     inner: Box<dyn InnerWindow>,
+    injected: VecDeque<InputEvent>,
+    headless: bool,
 }
 
 impl GameWindowManager {
-    pub fn new(
-        title:String
-    ) -> Self {
-        #[cfg(target_family = "wasm")]
-        let w = web_backend::WebWindow::new(title);
-        #[cfg(not(target_family = "wasm"))]
-        let w = sdl_backend::SdlWindowManager::new(title.clone());
-        
-        return Self {
-            surface_manager: None, // Başlangıçta yok
-            inner:Box::new(w),
+    /// Headless when `cfg.headless`, else SDL (native) / the web canvas (wasm).
+    pub fn new(cfg: &EngineConfig) -> Result<Self, EngineError> {
+        let inner: Box<dyn InnerWindow> = if cfg.headless {
+            Box::new(headless::HeadlessWindow::new(cfg.size))
+        } else {
+            #[cfg(target_family = "wasm")]
+            { Box::new(web_backend::WebWindow::new(&cfg.title, cfg.canvas_id.clone())?) }
+            #[cfg(not(target_family = "wasm"))]
+            { Box::new(sdl_backend::SdlWindowManager::new(&cfg.title, cfg.size)?) }
         };
+        Ok(Self {
+            surface_manager: None, // Başlangıçta yok
+            inner,
+            injected: VecDeque::new(),
+            headless: cfg.headless,
+        })
     }
-    pub fn poll_events(&mut self ){
-        self.inner.poll_events();
+    /// Queue an event; drained into `out` before the backend's own events on the next poll.
+    pub fn inject(&mut self, ev: InputEvent) {
+        self.injected.push_back(ev);
+    }
+    pub fn is_headless(&self) -> bool {
+        self.headless
     }
     /// The canvas the window draws to (web only).
     #[cfg(target_family = "wasm")]
@@ -74,8 +113,6 @@ impl GameWindowManager {
     pub fn set_canvas_id(&mut self, canvas_id:String){
         self.inner.set_canvas_id(canvas_id);
     }
-
-    
 }
 
 impl WindowManager for GameWindowManager {
@@ -86,13 +123,34 @@ impl WindowManager for GameWindowManager {
     fn scale_factor(&self) -> f64 {
         self.inner.scale_factor()
     }
-    
-    fn poll_events(&mut self) {
-        self.inner.poll_events();
+
+    fn logical_size(&self) -> (u32, u32) {
+        self.inner.logical_size()
     }
-    
+
+    fn poll_events(&mut self, out: &mut Vec<InputEvent>) {
+        out.extend(self.injected.drain(..));
+        self.inner.poll_events(out);
+    }
+
     fn set_title(&mut self,title:String) {
         self.inner.set_title(title);
+    }
+
+    fn set_text_input(&mut self, enabled: bool) {
+        self.inner.set_text_input(enabled);
+    }
+
+    fn set_cursor_visible(&mut self, visible: bool) {
+        self.inner.set_cursor_visible(visible);
+    }
+
+    fn set_cursor_grab(&mut self, grab: bool) {
+        self.inner.set_cursor_grab(grab);
+    }
+
+    fn poll_gamepads(&mut self, state: &mut GamepadState) {
+        self.inner.poll_gamepads(state);
     }
 }
 

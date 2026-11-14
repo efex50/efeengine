@@ -180,6 +180,36 @@ impl From<String> for LogMsg {
     }
 }
 
+/// Logger that forwards to the `log` crate macros. Touches no platform API
+/// (no SDL), so it is what headless engines use.
+pub struct LogCrateLogger;
+
+impl Logger for LogCrateLogger {
+    fn logger_name(&self) -> &str {
+        "log crate logger"
+    }
+    fn info(&mut self, log: &str) {
+        ::log::info!("{log}");
+    }
+    fn warn(&mut self, log: &str) {
+        ::log::warn!("{log}");
+    }
+    fn error(&mut self, log: &str) {
+        ::log::error!("{log}");
+    }
+    fn alert(&mut self, log: &str) {
+        ::log::error!("{log}");
+    }
+    fn log(&mut self, log: &LogMsg) {
+        match log {
+            LogMsg::Info(m) => self.info(m),
+            LogMsg::Warn(m) => self.warn(m),
+            LogMsg::Alert(m) => self.alert(m),
+            LogMsg::Error(m) => self.error(m),
+        }
+    }
+}
+
 #[allow(non_snake_case)]
 pub fn NewDefaultLogger() -> impl Logger {
     #[cfg(target_family = "wasm")]

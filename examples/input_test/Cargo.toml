@@ -1,0 +1,21 @@
+[package]
+name = "input_test"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "native"
+path = "src/lib.rs"
+
+
+[package.metadata.vcpkg]
+git = "https://github.com/microsoft/vcpkg"
+rev = "4c1db68"
+dependencies = ["sdl3"]
+
+
+[dependencies]
+efeengine-core = { path = "../../crates/core" }

@@ -20,7 +20,9 @@ pub struct ThreadPool{
     target: AtomicUsize,
     next_id: AtomicUsize,
     kills: Arc<KillGate>,
-    dedicated_workers: Mutex<Vec<Worker>>,
+    /// Each dedicated worker with a sender clone kept by the pool, so `Drop` can
+    /// always send it `Kill` even while its `WorkerHandle` is still alive.
+    dedicated_workers: Mutex<Vec<(Worker, flume::Sender<Jobs>)>>,
     sender: flume::Sender<Jobs>,
     receiver: flume::Receiver<Jobs>,
 }
@@ -52,7 +54,7 @@ impl ThreadPool {
 
 impl ThreadPoolTrait for ThreadPool {
     fn new(size:usize) -> Self{
-        assert!(size > 0);
+        let size = size.max(1);
         let (tx,rx) = flume::unbounded::<Jobs>();
         let kills = Arc::new(KillGate::default());
         let mut workers = Vec::with_capacity(size);
@@ -111,7 +113,7 @@ impl ThreadPoolTrait for ThreadPool {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         // No kill gate: a `Kill` sent to a dedicated worker always stops it.
         let w = Worker::new(id, rx, None);
-        self.dedicated_workers.lock().unwrap().push(w);
+        self.dedicated_workers.lock().unwrap().push((w, tx.clone()));
         WorkerHandle { sender: tx }
     }
 }
@@ -130,10 +132,14 @@ impl Drop for ThreadPool {
             }
         }
         if let Ok(mut extra) = self.dedicated_workers.lock() {
-            for worker in extra.iter_mut() {
+            // Kill every dedicated worker first, then join. A `WorkerHandle` that is
+            // still alive does not block this: the pool holds its own sender, so the
+            // `Kill` always arrives. The join only waits for a job that is still running.
+            for (_, tx) in extra.iter() {
+                let _ = tx.send(Jobs::Kill);
+            }
+            for (worker, _) in extra.iter_mut() {
                 if let Some(thread) = worker.thread.take(){
-                    // Note: dedicated workers only stop when their WorkerHandle sender is
-                    // dropped or a `Kill` was sent; otherwise this join can wait forever.
                     let _ = thread.join();
                 }
             }
