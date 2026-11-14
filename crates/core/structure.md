@@ -9,7 +9,7 @@ The core library of the efeengine game engine. It provides the `Engine` type (wi
 | Kind | library, `crate-type = ["cdylib", "rlib"]` (cdylib is what wasm-bindgen consumes) |
 | Depends on (workspace) | `efeengine-macros` (`crates/core/macros`) |
 | Used by | `examples/test_example` (via `efeengine_core::prelude::*`) |
-| Key external deps | `wgpu` 27 (graphics), `sdl3` / `sdl3-sys` (native window, events, logging), `flume` (message queue and job channels), `oneshot` (job results), `hecs` (only used in tests, not wired into the engine), `serde` / `serde_json` (message and event serialisation), `bytemuck` (uniform buffer), `once_cell` (lazy statics), `pollster` (block on async graphics init), `raw-window-handle`, `env_logger` (declared, not used in src). wasm only: `wasm-bindgen`, `web-sys`, `js-sys`, `serde-wasm-bindgen`, `console_error_panic_hook`, `gloo-timers`, `ts-rs`, `console_log`, `wasm-bindgen-futures`. Dev only: `pyo3` (used only by an experiment test in `systems/mod.rs`) |
+| Key external deps | `wgpu` 27 (graphics), `sdl3` / `sdl3-sys` (native window, events, logging), `flume` (message queue and job channels), `oneshot` (job results), `hecs` (only used in tests, not wired into the engine), `serde` / `serde_json` (message and event serialisation), `bytemuck` (uniform buffer), `once_cell` (lazy statics), `pollster` (block on async graphics init), `raw-window-handle`, `env_logger` (declared, not used in src). wasm only: `wasm-bindgen`, `web-sys`, `js-sys`, `serde-wasm-bindgen`, `console_error_panic_hook`, `gloo-timers`, `ts-rs`, `console_log`, `wasm-bindgen-futures`. |
 | Targets | native (SDL3 window + wgpu `Backends::PRIMARY`) and `wasm32-unknown-unknown` (canvas + WebGL/WebGPU, Web Worker threads) |
 | Features | `default = []`; `debug_log` enables the `debug_*` log functions (otherwise they are no-ops); `static` = `sdl3/build-from-source` + `sdl3/static-link` (build and statically link SDL3 instead of using a system one) |
 
@@ -34,7 +34,7 @@ crates/core
         ├── messages.rs   global flume message queue, `Message` enum, wasm `send_message`
         ├── log.rs        Logger trait, async global logger on a dedicated worker, SDL / console loggers
         ├── world.rs      EngineWorld: Vec<GameObject> (position, rotation)
-        ├── systems/mod.rs  GameSystem trait (empty default methods), deprecated add_system(); tests with pyo3 and hecs
+        ├── systems/mod.rs  GameSystem trait (empty default methods), deprecated add_system(); experiment tests with hecs
         ├── renderer/mod.rs GraphicsContext, SurfaceManager (pipeline + uniform), unused RendererState
         ├── window
         │   ├── mod.rs        InnerWindow / WindowManager traits, GameWindowManager wrapper
@@ -133,5 +133,5 @@ Example game (`examples/test_example/src/lib.rs`): `#[main] fn main() { let mut 
 - Thread pool: errors from `send` are ignored throughout; native `Worker` ignores `Jobs::Kill` (it does not break, `native.rs`); dropping the native pool joins dedicated workers whose channels may never close (deadlock risk, noted in a comment); `change_worker_amount` panics on shrink (native) and is `todo!()` on web (`web.rs:359`); `WorkerHandleOnce` and `worker_loop_once` are unused; `static mut CORES` is accessed with `unsafe`; the Windows vcpkg root is machine-specific.
 - `JobHandle::join` on wasm blocks the calling thread (warns "experimental"); the wasm pool needs `set_wasmjs_path` to have been called first (`WASM_PATH.get().unwrap()` panics otherwise; the setter ignores its `Result`).
 - Logger: all native levels map to plain `SDL_Log` (no severity); the global logger permanently occupies one dedicated worker thread.
-- Tests are mostly experiments (pyo3 sleeps, hecs prints, mpsc, serde printing) with few assertions; `pyo3` as a dev-dependency requires a Python install to build the tests. `env_logger`, `bytemuck` derive features and `serde_json` are declared; `env_logger` is unused.
+- Tests are mostly experiments (hecs prints, mpsc, serde printing) with few assertions; `env_logger`, `bytemuck` derive features and `serde_json` are declared; `env_logger` is unused.
 - Leftover/debug code: wasm `zort()` export (`lib.rs:27`), `worker_once.js` `setTimeout` console.log.

@@ -27,7 +27,7 @@ On the web you can already test input without graphics: the requestAnimationFram
 
 - [ ] 0.1 Commit or finish the work in progress in `engine.rs`, `thread_pool.rs`, `systems/mod.rs` and `Cargo.toml` (the `init_global_pool_auto` refactor).
 - [ ] 0.2 Stop the console flood: `sdl_backend.rs` calls `global_alert("event got!")` for every unhandled SDL event, including each mouse move. Turn it into a debug-level log, or remove it.
-- [ ] 0.3 Refresh `crates/core/structure.md`: it still mentions pyo3 tests and lists hecs as dev-only.
+- [ ] 0.3 Refresh `crates/core/structure.md`: it still lists hecs as dev-only.
 - [ ] 0.4 Fix CI (`.github/workflows/rust.yml`). It needs nightly + `rust-src`, SDL3 dev packages, and a wasm `cargo check` step; it should also run `cargo fmt --check` and `clippy`.
 - [ ] 0.5 Results of the health scan (2026-11-14). Native and wasm `cargo check` both pass.
   - The `Engine::new` doc example (`engine.rs:53`) is stale and makes `cargo test` fail: it passes 2 arguments, and the function takes 1.
