@@ -338,7 +338,11 @@ dependencies = [
 
 [[package]]
 name = "efepages"
-version = "0.0.0"
+version = "0.1.0"
+dependencies = [
+ "nohash-hasher",
+ "page_size_macro",
+]
 
 [[package]]
 name = "efescript"
@@ -753,6 +757,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
+
+[[package]]
 name = "num-derive"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -817,6 +827,10 @@ checksum = "7f4779c6901a562440c3786d08192c6fbda7c1c2060edd10006b05ee35d10f2d"
 dependencies = [
  "num-traits",
 ]
+
+[[package]]
+name = "page_size_macro"
+version = "0.1.0"
 
 [[package]]
 name = "parking_lot"
