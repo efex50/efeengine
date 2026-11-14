@@ -1,5 +1,5 @@
 [package]
-name = "realgameengine"
+name = "efeengine-core"
 version = "0.1.0"
 edition = "2024"
 
@@ -9,8 +9,6 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 
-[workspace]
-members = ["./examples/*", "proc_marcoes"]
 
 [dependencies]
 bytemuck = { version = "1.24.0", features = ["derive"] }
@@ -21,7 +19,8 @@ raw-window-handle = "0.6.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 wgpu = "27.0.1"
-proc_marcoes = {path = "./proc_marcoes"}
+efeengine-macros = { path = "./macros" }
+flume = { version = "0.12.0", default-features = false }
 
 [features]
 default = []

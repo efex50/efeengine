@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use sdl3::{EventPump, VideoSubsystem, pixels::Color};
 
-use crate::{PENDING_MESSAGES, engine::window::{InnerWindow, sdl_backend}};
+use crate::{push_message, engine::window::{InnerWindow, sdl_backend}};
 pub type SdlContext = Arc<Mutex<sdl3::Sdl>>;
 
 
@@ -57,9 +57,8 @@ impl InnerWindow for SdlWindow {
             for _event in pump_wrapper.0.poll_iter() {
                 match _event {
                     sdl3::event::Event::Quit { timestamp } => {
-                        let mut msgs = PENDING_MESSAGES.lock().unwrap();
-                        msgs.push(crate::Message::Kill);
-                        msgs.push(crate::Message::Log(crate::LogMsg::Warn("Killing the game".to_string())));
+                        push_message(crate::Message::Kill);
+                        push_message(crate::Message::Log(crate::LogMsg::Warn("Killing the game".to_string())));
                     },
 
                     _ => ()

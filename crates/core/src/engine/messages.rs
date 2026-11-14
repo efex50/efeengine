@@ -1,4 +1,3 @@
-use std::{collections::VecDeque, sync::{Arc, Mutex}};
 use serde::{Deserialize, Serialize};
 #[cfg(target_family = "wasm")]
 use ts_rs::TS;
@@ -6,14 +5,27 @@ use once_cell::sync::Lazy;
 
 use crate::LogMsg;
 
-pub type MessageVecType = Lazy<Arc<Mutex<Vec<Message>>>>;
+/// Global engine message queue: an unbounded multi-producer channel.
+/// Anything (JS, the window backend, scripts) can send; the engine drains it once per tick.
+pub static MESSAGES: Lazy<(flume::Sender<Message>, flume::Receiver<Message>)> =
+    Lazy::new(flume::unbounded);
 
-pub static PENDING_MESSAGES:MessageVecType = Lazy::new(||{
-    let v = Vec::new();
-    let v = Mutex::new(v);
-    let v = Arc::new(v);
-    return v
-});
+/// Get a sender handle that can be cloned and moved to other threads.
+pub fn message_sender() -> flume::Sender<Message> {
+    MESSAGES.0.clone()
+}
+
+/// Queue a message for the engine to handle on its next tick.
+pub fn push_message(message: Message) {
+    // The receiver lives in a static and is never dropped, so sending cannot fail.
+    let _ = MESSAGES.0.send(message);
+}
+
+/// Take every message that is queued right now.
+/// Messages sent while the returned iterator is being consumed are kept for the next call.
+pub(crate) fn drain_messages() -> flume::Drain<'static, Message> {
+    MESSAGES.1.drain()
+}
 
 
 
@@ -43,8 +55,7 @@ mod wasm_message_handler{
     pub fn send_message(message:JsValue) -> Result<(), JsValue>{
         
         let message: Message = serde_wasm_bindgen::from_value(message)?;
-        let mut msgs = PENDING_MESSAGES.lock().unwrap();
-        msgs.push(message);
+        push_message(message);
         Ok(())
     }
 }
