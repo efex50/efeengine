@@ -27,4 +27,7 @@ cargo run -p test_example --bin native
 ## History
 
 The original repositories (realgameengine, efescript, calc) were merged with their
-full `main` history; `git log -- crates/<name>` shows it.
+full `main` history. Each "Import ..." commit is a merge whose second parent is the
+old repository's `main`, so `git log --oneline <import-commit>^2` lists its history.
+Files in those old commits sit at their original paths (e.g. `src/lib.rs`, not
+`crates/core/src/lib.rs`).
