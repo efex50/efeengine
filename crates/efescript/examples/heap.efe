@@ -1,0 +1,3 @@
+mov ra , 10
+mov rb,20
+syscall
