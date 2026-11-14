@@ -6,8 +6,8 @@ members = [
     "crates/efescript",
     "crates/efescript/proc_macros",
     "crates/efescript/strtohx",
-    "crates/efescript/efepages",
-    "crates/efescript/efepages/page_size_macro",
+    "crates/efepages",
+    "crates/efepages/page_size_macro",
     "crates/calc",
     "examples/*",
 ]

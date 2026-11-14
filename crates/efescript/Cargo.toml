@@ -6,7 +6,7 @@ edition = "2021"
 
 
 [dependencies]
-efepages = { path = "efepages" }
+efepages = { path = "../efepages" }
 proc_macros = { path="proc_macros" }
 num-derive = "0.4.2"
 num-traits = "0.2.19"
