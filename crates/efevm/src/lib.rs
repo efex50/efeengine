@@ -20,7 +20,7 @@ pub use builder::{FunctionBuilder, Label, ModuleBuilder};
 pub use imports::{Caller, HostFunc, HostOk, Imports};
 pub use instance::{FiberId, FiberStatus, Instance};
 pub use memory::Memory;
-pub use error::{BuildError, LinkError, LoadError, SpawnError};
+pub use error::{BuildError, CallError, LinkError, LoadError, SpawnError};
 pub use module::{
     BrTable, DataSegment, Export, ExportKind, FuncLines, Function, Global, Import, Inst,
     LineEntry, Lines, MemoryType, Module, ModuleData, Names,

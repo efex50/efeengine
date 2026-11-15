@@ -1,6 +1,6 @@
 # efevm v1 specification
 
-Status: draft 2, 2026-11-15 (draft 1 plus the clarifications listed in "Changes from draft 1" at the end). This is roadmap item E1.1 (`crates/efescript/ROADMAP.md`).
+Status: draft 3, 2026-11-15 (draft 1 plus the clarifications in "Changes from draft 1" and the changes in "Changes from draft 2" at the end). This is roadmap item E1.1 (`crates/efescript/ROADMAP.md`).
 `efevm` is the new core VM for efescript. It lives in its own crate (`crates/efevm`)
 next to the old VM in `crates/efescript`, which keeps working until the assembler
 moves over (E2).
@@ -64,7 +64,7 @@ targets any function index; calling an import is a host call.
 
 Notation: `d` destination register, `a b c` source registers, `imm` immediate, `L` label
 (an instruction index inside the same function), `f` function index. `T` ∈ {`i32`, `i64`},
-`F` ∈ {`f32`, `f64`}. Every instruction costs 1 unit of budget.
+`F` ∈ {`f32`, `f64`}. Every instruction costs 1 unit of budget, except that `memory.copy`, `memory.fill` and `memory.grow` also pay for their size (see "Changes from draft 2", item 1).
 
 **Constants and moves**
 - `const.i32 d, imm32` · `const.i64 d, imm64` · `const.f32 d, imm` · `const.f64 d, imm`
@@ -166,7 +166,8 @@ pub enum Trap {
   `read`/`write` helpers) and globals. It returns `Ok(HostOk::Continue)`, `Ok(HostOk::Yield)`
   or `Err(Trap::Host(..))`. It cannot call back into the VM in v1.
 - Fibers are scheduled by the embedder (resume whichever it wants); the VM never switches by itself.
-- `Limits`: max memory pages, max call depth, max register stack size, max fibers.
+- `Limits`: max memory pages, max call depth, max register stack size, max fibers (defaults in "Changes from draft 2", item 2).
+- `Instance::call` runs one export to completion in a single resume ("Changes from draft 2", item 3).
 
 ## 8. Verification (at load, before anything runs)
 
@@ -285,14 +286,12 @@ pin down points draft 1 left open.
    `Done` or `Trapped(trap)`. The trap location and backtrace of a trapped fiber are
    available through `Instance::trap_location` / `Instance::backtrace`.
 5. **Budget.** Budget 0 executes nothing and returns `OutOfBudget`. An instruction that traps
-   still costs 1, and so does a host call. `memory.copy`, `memory.fill` and `memory.grow` cost
-   1 regardless of length, as section 5 says; budget therefore bounds instructions, not wall
-   time. `Instance::resume_counted` also returns the number of instructions executed.
+   still costs 1, and so does a host call. (Superseded by draft 3, item 1: `memory.copy`, `memory.fill` and `memory.grow` now cost in proportion to their size.) `Instance::resume_counted` also returns the number of instructions executed.
 6. **Limits.** `max_call_depth` counts live activations including the entry function. A call
    that would exceed it traps with `StackOverflow`; with 0, `spawn` fails. `max_registers` is
    the total register slots of one fiber across all its frames. A register stack that cannot be
-   allocated is also a `StackOverflow`. The defaults are 16384 pages (1 GiB), depth 10_000,
-   2^20 registers and 1024 fibers.
+   allocated is also a `StackOverflow`. The defaults of draft 2 (16384 pages, depth
+   10_000, 2^20 registers, 1024 fibers) are superseded by draft 3, item 2.
 7. **Host boundary.** Values crossing into the VM keep section 2's invariant: `i32`/`f32` spawn
    arguments, host results and globals set through `Caller::set_global` /
    `Instance::set_global` have their upper 32 bits cleared according to the declared type. Host
@@ -303,3 +302,48 @@ pin down points draft 1 left open.
    - `call_indirect` and `br_table` read their index register as `u32`.
    - `memory.grow` reads its page count as `u64`.
    - `select`, `br_if` and `br_ifz` test the low 32 bits.
+
+## Changes from draft 2
+
+Draft 3 makes these three changes.
+
+1. **Bulk memory cost and budget debt.** Budget is now in units. Every instruction costs 1 as
+   before; in addition
+   - `memory.copy` and `memory.fill` cost `1 + len / 256` (integer division of the `u64`
+     length register);
+   - `memory.grow` costs `1 + (pages * 65536) / 256`, that is `1 + pages * 256`, computed with
+     saturating arithmetic. It is charged for the requested size even when the grow fails
+     and returns -1.
+   - A bulk op that traps (out of bounds) costs only 1 and creates no debt.
+
+   If the cost is more than the budget left, the operation still completes, the remaining
+   budget becomes 0, and the excess (cost minus what was left) becomes a per-fiber **debt**.
+   The resume returns `Exit::OutOfBudget` right after that instruction, so the fiber is resumable.
+   At the start of every later `resume`, before anything executes, the debt is paid:
+   if `budget <= debt`, then `debt -= budget` and the resume returns `OutOfBudget` having
+   executed nothing; otherwise `budget -= debt`, the debt is 0 and the rest of the budget
+   runs normally. Budget 0 therefore never pays debt but never executes either. A cost exactly
+   equal to the budget left creates no debt. A fiber with an absurd grow (for example `u64::MAX`
+   pages) owes about 2^64 units, so it is effectively dead; the embedder can still remove it.
+   `Instance::resume_counted` keeps counting executed **instructions**, not units: the extra
+   units of bulk operations and debt payments are not included, so a resume that executes
+   2 instructions and pays 10 units of debt reports 2.
+2. **Lower default limits and stack release.** `Limits::default()` is now
+   `max_memory_pages = 1024` (64 MiB), `max_call_depth = 4096`, `max_registers = 262144` (per
+   fiber) and `max_fibers = 256`. When a fiber finishes (`Done`) or traps, its register stack,
+   call stack and scratch buffer are freed at once; `results`, `status`, `trap_location` and
+   `backtrace` keep working, and resuming the fiber returns the same `Exit` as before.
+3. **`Instance::call`.** `call(&mut self, export: &str, args: &[u64], host: &mut H, budget: u64)
+   -> Result<Vec<u64>, CallError>` spawns the export, resumes it once with `budget`, returns the
+   results on `Done`, and removes the fiber in every case. `CallError` has the variants
+   `Spawn(SpawnError)`, `Trap { trap, location: Option<(u32, u32)>, backtrace: Vec<(u32, u32)> }`
+   (copied from `trap_location` / `backtrace` before the removal), `OutOfBudget` (including
+   debt) and `Yield`. It implements `Debug`, `Clone`, `PartialEq`, `Eq`, `Display` and
+   `std::error::Error`.
+4. **`Instance::resume_units`.** `resume_units(&mut self, fiber: FiberId, host: &mut H, budget: u64)
+   -> (Exit, u64)` is `resume` that also returns the budget units consumed by that call:
+   executed instructions, plus the extra units of bulk operations, plus debt paid at entry. It
+   never exceeds `budget`; an over-budget bulk op reports the whole remaining budget (the rest
+   is debt, paid and counted by later resumes). Budget 0, a `Done`/`Trapped` fiber or an invalid
+   id report 0. Summing it over resumes gives the total cost, so an embedder can keep a total
+   budget across yield/resume loops.

@@ -6,7 +6,7 @@ use crate::memory::Memory;
 use crate::module::{Inst, ModuleData};
 use crate::op::Op;
 use crate::trap::{Exit, Trap};
-use crate::types::Limits;
+use crate::types::{Limits, PAGE_SIZE};
 
 /// Per-function data precomputed at instantiation (whole function index space).
 #[derive(Clone, Copy, Debug)]
@@ -17,6 +17,9 @@ pub(crate) struct FuncInfo {
     /// Structural type id: equal for equal `FuncType`s.
     pub canon: u32,
 }
+
+/// Bytes per extra budget unit for `memory.copy`, `memory.fill` and `memory.grow`.
+pub(crate) const BULK_UNIT_BYTES: u64 = 256;
 
 /// A suspended caller activation.
 #[derive(Clone, Copy, Debug)]
@@ -42,6 +45,11 @@ pub(crate) struct Stack {
     pub results: Vec<u64>,
     /// Call stack (func, inst) of the trap, innermost first; set on the trap exit path.
     pub trace: Vec<(u32, u32)>,
+    /// Budget units still owed by bulk memory operations that overran an earlier budget.
+    pub debt: u64,
+    /// Extra units (beyond the base 1 per instruction) charged by bulk operations during the
+    /// current `run`; the caller reads and resets it to report an instruction count.
+    pub extra: u64,
 }
 
 /// Immutable instance data the loop needs.
@@ -207,7 +215,8 @@ pub(crate) fn run<H>(
     st: &mut Stack,
     mut budget: u64,
 ) -> (Exit, u64) {
-    let Stack { regs, frames, scratch, func: st_func, pc: st_pc, fp: st_fp, results, trace } = st;
+    let Stack { regs, frames, scratch, func: st_func, pc: st_pc, fp: st_fp, results, trace, debt, extra } =
+        st;
     let nimports = env.data.imports.len();
     let mut func = *st_func;
     let mut pc = *st_pc as usize;
@@ -242,6 +251,21 @@ pub(crate) fn run<H>(
                 trace.push((fr.func, fr.pc.saturating_sub(1)));
             }
             return (Exit::Trap(t), budget);
+        }};
+    }
+    // Charges the units of a bulk operation beyond the 1 already paid. When they exceed the
+    // remaining budget, the budget becomes 0, the excess becomes debt, and the fiber stops.
+    macro_rules! charge {
+        ($units:expr) => {{
+            let units: u64 = $units;
+            if units > budget {
+                *extra = extra.saturating_add(budget);
+                *debt = units - budget;
+                save!();
+                return (Exit::OutOfBudget, 0);
+            }
+            *extra += units;
+            budget -= units;
         }};
     }
     macro_rules! tr {
@@ -513,12 +537,18 @@ pub(crate) fn run<H>(
             Op::MemoryGrow => {
                 let delta = f[inst.b as usize];
                 ra!(inst) = memory.grow(delta).unwrap_or(u64::MAX);
+                // Cost 1 + pages * 65536 / 256, charged even when the grow fails.
+                charge!(delta.saturating_mul(PAGE_SIZE / BULK_UNIT_BYTES));
             }
             Op::MemoryCopy => {
-                tr!(memory.copy(ra!(inst), f[inst.b as usize], f[inst.c as usize]));
+                let len = f[inst.c as usize];
+                tr!(memory.copy(ra!(inst), f[inst.b as usize], len));
+                charge!(len / BULK_UNIT_BYTES);
             }
             Op::MemoryFill => {
-                tr!(memory.fill(ra!(inst), f[inst.b as usize] as u8, f[inst.c as usize]));
+                let len = f[inst.c as usize];
+                tr!(memory.fill(ra!(inst), f[inst.b as usize] as u8, len));
+                charge!(len / BULK_UNIT_BYTES);
             }
 
             // ---- i32 ----

@@ -573,6 +573,7 @@ name = "efescript"
 version = "0.2.0"
 dependencies = [
  "efepages",
+ "efevm",
  "num-derive",
  "num-traits",
  "proc_macros",

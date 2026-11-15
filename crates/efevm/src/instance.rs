@@ -1,6 +1,6 @@
 //! Instances: memory, globals, resolved imports and fibers.
 
-use crate::error::{LinkError, LoadError, SpawnError};
+use crate::error::{CallError, LinkError, LoadError, SpawnError};
 use crate::imports::{HostFunc, Imports};
 use crate::interp::{Env, FuncInfo, Stack, run};
 use crate::memory::Memory;
@@ -216,8 +216,14 @@ impl<H> Instance<H> {
         s.fiber.as_ref()
     }
 
-    /// Runs `fiber` for at most `budget` instructions (each executed instruction costs 1,
-    /// including calls, host calls and `yield`).
+    /// Runs `fiber` for at most `budget` budget units. Each executed instruction costs 1
+    /// (including calls, host calls and `yield`); `memory.copy` and `memory.fill` cost
+    /// `1 + len / 256` and `memory.grow` costs `1 + pages * 65536 / 256` (saturating, charged
+    /// even if the grow fails; a trapping bulk op costs 1). If a bulk op costs more than the
+    /// budget left, it still completes, the rest of the cost becomes a per-fiber debt and the
+    /// resume returns `OutOfBudget` right after it. A later resume pays the debt first: if
+    /// `budget <= debt` the debt shrinks by `budget` and nothing executes, otherwise the
+    /// remainder of the budget runs normally.
     ///
     /// - Resuming a `Done` fiber returns `Exit::Done` again; a `Trapped` fiber returns the same
     ///   `Exit::Trap` again; an unknown or removed id returns `Exit::Trap(Trap::Host("invalid fiber"))`.
@@ -230,8 +236,24 @@ impl<H> Instance<H> {
         self.resume_counted(fiber, host, budget).0
     }
 
-    /// Like `resume`, also returning the number of instructions executed in this call.
+    /// Like `resume`, also returning the number of instructions executed in this call (not
+    /// budget units: debt payments and the extra cost of bulk operations are not counted).
     pub fn resume_counted(&mut self, fiber: FiberId, host: &mut H, budget: u64) -> (Exit, u64) {
+        let (exit, instrs, _) = self.resume_inner(fiber, host, budget);
+        (exit, instrs)
+    }
+
+    /// Like `resume`, also returning the budget units consumed by this call: instructions plus
+    /// the extra units of bulk memory operations plus debt paid. Never more than `budget`, so an
+    /// embedder can subtract it from a total budget across several resumes. A resume that
+    /// executes nothing and pays no debt (budget 0, done, trapped, invalid fiber) reports 0.
+    pub fn resume_units(&mut self, fiber: FiberId, host: &mut H, budget: u64) -> (Exit, u64) {
+        let (exit, _, units) = self.resume_inner(fiber, host, budget);
+        (exit, units)
+    }
+
+    /// Returns `(exit, instructions executed, budget units consumed)`.
+    fn resume_inner(&mut self, fiber: FiberId, host: &mut H, mut budget: u64) -> (Exit, u64, u64) {
         let Instance {
             module, memory, globals, gmut, gmask, res_masks, infos, type_canon, hosts, limits, slots, ..
         } = self;
@@ -240,12 +262,22 @@ impl<H> Instance<H> {
             _ => None,
         };
         let Some(fib) = fib else {
-            return (Exit::Trap(Trap::Host("invalid fiber".into())), 0);
+            return (Exit::Trap(Trap::Host("invalid fiber".into())), 0, 0);
         };
         match &fib.status {
-            FiberStatus::Done => return (Exit::Done, 0),
-            FiberStatus::Trapped(t) => return (Exit::Trap(t.clone()), 0),
+            FiberStatus::Done => return (Exit::Done, 0, 0),
+            FiberStatus::Trapped(t) => return (Exit::Trap(t.clone()), 0, 0),
             _ => {}
+        }
+        // Pay budget debt from earlier bulk memory operations before executing anything.
+        let paid = fib.stack.debt;
+        if paid > 0 {
+            if budget <= paid {
+                fib.stack.debt = paid - budget;
+                return (Exit::OutOfBudget, 0, budget);
+            }
+            fib.stack.debt = 0;
+            budget -= paid;
         }
         let env = Env {
             data: module.data(),
@@ -258,6 +290,7 @@ impl<H> Instance<H> {
             limits: *limits,
         };
         let (exit, left) = run(&env, memory, globals, host, fiber, &mut fib.stack, budget);
+        let extra = std::mem::take(&mut fib.stack.extra);
         fib.status = match &exit {
             Exit::Done => FiberStatus::Done,
             Exit::Yield => FiberStatus::Suspended,
@@ -276,7 +309,42 @@ impl<H> Instance<H> {
             fib.stack.frames = Vec::new();
             fib.stack.scratch = Vec::new();
         }
-        (exit, budget - left)
+        // Instructions executed: the units spent minus the extra units bulk operations charged.
+        (exit, budget - left - extra, paid + (budget - left))
+    }
+
+    /// Spawns `export`, resumes it once with `budget`, and removes the fiber again. Returns the
+    /// results on `Done`. The fiber slot is freed in every case; for a trap the location and
+    /// backtrace are copied into the error first.
+    pub fn call(
+        &mut self,
+        export: &str,
+        args: &[u64],
+        host: &mut H,
+        budget: u64,
+    ) -> Result<Vec<u64>, CallError> {
+        let id = self.spawn(export, args).map_err(CallError::Spawn)?;
+        let exit = self.resume(id, host, budget);
+        let out = match exit {
+            Exit::Done => Ok(self.results(id).map(<[u64]>::to_vec).unwrap_or_default()),
+            Exit::Trap(trap) => Err(CallError::Trap {
+                trap,
+                location: self.trap_location(id),
+                backtrace: self.backtrace(id).map(<[(u32, u32)]>::to_vec).unwrap_or_default(),
+            }),
+            Exit::OutOfBudget => Err(CallError::OutOfBudget),
+            Exit::Yield => Err(CallError::Yield),
+        };
+        self.remove_fiber(id);
+        out
+    }
+
+    /// Total capacity (in elements) of the register, frame and scratch stacks a fiber still
+    /// holds; 0 once it is `Done` or `Trapped`. For tests and diagnostics.
+    #[doc(hidden)]
+    pub fn fiber_stack_capacity(&self, fiber: FiberId) -> Option<usize> {
+        let f = self.fiber(fiber)?;
+        Some(f.stack.regs.capacity() + f.stack.frames.capacity() + f.stack.scratch.capacity())
     }
 
     /// Results of a `Done` fiber.

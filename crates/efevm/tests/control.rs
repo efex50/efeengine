@@ -753,9 +753,9 @@ fn call_depth_boundary() {
     assert_eq!(run_lim(&m, lim, &[10]).0, Exit::Trap(Trap::StackOverflow)); // 11 activations
     assert_eq!(run_lim(&m, lim, &[1000]).0, Exit::Trap(Trap::StackOverflow));
     // default limit
-    assert_eq!(run(&m, &[9_998]).0, Exit::Done);
-    assert_eq!(run(&m, &[9_999]).0, Exit::Done);
-    assert_eq!(run(&m, &[10_000]).0, Exit::Trap(Trap::StackOverflow));
+    assert_eq!(run(&m, &[4_094]).0, Exit::Done);
+    assert_eq!(run(&m, &[4_095]).0, Exit::Done);
+    assert_eq!(run(&m, &[4_096]).0, Exit::Trap(Trap::StackOverflow));
 }
 
 #[test]

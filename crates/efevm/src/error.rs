@@ -3,6 +3,7 @@
 use crate::binary::DecodeError;
 use crate::op::Op;
 use crate::verify::VerifyError;
+use crate::trap::Trap;
 use std::fmt;
 
 /// Failure to turn bytes or a builder into a verified module.
@@ -109,3 +110,30 @@ impl std::error::Error for LoadError {}
 impl std::error::Error for LinkError {}
 impl std::error::Error for BuildError {}
 impl std::error::Error for SpawnError {}
+
+/// Why `Instance::call` did not return results.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallError {
+    /// The fiber could not be created.
+    Spawn(SpawnError),
+    /// The function trapped. `location` and `backtrace` are what `Instance::trap_location` and
+    /// `Instance::backtrace` reported before the fiber was removed.
+    Trap { trap: Trap, location: Option<(u32, u32)>, backtrace: Vec<(u32, u32)> },
+    /// The budget ran out (including budget debt from bulk memory operations).
+    OutOfBudget,
+    /// The function yielded.
+    Yield,
+}
+
+impl fmt::Display for CallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CallError::Spawn(e) => write!(f, "spawn failed: {e}"),
+            CallError::Trap { trap, .. } => write!(f, "trap: {trap}"),
+            CallError::OutOfBudget => f.write_str("out of budget"),
+            CallError::Yield => f.write_str("function yielded"),
+        }
+    }
+}
+
+impl std::error::Error for CallError {}

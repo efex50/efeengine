@@ -4,6 +4,133 @@ The scripting layer of efeengine: an x86-flavoured assembly dialect (`.efe`) and
 that runs it. See `structure.md` for the code layout, `docs/e0-design.md` for the design and
 `ROADMAP.md` for what comes next.
 
+## v2: `.efa` assembly on efevm
+
+v2 is the current path. A text assembly language (`.efa`) is assembled into an `efevm`
+module (`.efvm`: verified bytecode with a register interpreter, fibers and an instruction
+budget, see `crates/efevm/SPEC.md`), and `efescript` runs it. Assembly errors point at the
+file, line and column with a caret under the span. A trap prints a backtrace with the source
+line of every frame. `dis` turns a module back into `.efa` text that assembles to the same bytes.
+
+Code: `src/asm/` (assembler), `src/disasm.rs`, `src/run_v2.rs`, `src/host_std.rs`, and the VM in
+`crates/efevm`. Design: `docs/e2-design.md`. Full syntax reference: `docs/efa-syntax.md`. Readable guide to every instruction: `docs/efa-instructions.md`.
+
+### CLI
+
+```text
+efescript run   <file.efa|file.efvm> [--budget N]
+efescript build <file.efa> -o <out.efvm>
+efescript dis   <file.efvm|file.efa> [-o out.efa]
+efescript <file.efa> [--budget N]      (shorthand for run)
+```
+
+- `run` assembles if needed and runs the exported `main`. `--budget N` limits the total number
+  of instructions (unlimited by default).
+- `build` writes the encoded module to `-o`.
+- `dis` prints the module as `.efa` (to stdout, or to `-o`). Names come from the `names`
+  section when present; otherwise `f0`, `r0`, `data0`, ... are used.
+
+Exit codes for v2 programs:
+
+- `main` returns nothing: 0. `main` returns one `i32`: that value. `std.exit(code)`: that code.
+- 2: a load or assembly error (missing file, diagnostics, no exported `main` or a wrong `main`
+  signature, an unresolved import).
+- 3: a trap (the trap and its backtrace go to stderr), or the `--budget` ran out.
+
+### Language reference (short)
+
+The full reference is `docs/efa-syntax.md`. The mnemonics are the `efevm` ones, listed in
+`crates/efevm/OPCODES.md`.
+
+- **Lexical rules.** `;` starts a comment. A dotted name is one token (`i64.add`, `std.println`,
+  `msg.len`). Integers: decimal, `0x`, `0b`, `0o`, `_` separators, optional `-`. Floats: `1.5`,
+  `1e9`, `inf`, `nan`, `nan:0x7fc00001`. Characters: `'a'`, `'\n'`. Strings: `"..."` with the
+  escapes `\n \t \r \0 \\ \" \xNN`. A statement ends at the end of its line; blocks use `{` `}`.
+- **Top-level items.** `import std.println(i64, i64) -> i64`, `memory MIN [MAX]` (64 KiB pages),
+  `const NAME = 10`, `global [mut] NAME: i64 = 0`, `table [f1, null, f2]`, data
+  (`NAME db "text", 10`, `dw`, `dd`, `dq`, `NAME resb 64`), and `[export] fn NAME(a: i64) -> i64 { ... }`.
+  Types are `i32 i64 f32 f64`.
+- **Functions, registers, labels.** Parameters are registers `r0`, `r1`, ... named by the
+  parameter list. `reg a, b` declares more named registers. Raw `rN` registers can always be used.
+  Labels are `name:` and are local to the function. Every function must end in `ret`, `jmp`,
+  `br_table` or `unreachable`; the assembler does not add one.
+- **Instructions.** The `efevm` mnemonic with the destination first: `i64.add d, a, b`,
+  `i64.load d, base, off`, `i64.store src, base, off`.
+- **Conveniences** (each expands to plain instructions):
+  - immediates in source positions: `i64.sub n, n, 1`; `const` and data names work too;
+  - call sugar: `call f(a, b) -> x` or `-> (x, y)`, where `f` is a function or an import;
+    `call_indirect (i64) -> i64, idx(a) -> x` for indirect calls;
+  - returns: `ret`, `ret a`, `ret (a, b)`;
+  - loads and stores with an optional offset; the base may be a data name;
+  - `br_table idx, [a, b, c], default`;
+  - globals by name: `global.get d, NAME`, `global.set NAME, a`.
+- **Data.** Every data item defines `NAME` (its address) and `NAME.len` (its size in bytes).
+  Items are laid out from address 1024 in definition order, each 8-byte aligned.
+- **Host functions** (namespace `std`, from `src/host_std.rs`):
+
+  | Import | Meaning |
+  |---|---|
+  | `std.print(i64, i64)` | write `len` bytes at `ptr` |
+  | `std.println(i64, i64)` | the same, then a newline |
+  | `std.print_i64(i64)` · `std.print_f64(f64)` · `std.print_char(i32)` | write a number / one character |
+  | `std.read_line(i64, i64) -> i64` | read a line into `ptr` (at most `cap` bytes); returns the length |
+  | `std.play_sound(i64, i64) -> i32` | play the file at the path; 0 = ok |
+  | `std.exit(i32)` | stop the program with this exit code |
+
+Hello world:
+
+```text
+; hello.efa
+import std.println(i64, i64)          ; pointer, length
+
+msg db "hello world!"
+
+export fn main() {
+    call std.println(msg, msg.len)
+    ret
+}
+```
+
+Sum of n, n-1, ..., 1 (a loop; `examples/recursion.efa` has the recursive version):
+
+```text
+export fn sum(n: i64) -> i64 {
+    reg acc, t
+    const.i64 acc, 0
+loop:
+    i64.eqz t, n
+    br_if t, done
+    i64.add acc, acc, n
+    i64.sub n, n, 1
+    jmp loop
+done:
+    ret acc
+}
+```
+
+### v2 examples
+
+Run from the crate directory (`crates/efescript`), so relative paths resolve:
+`cargo run -q -p efescript -- run examples/hello.efa`. Each file has its expected output in its header comment.
+
+- `examples/hello.efa`: one import, one string, one call (`hello world!`).
+- `examples/strings.efa`: `db` strings and escapes, `NAME.len`, byte loads, a slice, `dw`/`dd`/`dq` tables.
+- `examples/jumps.efa`: every comparison and branch form on i64 and i32, `eqz`, `br_if`, `br_ifz`, `jmp`, `br_table`, `select`.
+- `examples/recursion.efa`: recursive sum, factorial and fibonacci with call sugar.
+- `examples/floats.efa`: f64 and f32 arithmetic, comparisons, conversions, reinterpret, a float global.
+- `examples/sound.efa`: `std.play_sound` on `examples/ominous_worse.ogg`; `main` returns the status (0 or 1).
+
+### v2 tests
+
+```text
+cargo test -p efescript
+```
+
+## Legacy path (`.efe`, nasm_efe and the old runtime)
+
+Everything from here to the end of this file is the legacy path, kept unchanged until E3.6
+removes it. Its exit codes are listed under "Run" below.
+
 ## Run
 
 From the crate directory (`crates/efescript`), so relative paths such as the one in `sound.efe` resolve:

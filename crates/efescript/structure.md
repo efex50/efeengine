@@ -1,28 +1,36 @@
 # efescript
 
-efescript is the engine's scripting layer. Today it is an x86-flavoured assembly dialect ("nasm_efe") with a label-resolving bytecode compiler and a small register VM that runs the bytecode inside an `efepages` `Page`. A high-level language front end (`src/compiler`) exists only as a lexer plus empty AST stubs and is not wired to anything. The crate is both a library (`efescript`) and a CLI binary (`src/main.rs`).
+efescript is the engine's scripting layer and has two paths. **v2 (current):** a text assembler for `.efa` (`src/asm`) lowers source to a verified `efevm` module (`.efvm`); `src/run_v2.rs` runs it on the `efevm` interpreter with the `std` host of `src/host_std.rs`, and `src/disasm.rs` prints a module back as `.efa`. **Legacy (kept until E3.6):** an x86-flavoured assembly dialect (`.efe`, "nasm_efe") with a label-resolving bytecode compiler and a small register VM (`runtime`) that runs the bytecode inside an `efepages` `Page`. A high-level language front end (`src/compiler`) exists only as a lexer plus empty AST stubs and is not wired to anything. The crate is both a library (`efescript`) and a CLI binary (`src/main.rs`), which dispatches `.efa`/`.efvm` to v2 and `.efe`/`.efec` to the legacy path.
 
 ## At a glance
 | | |
 |---|---|
 | Path | `crates/efescript` |
 | Kind | library + binary (`efescript`) |
-| Depends on (workspace) | `efepages` (paged memory `Page`), `proc_macros` (const generators, sibling crate) |
+| Depends on (workspace) | `efevm` (the v1 VM that the v2 path runs on), `efepages` (paged memory `Page`, legacy path), `proc_macros` (const generators, sibling crate) |
 | Used by | nothing else in the workspace (only listed as a workspace member in the root `Cargo.toml`); `strtohx` emits source for it but has no code dependency |
 | Key external deps | `num-derive` / `num-traits` (u8/usize <-> enum conversion for opcodes, operand types, syscalls); `rodio` (optional, `audio` feature) |
-| Targets | native only in practice: Readln/ReadCon/ReadFs/WriteFs use stdin and the file system directly, no wasm32 support |
+| Targets | native only in practice: the legacy Readln/ReadCon/ReadFs/WriteFs use stdin and the file system directly, and the CLI (both paths) is native. `efevm` itself has no I/O and is wasm32-compatible; the v2 `std` host and CLI are native |
 | Features | `audio` (off by default): real `PlaySound` playback through `rodio`. Needs the ALSA development headers on Linux (`alsa-lib-devel` / `libasound2-dev`). It was NOT compiled on the dev machine, so it is untested; the default build has no audio and `PlaySound` fails with ra = 1 |
 
 ## Layout
 ```text
 crates/efescript/
 ├── Cargo.toml            # package efescript 0.2.0, edition 2021
-├── README.md             # language reference, how to run examples and tests
+├── README.md             # v2 section (CLI, language, examples, tests), then the legacy reference
 ├── ROADMAP.md            # E0..E7 plan (E0 done)
 ├── docs/e0-design.md     # design of the E0 work: db/symbols, host, RunResult, CLI, tests
+├── docs/e2-design.md     # design of the E2 work: assembler v2 on efevm, CLI, std host, tests
+├── docs/efa-syntax.md    # authoritative .efa syntax, lowering, diagnostics and disassembler reference
 ├── noname.gv             # stray vim graphviz template, unrelated
 ├── examples/             # every example has a header comment with its expected output
-│   ├── hello.efe         # `db` + Println: "hello world!"
+│   ├── hello.efa         # v2: one import, one string, one call: "hello world!"
+│   ├── strings.efa       # v2: db escapes, NAME.len, byte loads, dw/dd/dq tables
+│   ├── jumps.efa         # v2: every comparison and branch form, br_table, select
+│   ├── recursion.efa     # v2: recursive sum, factorial, fibonacci with call sugar
+│   ├── floats.efa        # v2: f64/f32 arithmetic, conversions, reinterpret, float global
+│   ├── sound.efa         # v2: std.play_sound on examples/ominous_worse.ogg, status as exit code
+│   ├── hello.efe         # legacy: `db` + Println: "hello world!"
 │   ├── strings.efe       # db, NAME, NAME.len, BYTEPTR [msg], [msg+reg], Printchar loop
 │   ├── jumps.efe         # je jne jgt jlt jge jle jz jnz js, taken and not taken
 │   ├── recursion.efe     # recursive sum(n) and fib(n) with call/ret and the stack
@@ -36,28 +44,43 @@ crates/efescript/
 │   └── ominous_worse.ogg # audio file used by sound.efe
 ├── tests/                # integration tests (CaptureHost + run_with_limit)
 │   ├── common/mod.rs     # run()/exit_code() helpers
-│   ├── examples.rs       # examples run to exact output and RunResult
+│   ├── examples.rs       # legacy examples run to exact output and RunResult
 │   ├── sound.rs          # PlaySound with a recording host and a failing host
 │   ├── control_flow.rs   # jumps, loops, nested calls, recursion depth 1000/20000, step limit
 │   ├── strings.rs        # db escapes, UTF-8 len, data before/after code, data not executed
 │   ├── errors.rs         # ParseErr variants with positions, runtime faults never panic
-│   └── cli.rs            # the built binary: exit codes, -o, .efec, no out.efec
+│   ├── cli.rs            # the built binary: exit codes, -o, .efec, no out.efec
+│   └── v2_*.rs           # v2 integration tests (examples, diagnostics, round trip, CLI, backtrace, never-panics)
 ├── proc_macros/          # sibling crate, see its structure.md
 ├── strtohx/              # sibling crate, see its structure.md
 └── src/
     ├── lib.rs            # module tree; invokes proc_macros::max_addr!/stack_page_count!
     ├── prelude.rs        # re-exports ProgramRuntime, RunResult, TickSignal, Host, StdHost, CaptureHost, parse_str, parse_from_file
-    ├── main.rs           # CLI: assemble + run a .efe file
+    ├── main.rs           # CLI: v2 run/build/dis for .efa/.efvm; legacy assemble + run for .efe/.efec
+    ├── asm/              # v2 assembler: .efa text -> verified efevm module (efa-syntax.md)
+    │   ├── mod.rs        # parse() and assemble() entry points: lexer, parser, lowering; merged diagnostics
+    │   ├── ast.rs        # syntax tree of .efa; every node carries a Span
+    │   ├── diag.rs       # Diagnostic(s): rendering with the caret line, did_you_mean
+    │   ├── lexer.rs      # tokens (names, ints, floats, chars, strings), newline rules; never panics
+    │   ├── parser.rs     # recursive-descent parser to ast::Module; recovers at the next line
+    │   └── lower/        # AST -> efevm::ModuleBuilder -> verified Module
+    │       ├── mod.rs    # module level: imports, globals, data layout, memory, exports, names, lines
+    │       ├── func.rs   # function bodies: registers, labels, operand forms, call/ret windows, nregs
+    │       ├── value.rs  # immediates: typing and range checks per slot type
+    │       └── tests.rs  # lowering unit tests (currently empty)
+    ├── disasm.rs         # efevm module -> .efa text in raw forms; assemble -> disassemble round trips
+    ├── host_std.rs       # the std host namespace on efevm Imports (print, println, print_i64, print_f64, print_char, read_line, play_sound, exit)
+    ├── run_v2.rs         # v2 runner: load .efa/.efvm, run export main, exit code, trap backtrace report
     ├── ops.rs            # OpCodes enum (bytecode opcodes)
     ├── instruction.rs    # Instruction, Operands, PtrInner, Registers (in-memory form)
     ├── syscalls.rs       # SysCalls enum + number-literal helpers (as_usize, as_u8..as_u64)
     ├── funs.rs           # same helpers plus trim_zeroes, get_db_data
     ├── macros.rs         # reg!, as_be_bytes! macros
-    ├── nasm_efe/
+    ├── nasm_efe/         # legacy assembler (.efe), kept until E3.6
     │   ├── mod.rs        # token -> PreCompile (instructions + labels); OperandType; parse_str/parse_from_file
     │   ├── nasm_funs.rs  # opcode/register name tables, Operands::to_int (operand encoding), PtrInner::from_tokens
     │   └── nasm_compiler.rs # label resolution (Data: r1/r2 passes) and final byte emission
-    ├── runtime/
+    ├── runtime/          # legacy VM (.efe), kept until E3.6
     │   ├── mod.rs        # SimpleOperands (operand byte -> class)
     │   ├── host.rs       # Host trait, StdHost, CaptureHost
     │   ├── data_funs.rs  # NumToStr enum; mem_read/mem_write (checked page access); get_inner_ptr

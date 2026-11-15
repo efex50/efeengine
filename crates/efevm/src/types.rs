@@ -52,13 +52,14 @@ pub struct Limits {
     pub max_fibers: u32,
 }
 
+/// Defaults: 1024 pages (64 MiB), call depth 4096, 262144 registers per fiber, 256 fibers.
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            max_memory_pages: 16384,
-            max_call_depth: 10_000,
-            max_registers: 1 << 20,
-            max_fibers: 1024,
+            max_memory_pages: 1024,
+            max_call_depth: 4096,
+            max_registers: 262_144,
+            max_fibers: 256,
         }
     }
 }
@@ -73,6 +74,6 @@ mod tests {
         assert_eq!(t.params.len(), 2);
         assert_eq!(ValType::from_byte(3), Some(ValType::F64));
         assert_eq!(ValType::from_byte(4), None);
-        assert_eq!(Limits::default().max_memory_pages, 16384);
+        assert_eq!(Limits::default().max_memory_pages, 1024);
     }
 }

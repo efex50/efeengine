@@ -9,6 +9,10 @@ pub mod nasm_efe;
 pub(crate)mod runtime;
 pub mod compiler;
 pub mod debugger;
+pub mod asm;
+pub mod host_std;
+pub mod disasm;
+pub mod run_v2;
 
 
 

@@ -22,9 +22,10 @@ efeengine/
 ├── crates/
 │   ├── core/               efeengine-core: the engine
 │   │   └── macros/         efeengine-macros: #[main] entry-point macro
-│   ├── efescript/          efescript: assembler + bytecode VM (scripting layer)
+│   ├── efescript/          efescript: v2 `.efa` assembler and CLI on efevm, legacy assembler + VM (scripting layer)
 │   │   ├── proc_macros/    build-time constants for efescript
 │   │   └── strtohx/        dev tool: text → push instructions for .efe programs
+│   ├── efevm/              efevm: v1 core VM (verified .efvm modules, interpreter, fibers); the v2 path runs on it
 │   ├── efepages/           efepages: sparse paged memory used by the VM
 │   │   └── page_size_macro/ build-time PAGE_SIZE constant
 │   └── calc/               calc: expression parser / printer / simplifier (+ CLI)
@@ -42,9 +43,10 @@ efeengine/
 |---|---|---|---|---|
 | `efeengine-core` | `crates/core` | lib (rlib + cdylib) | The engine. `Engine` owns the window, logger, wgpu graphics context, a simple world, input state, resources and a system schedule, and runs a fixed-timestep frame loop (`frame`: poll input, handle messages, `Startup` / `PreUpdate` / `FixedUpdate` / `Update` / `PostUpdate` / `RenderExtract` / `Shutdown` stages, render). A platform-neutral input system (keyboard, mouse, wheel, touch, text, window events) is fed by an SDL3 backend on native and DOM listeners on the web; a headless window makes the loop testable without SDL or a GPU. Control `Message`s (start/stop/kill, title, logging) travel on an engine-owned flume queue and a global one for JS and workers. A thread pool uses OS threads natively and Web Workers on wasm. Rendering is currently one hard-coded animated triangle. | [crates/core/structure.md](crates/core/structure.md) |
 | `efeengine-macros` | `crates/core/macros` | proc-macro | `#[main]`: turns the game's `main` into a native `fn main`, or on wasm into an exported `__engine_start()` that the web page calls. | [crates/core/macros/structure.md](crates/core/macros/structure.md) |
-| `efescript` | `crates/efescript` | lib + bin | The scripting layer. Today it is an x86-flavoured assembly language ("nasm_efe"): a lexer and two-pass, label-resolving assembler produce bytecode, and a register VM (12 registers, flags, syscalls, threads) runs it inside one `efepages` memory. The CLI `efescript file.efe` assembles and runs a file. The high-level language is not written yet (lexer and empty AST stubs only). | [crates/efescript/structure.md](crates/efescript/structure.md) |
+| `efescript` | `crates/efescript` | lib + bin | The scripting layer, with two paths. v2 (current): the `.efa` assembler (`src/asm`) lowers assembly text to an `efevm` module, and the CLI runs it (`efescript run`), builds it (`build`) or prints it back (`dis`); the legacy assembler is kept until E3.6. Legacy: an x86-flavoured assembler ("nasm_efe") and a register VM (12 registers, flags, syscalls, threads) run `.efe` files inside one `efepages` memory (`efescript file.efe`). The high-level language is not written yet (lexer and empty AST stubs only). | [crates/efescript/structure.md](crates/efescript/structure.md) |
 | `proc_macros` | `crates/efescript/proc_macros` | proc-macro | Emits `MAX_ADDR_SIZE` (2^48) and `STACK_PAGE_COUNT` (from a build-time env var) for efescript. Neither is used yet. | [structure.md](crates/efescript/proc_macros/structure.md) |
 | `strtohx` | `crates/efescript/strtohx` | bin | Dev helper: converts text into `push64/32/16/8 0x…` lines to paste string constants into `.efe` programs. | [structure.md](crates/efescript/strtohx/structure.md) |
+| `efevm` | `crates/efevm` | lib | the v1 core VM: verified modules (.efvm), register interpreter, fibers, budget, host imports; no dependencies, wasm32-compatible | [crates/efevm/structure.md](crates/efevm/structure.md) |
 | `efepages` | `crates/efepages` | lib | Sparse paged byte memory (page index → fixed-size buffer); unwritten memory reads as zeros. It holds the VM's code, data and stack. | [crates/efepages/structure.md](crates/efepages/structure.md) |
 | `page_size_macro` | `crates/efepages/page_size_macro` | proc-macro | Emits `PAGE_SIZE` from the build-time env var `efepage_size` (default 4096). | [structure.md](crates/efepages/page_size_macro/structure.md) |
 | `calc` | `crates/calc` | lib + optional bin | Parses infix/prefix/postfix arithmetic into a tree, prints it in any notation, and simplifies it with variables. Integer (`i128`) and float (`f64`) numbers. The `cli` feature adds a clap command-line tool. | [crates/calc/structure.md](crates/calc/structure.md) |
@@ -58,7 +60,8 @@ test_example ──┐
 input_test ───┴► efeengine-core ──► efeengine-macros
 
 efescript ──► efepages ──► page_size_macro
-    └──────► proc_macros
+    ├──────► proc_macros
+    └──────► efevm
 
 calc            (standalone)
 strtohx         (standalone)

@@ -81,10 +81,15 @@ _Done 2026-11-15 in the new crate `crates/efevm` (spec: `crates/efevm/SPEC.md`):
 
 ### E2: Module format and assembler v2
 - [ ] E2.1 Binary module format (`.efec` v1): magic, version, section table, checksum. A loader with a verifier: jump targets, register and type use, stack depth per function, import signatures.
-- [ ] E2.2 Assembler v2 on the existing token → IR → bytes shape: `fn name(params) -> result` blocks, labels as `name:`, `.data` / `.rodata` with string literals (retires `strtohx`), constants, negative and character literals, comments anywhere, `import` declarations.
-- [ ] E2.3 Real diagnostics: an error type with `Display`, file, line, column and a source snippet; no panics on any input.
-- [ ] E2.4 Debug section: function and import names, and an instruction → source line table.
-- [ ] E2.5 A disassembler (`efescript dis file.efec`) and round-trip tests: assemble → disassemble → assemble gives identical bytes.
+  _Mostly done in E1:_ `efevm`'s `.efvm` format (magic, version, ordered sections, LEB128) and its load-time verifier cover this, and v2 writes and runs `.efvm`. There is no checksum section yet. Left open for that.
+- [x] E2.2 Assembler v2 on the existing token → IR → bytes shape: `fn name(params) -> result` blocks, labels as `name:`, `.data` / `.rodata` with string literals (retires `strtohx`), constants, negative and character literals, comments anywhere, `import` declarations.
+  _Done:_ `src/asm` (lexer, parser, lowering to `efevm::ModuleBuilder`) for `.efa` sources (`docs/e2-design.md`, `docs/efa-syntax.md`). It covers `fn` blocks, `name:` labels, `import`, `const`, globals, a function table, data (`db`/`dw`/`dd`/`dq`/`resb`, with `NAME`/`NAME.len`) laid out from address 1024, immediates as sources, and call/ret sugar. There is no separate `.data`/`.rodata` split, and data is writable. String literals make `strtohx` unnecessary, but that crate is not deleted yet. Six examples are in `examples/*.efa`, and the CLI commands are `efescript run|build|dis`.
+- [x] E2.3 Real diagnostics: an error type with `Display`, file, line, column and a source snippet; no panics on any input.
+  _Done:_ `asm::Diagnostic`/`Diagnostics` print file:line:col, a snippet and a note (with "did you mean"). The assembler recovers per line and caps output at 100 diagnostics. efevm verify errors map back to the source statement. Fuzz tests (`tests/v2_never_panics.rs`) show it does not panic on mutated sources or `.efvm` bytes.
+- [x] E2.4 Debug section: function and import names, and an instruction → source line table.
+  _Done:_ the `names` section holds function, import and register names. The `lines` section has file, line and column for every instruction. Traps print a backtrace with function names and source lines (`run_v2::trap_report`, `tests/v2_backtrace.rs`).
+- [x] E2.5 A disassembler (`efescript dis file.efec`) and round-trip tests: assemble → disassemble → assemble gives identical bytes.
+  _Done:_ `src/disasm.rs` and `efescript dis`. The round trip assemble → disassemble → assemble gives identical bytes apart from the `lines` section, tested for every example (`tests/v2_roundtrip.rs`).
 
 ### E3: Host calls (the syscall redesign)
 - [ ] E3.1 `HostRegistry`: `register(namespace, name, signature, function)` at any time. Functions receive a host context `&mut H` chosen by the embedder, plus typed arguments, and return a value or a trap.

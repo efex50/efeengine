@@ -645,7 +645,20 @@ fn memory_grow_huge_request_fails() {
         fb.memory_grow(0, 1);
         fb.memory_size(1);
     });
-    assert_eq!(run_ok(&m), vec![u64::MAX, 1]);
+    // The failed grow is charged for the requested size (saturated), so the fiber owes a
+    // huge debt; the result is still correct and the instance usable.
+    let mut inst = instantiate(&m, Limits::default());
+    let f = inst.spawn("main", &[]).expect("spawn main");
+    assert_eq!(inst.resume(f, &mut (), BUDGET), Exit::OutOfBudget);
+    let mut exit = Exit::OutOfBudget;
+    for _ in 0..4 {
+        exit = inst.resume(f, &mut (), u64::MAX);
+        if exit == Exit::Done {
+            break;
+        }
+    }
+    assert_eq!(exit, Exit::Done);
+    assert_eq!(inst.results(f).unwrap(), &[u64::MAX, 1]);
 }
 
 #[test]
