@@ -5,7 +5,7 @@ use std::fmt;
 use efevm::{Exit, Instance, Limits, Module, Trap, ValType};
 
 use crate::asm::{self, Diagnostics};
-use crate::host_std::{std_imports, StdEnv};
+use crate::host_std::{std_registry, StdEnv, StdOptions};
 use crate::prelude::Host;
 
 /// Why a program could not be loaded.
@@ -43,11 +43,16 @@ fn decode(path: &str, bytes: &[u8]) -> Result<Program, LoadFailure> {
 /// Loads a program from a file: `.efa` is assembled, `.efvm` decoded; other extensions are
 /// decoded when they start with the `EFVM` magic.
 pub fn load_path(path: &str) -> Result<Program, LoadFailure> {
+    load_path_with(path, &asm::AsmOptions::default())
+}
+
+/// Like [`load_path`], with assembler options (an API index for `--api`).
+pub fn load_path_with(path: &str, opts: &asm::AsmOptions) -> Result<Program, LoadFailure> {
     let bytes = std::fs::read(path).map_err(|e| LoadFailure::Io(format!("{path}: {e}")))?;
     if path.ends_with(".efa") {
         let text = String::from_utf8(bytes)
             .map_err(|_| LoadFailure::Io(format!("{path}: not valid UTF-8")))?;
-        return load_source(&text, path);
+        return load_source_with(&text, path, opts);
     }
     if path.ends_with(".efvm") || bytes.starts_with(b"EFVM") {
         return decode(path, &bytes);
@@ -57,9 +62,50 @@ pub fn load_path(path: &str) -> Result<Program, LoadFailure> {
     )))
 }
 
+/// Decodes a module from bytes (for example an embedded bundle payload).
+pub fn load_bytes(bytes: &[u8], name: &str) -> Result<Program, LoadFailure> {
+    decode(name, bytes)
+}
+
+/// If the running executable has an embedded module (see `bundle`), runs it like
+/// `efescript run` and returns the exit code (2 for a load error or a corrupt trailer,
+/// 3 for a trap), printing reports to stderr. `None` when nothing is embedded.
+pub fn run_embedded() -> Option<i32> {
+    let bytes = match crate::bundle::embedded_module_of_current_exe() {
+        Ok(Some(b)) => b,
+        Ok(None) => return None,
+        Err(e) => {
+            eprintln!("{e}");
+            return Some(2);
+        }
+    };
+    let prog = match load_bytes(&bytes, "<embedded module>") {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return Some(2);
+        }
+    };
+    let mut env = StdEnv::with_stdin(crate::prelude::StdHost);
+    let outcome = run(&prog, &mut env, None);
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    }
+    if let Some(e) = outcome.error {
+        eprintln!("{e}");
+    }
+    Some(outcome.exit_code)
+}
+
 /// Assembles `.efa` text; `file` is used in diagnostics and debug info.
 pub fn load_source(text: &str, file: &str) -> Result<Program, LoadFailure> {
-    match asm::assemble(text, file) {
+    load_source_with(text, file, &asm::AsmOptions::default())
+}
+
+/// Like [`load_source`], with assembler options.
+pub fn load_source_with(text: &str, file: &str, opts: &asm::AsmOptions) -> Result<Program, LoadFailure> {
+    match asm::assemble_with(text, file, opts) {
         Ok(module) => Ok(Program {
             module,
             source: Some((file.to_string(), text.to_string())),
@@ -82,6 +128,16 @@ fn fail(code: i32, msg: String) -> Outcome {
 
 /// Runs export `main` (no parameters; results `()` or `(i32)`).
 pub fn run<H: Host + 'static>(prog: &Program, env: &mut StdEnv<H>, budget: Option<u64>) -> Outcome {
+    run_with(prog, env, budget, &StdOptions::default())
+}
+
+/// Like [`run`], with `std` options (the `std.fs` root).
+pub fn run_with<H: Host + 'static>(
+    prog: &Program,
+    env: &mut StdEnv<H>,
+    budget: Option<u64>,
+    opts: &StdOptions,
+) -> Outcome {
     let Some(main_idx) = prog.module.export_func("main") else {
         return fail(2, "error: the module has no exported function `main`".into());
     };
@@ -96,7 +152,12 @@ pub fn run<H: Host + 'static>(prog: &Program, env: &mut StdEnv<H>, budget: Optio
             "error: `main` must take no parameters and return nothing or one i32".into(),
         );
     }
-    let mut inst = match Instance::new(&prog.module, &std_imports::<H>(), Limits::default()) {
+    let imports = std_registry::<H>(opts).imports();
+    let problems = imports.check_module(&prog.module);
+    if !problems.is_empty() {
+        return fail(2, link_report(&problems));
+    }
+    let mut inst = match Instance::new(&prog.module, &imports, Limits::default()) {
         Ok(i) => i,
         Err(e) => return fail(2, format!("error: {e}")),
     };
@@ -138,6 +199,15 @@ pub fn run<H: Host + 'static>(prog: &Program, env: &mut StdEnv<H>, budget: Optio
             }
         }
     }
+}
+
+/// Every link problem on its own line, by name.
+fn link_report(problems: &[efevm::LinkError]) -> String {
+    let mut out = String::from("error: cannot link the module:");
+    for p in problems {
+        out.push_str(&format!("\n  {p}"));
+    }
+    out
 }
 
 fn func_name(prog: &Program, func: u32) -> String {

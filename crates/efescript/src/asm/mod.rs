@@ -45,10 +45,26 @@ pub fn parse(src: &str, file: &str) -> Result<ast::Module, Diagnostics> {
     }
 }
 
+/// Options of [`assemble_with`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AsmOptions<'a> {
+    /// The API index to assemble against (`--api FILE.efapi`). With it, every import must
+    /// exist in the index with a matching signature, `import ns.name` may omit the signature,
+    /// struct constants (`S.size`, `S.align`, `S.<field>`, `S.id`) are defined, and the module
+    /// gets an `api` section (index hash and namespace versions). Without it the assembler
+    /// accepts any import and writes no `api` section.
+    pub api: Option<&'a efevm::api::ApiIndex>,
+}
+
 /// Assemble `.efa` source to a verified module. `file` is used in diagnostics and the lines section.
 pub fn assemble(src: &str, file: &str) -> Result<efevm::Module, Diagnostics> {
+    assemble_with(src, file, &AsmOptions::default())
+}
+
+/// [`assemble`] with options (an API index). See [`AsmOptions`].
+pub fn assemble_with(src: &str, file: &str, opts: &AsmOptions) -> Result<efevm::Module, Diagnostics> {
     let module = parse(src, file)?;
-    match lower::lower(&module, src, file) {
+    match lower::lower(&module, src, file, opts.api) {
         Ok(m) => Ok(m),
         Err(mut diags) => {
             sort_diags(&mut diags);

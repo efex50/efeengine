@@ -152,7 +152,18 @@ pub fn disassemble_data(d: &ModuleData) -> String {
         func_groups.push(function_lines(d, abs, f, &fnames, &gnames));
     }
 
-    let mut groups: Vec<Vec<String>> = vec![imports_group, mem_group, globals_group, table_group, data_group];
+    // Section 12 is printed as a comment: `.efa` has no syntax for it, the assembler writes it
+    // when given `--api`. A disassembly without the comment is therefore not byte-identical
+    // for modules that have the section (reassemble with the same index to get it back).
+    let api_group: Vec<String> = match &d.api {
+        Some(api) => {
+            let ns: Vec<String> = api.namespaces.iter().map(|(n, v)| format!("{n}@{v}")).collect();
+            vec![format!("; api fnv1a64:{:016x} {}", api.hash, ns.join(" ")).trim_end().to_string()]
+        }
+        None => Vec::new(),
+    };
+    let mut groups: Vec<Vec<String>> =
+        vec![api_group, imports_group, mem_group, globals_group, table_group, data_group];
     groups.extend(func_groups);
     let mut out = String::new();
     let mut first = true;

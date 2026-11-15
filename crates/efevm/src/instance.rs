@@ -66,27 +66,19 @@ pub struct Instance<H> {
 }
 
 impl<H> Instance<H> {
-    /// Links imports by (namespace, name) and exact type, allocates memory, copies data
-    /// segments and initialises globals.
+    /// Links imports by (namespace, name) and exact type, checks the namespace versions of
+    /// the module's `api` section (`Imports::check_module`; the first problem is returned),
+    /// allocates memory, copies data segments and initialises globals.
     pub fn new(module: &Module, imports: &Imports<H>, limits: Limits) -> Result<Self, LoadError> {
         let data = module.data();
+        if let Some(e) = imports.check_module(module).into_iter().next() {
+            return Err(LoadError::Link(e));
+        }
         let mut hosts = Vec::with_capacity(data.imports.len());
         for imp in &data.imports {
-            let key = (imp.namespace.clone(), imp.name.clone());
-            let missing = || {
-                LoadError::Link(LinkError::MissingImport {
-                    namespace: imp.namespace.clone(),
-                    name: imp.name.clone(),
-                })
-            };
-            let (ty, f) = imports.funcs.get(&key).ok_or_else(missing)?;
-            let want = data.types.get(imp.type_idx as usize).ok_or_else(missing)?;
-            if ty != want {
-                return Err(LoadError::Link(LinkError::ImportTypeMismatch {
-                    namespace: imp.namespace.clone(),
-                    name: imp.name.clone(),
-                }));
-            }
+            let (_, f) = imports.get(&imp.namespace, &imp.name).ok_or_else(|| {
+                LoadError::Link(LinkError::MissingImport { namespace: imp.namespace.clone(), name: imp.name.clone() })
+            })?;
             hosts.push(f.clone());
         }
 
@@ -366,6 +358,38 @@ impl<H> Instance<H> {
         matches!(f.status, FiberStatus::Trapped(_)).then_some(&f.trace[..])
     }
 
+    /// The paused stack of a `Ready` or `Suspended` fiber (debugger access).
+    fn paused(&self, fiber: FiberId) -> Option<&Stack> {
+        let f = self.fiber(fiber)?;
+        matches!(f.status, FiberStatus::Ready | FiberStatus::Suspended).then_some(&f.stack)
+    }
+
+    /// `(function index, instruction index)` of the next instruction a `Ready` or `Suspended`
+    /// fiber will execute; `None` for `Done`, `Trapped` or invalid fibers. `resume` with
+    /// budget 1 executes exactly that instruction (unless budget debt is owed: then the
+    /// resume only pays debt).
+    pub fn fiber_location(&self, fiber: FiberId) -> Option<(u32, u32)> {
+        self.paused(fiber).map(|s| (s.func, s.pc))
+    }
+
+    /// The registers of the current (innermost) frame of a `Ready` or `Suspended` fiber,
+    /// `r0` first.
+    pub fn fiber_registers(&self, fiber: FiberId) -> Option<&[u64]> {
+        let s = self.paused(fiber)?;
+        s.regs.get(s.fp as usize..)
+    }
+
+    /// The call stack of a `Ready` or `Suspended` fiber, innermost first: the next
+    /// instruction (as `fiber_location`), then for each caller the `call` instruction it is
+    /// waiting in. Empty for `Done`, `Trapped` or invalid fibers (see `backtrace` for those).
+    pub fn fiber_backtrace(&self, fiber: FiberId) -> Vec<(u32, u32)> {
+        let Some(s) = self.paused(fiber) else { return Vec::new() };
+        let mut v = Vec::with_capacity(s.frames.len() + 1);
+        v.push((s.func, s.pc));
+        v.extend(s.frames.iter().rev().map(|fr| fr.call_site()));
+        v
+    }
+
     pub fn status(&self, fiber: FiberId) -> Option<FiberStatus> {
         self.fiber(fiber).map(|f| f.status.clone())
     }
@@ -422,6 +446,7 @@ impl<H> Instance<H> {
 mod tests {
     use super::*;
     use crate::builder::{FunctionBuilder, ModuleBuilder};
+    use crate::api::HostRegistry;
     use crate::imports::HostOk;
     use crate::op::Op;
     use crate::types::ValType::{F32, F64, I32, I64};
@@ -528,14 +553,14 @@ mod tests {
         mb.export_func("main", f);
         mb.memory(1, None);
         let m = mb.finish().unwrap();
-        let mut imports = Imports::<u32>::new();
-        imports.func("env", "fill", ty(&[I64, I32], &[I32]), |cx, args, res| {
+        let mut imports = HostRegistry::<u32>::new();
+        imports.set_raw("env", "fill", ty(&[I64, I32], &[I32]), |cx, args, res| {
             *cx.host() += 1;
             cx.write(args[0], &vec![7u8; args[1] as usize])?;
             res[0] = 99;
             Ok(HostOk::Continue)
         });
-        let mut i = Instance::new(&m, &imports, Limits::default()).unwrap();
+        let mut i = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
         let mut host = 0u32;
         let fid = i.spawn("main", &[]).unwrap();
         assert_eq!(i.resume(fid, &mut host, 100), Exit::Done);
@@ -558,22 +583,22 @@ mod tests {
         let f = mb.add_func(ty(&[], &[I32]), fb);
         mb.export_func("main", f);
         let m = mb.finish().unwrap();
-        let mut imports = Imports::<()>::new();
-        imports.func("env", "y", ty(&[], &[I32]), |_, _, r| {
+        let mut imports = HostRegistry::<()>::new();
+        imports.set_raw("env", "y", ty(&[], &[I32]), |_, _, r| {
             r[0] = 37;
             Ok(HostOk::Yield)
         });
         assert!(matches!(
-            Instance::new(&m, &imports, Limits::default()),
+            Instance::new(&m, &imports.imports(), Limits::default()),
             Err(LoadError::Link(LinkError::MissingImport { .. }))
         ));
-        imports.func("env", "t", ty(&[I32], &[]), |_, _, _| Ok(HostOk::Continue));
+        imports.set_raw("env", "t", ty(&[I32], &[]), |_, _, _| Ok(HostOk::Continue));
         assert!(matches!(
-            Instance::new(&m, &imports, Limits::default()),
+            Instance::new(&m, &imports.imports(), Limits::default()),
             Err(LoadError::Link(LinkError::ImportTypeMismatch { .. }))
         ));
-        imports.func("env", "t", ty(&[], &[]), |_, _, _| Err(Trap::Host("boom".into())));
-        let mut i = Instance::new(&m, &imports, Limits::default()).unwrap();
+        imports.set_raw("env", "t", ty(&[], &[]), |_, _, _| Err(Trap::Host("boom".into())));
+        let mut i = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
         let fid = i.spawn("main", &[]).unwrap();
         assert_eq!(i.resume(fid, &mut (), 100), Exit::Yield);
         assert_eq!(i.status(fid), Some(FiberStatus::Suspended));
@@ -693,10 +718,10 @@ mod tests {
         let f = mb.add_func(ty(&[I32], &[]), fb);
         mb.export_func("main", f);
         let m = mb.finish().unwrap();
-        let mut imports = Imports::<()>::new();
-        imports.func("env", "h", ty(&[], &[]), |_, _, _| Ok(HostOk::Continue));
+        let mut imports = HostRegistry::<()>::new();
+        imports.set_raw("env", "h", ty(&[], &[]), |_, _, _| Ok(HostOk::Continue));
         let limits = Limits { max_fibers: 1, ..Limits::default() };
-        let mut i = Instance::new(&m, &imports, limits).unwrap();
+        let mut i = Instance::new(&m, &imports.imports(), limits).unwrap();
         assert_eq!(i.spawn("nope", &[]), Err(SpawnError::NoSuchExport));
         assert_eq!(i.spawn("g", &[]), Err(SpawnError::NotAFunction));
         assert_eq!(i.spawn("h", &[]), Err(SpawnError::ImportEntry));

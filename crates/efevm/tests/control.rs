@@ -1,4 +1,6 @@
 //! Control flow, calls, recursion, indirect calls, limits (SPEC sections 5, 6, 10).
+mod common;
+use common::reg_host;
 use efevm::ValType::I64;
 use efevm::*;
 
@@ -503,12 +505,12 @@ fn indirect_module() -> IndirectModule {
 }
 
 fn indirect_imports() -> Imports<()> {
-    let mut imp = Imports::<()>::new();
-    imp.func("env", "plus1000", ty(1, 1), |_c, args, res| {
+    let mut imp = HostRegistry::<()>::new();
+    reg_host(&mut imp, "env", "plus1000", ty(1, 1), |_c, args, res| {
         res[0] = args[0] + 1000;
         Ok(HostOk::Continue)
     });
-    imp
+    imp.imports()
 }
 
 fn run_ind(m: &Module, args: &[u64]) -> Exit {

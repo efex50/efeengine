@@ -1,6 +1,6 @@
 # efevm v1 specification
 
-Status: draft 3, 2026-11-15 (draft 1 plus the clarifications in "Changes from draft 1" and the changes in "Changes from draft 2" at the end). This is roadmap item E1.1 (`crates/efescript/ROADMAP.md`).
+Status: draft 4, 2026-11-15 (draft 1 plus the clarifications in "Changes from draft 1" and the changes in "Changes from draft 2" and "Changes from draft 3" at the end). This is roadmap item E1.1 (`crates/efescript/ROADMAP.md`).
 `efevm` is the new core VM for efescript. It lives in its own crate (`crates/efevm`)
 next to the old VM in `crates/efescript`, which keeps working until the assembler
 moves over (E2).
@@ -56,6 +56,7 @@ A module contains, in this order of indices:
 | data | `offset`, bytes |
 | names (optional) | function, import and register names |
 | lines (optional) | per function: instruction index → (file id, line, column) |
+| api (optional) | the API index hash and `(namespace, version)` of every namespace the module was assembled against |
 
 Function index space: imports first (`0 … nimports-1`), then module functions. `call`
 targets any function index; calling an import is a host call.
@@ -156,14 +157,21 @@ pub enum Trap {
 - API shape:
   ```rust
   let module = Module::decode(bytes)?;            // or built with ModuleBuilder; always verified
-  let mut imports = Imports::<H>::new();
-  imports.func("env", "print", FuncType::new([I64, I64], []), |cx, args, results| { … Ok(HostOk::Continue) });
-  let mut inst = Instance::new(&module, &imports, Limits::default())?;   // resolves imports by name + type
+  let mut reg = HostRegistry::<H>::new();
+  reg.define_namespace("env", 1, "game", "Console output.")?;
+  reg.register(HostFn::new("env", "print").doc("Print `text`.").param("text", ApiType::Str),
+      |cx, args, results| { let s = cx.read_str(args.str(0)?)?; … Ok(HostOk::Continue) })?;
+  let mut inst = Instance::new(&module, &reg.imports(), Limits::default())?; // name + type + versions
   let fiber = inst.spawn("main", &[])?;                                  // export name + arguments
   match inst.resume(fiber, &mut host, 10_000) { Exit::Done => inst.results(fiber), … }
   ```
-- A host function gets a `Caller` with access to `&mut H`, the instance memory (checked
-  `read`/`write` helpers) and globals. It returns `Ok(HostOk::Continue)`, `Ok(HostOk::Yield)`
+- Host functions are registered in a `HostRegistry` (namespace, name, typed and named
+  parameters and results, doc); `HostRegistry::imports()` is the only producer of a non-empty
+  `Imports`, and `HostRegistry::index()` is the same table as an API index
+  (`crates/efevm/API_INDEX.md`). A host function receives typed `Args`/`Results` (by logical
+  parameter index; a `str` is one parameter, two slots) and a `Caller` with access to `&mut H`,
+  the instance memory (checked `read`/`write`, `read_bytes`, `read_str`, `read_struct`,
+  `read_u32` … helpers) and globals. It returns `Ok(HostOk::Continue)`, `Ok(HostOk::Yield)`
   or `Err(Trap::Host(..))`. It cannot call back into the VM in v1.
 - Fibers are scheduled by the embedder (resume whichever it wants); the VM never switches by itself.
 - `Limits`: max memory pages, max call depth, max register stack size, max fibers (defaults in "Changes from draft 2", item 2).
@@ -176,7 +184,8 @@ pub enum Trap {
 - Call windows fit (section 6); `call_indirect` type index valid.
 - `global.set` only on mutable globals; data segments and memory limits consistent.
 - Every function ends in a terminator; `br_table` has a default.
-- Import resolution: every import must exist in `Imports` with an identical type.
+- Import resolution: every import must exist in `Imports` with an identical type, and every
+  namespace recorded in the module's `api` section must exist with the same version.
 
 Because registers are untyped 64-bit slots and memory is bounds-checked, a verified
 module cannot break host memory safety even if it mixes types.
@@ -186,7 +195,7 @@ module cannot break host memory safety even if it mixes types.
 - Header: bytes `EFVM`, then `u16` little-endian version (`1`).
 - Then sections: `id: u8`, `size: uleb`, payload. Known ids in ascending order, each at
   most once: 1 types, 2 imports, 3 functions, 4 table, 5 memory, 6 globals, 7 exports,
-  8 data, 9 code, 10 names, 11 lines. Unknown ids ≥ 128 are skipped (custom sections).
+  8 data, 9 code, 10 names, 11 lines, 12 api. Unknown ids ≥ 128 are skipped (custom sections).
 - Integers are LEB128 (`uleb` unsigned, `sleb` signed). Strings are `uleb` length + UTF-8.
   Floats are fixed little-endian IEEE bytes.
 - Code section: for each function, `uleb` instruction count, then instructions.
@@ -218,13 +227,17 @@ bits must equal the sign bit). Zero-padded encodings within the maximum length a
 | 9 | code | `vec(body)`, count equal to the functions count; body = `vec(instruction)` |
 | 10 | names | `vec(fname)` then `vec(rname)`; fname = `uleb` function index, `string`; rname = `uleb` function index, `uleb` register, `string` |
 | 11 | lines | `vec(string)` file names, then `vec(flines)`; flines = `uleb` function index, `vec(entry)`; entry = `uleb` instruction index, `uleb` file id, `uleb` line, `uleb` column |
+| 12 | api | 8 bytes index hash (`u64` little-endian), then `vec(ns)`; ns = `string` namespace, `uleb` version |
 
 - A missing section means "empty" (memory: `min_pages` 0, no max). A functions section without a
   code section (or the other way round with a non-zero count) is rejected.
 - The encoder writes a section only when it is non-empty (memory: when `min_pages != 0` or a max
-  is set), so encoding is deterministic: `decode(encode(m)) == m`.
+  is set; api: whenever the module has one, even with no namespaces), so encoding is
+  deterministic: `decode(encode(m)) == m`.
 - The section `size` must equal exactly the bytes its payload uses. Custom sections (id ≥ 128) may
-  appear anywhere and are skipped; ids 0 and 12–127 are rejected.
+  appear anywhere and are skipped; ids 0 and 13–127 are rejected.
+- The verifier rejects an api section whose namespace names are not identifiers joined by dots
+  or appear twice (`VerifyError::ApiNamespace`).
 - Register operands are `uleb` values ≤ 65535 (larger is a decode error). Function indices in
   names/lines use the full function index space (imports first).
 - Instruction operands follow section 5 exactly, e.g. `select d, cond, a, b` is four register
@@ -347,3 +360,25 @@ Draft 3 makes these three changes.
    is debt, paid and counted by later resumes). Budget 0, a `Done`/`Trapped` fiber or an invalid
    id report 0. Summing it over resumes gives the total cost, so an embedder can keep a total
    budget across yield/resume loops.
+
+## Changes from draft 3
+
+Draft 4 adds the host registry and the API index (efescript roadmap E3/E4,
+`crates/efescript/docs/e3-design.md`). The binary format version stays `1`: every draft 3 file
+is still valid and means the same.
+
+1. **Host functions only through the registry.** `Imports` can no longer be filled directly;
+   `HostRegistry::imports()` builds it (a snapshot of `Arc`s) together with the namespace
+   versions and the index hash. `Imports::new()` is the empty set. `Imports::names()` lists
+   what is callable and `Imports::check_module(&Module)` returns every link problem at once.
+2. **Section 12 `api`** (9, 9.1): the index hash and `(namespace, version)` pairs. Modules
+   without it link exactly as before.
+3. **Linking.** `Instance::new` also checks the namespace versions of section 12.
+   `LinkError` gains `UnknownNamespace { namespace }`, `NamespaceVersion { namespace, module,
+   host }` and `ApiHash { module, host }` (informational, only listed by `check_module` after
+   real errors); `ImportTypeMismatch` now carries both signatures as text (`module`, `host`).
+   A different index hash alone is not an error.
+4. **Debugger access.** For a `Ready` or `Suspended` fiber, `Instance::fiber_location` (the next
+   instruction), `fiber_registers` (the current frame) and `fiber_backtrace` (innermost first,
+   callers at their `call` instruction). `resume` with budget 1 executes exactly one instruction
+   (if no budget debt is owed).

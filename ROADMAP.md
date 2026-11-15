@@ -4,7 +4,7 @@ Living document. Tick items off (`- [x]`) as they land and edit freely. Each tas
 lists the main files it touches and how to tell it's done.
 Tags: **[N]** native (SDL3) · **[W]** web (wasm) · **[S]** shared by both.
 
-_Last updated: 2026-11-14_
+_Last updated: 2026-11-15_
 
 **Order:** IO → game systems → hecs world → rendering (wgpu). Scripting (Phase 5) needs only the world, so it can run alongside rendering.
 Rendering is deliberately last: until Phase 4 the current wgpu code stays as a
@@ -17,6 +17,7 @@ native window and headless unit tests, not through rendering.
 **Phase 1 is done apart from the manual checks below, then Phase 3.**
 1. Check the native-window and browser input paths by hand with `cargo xtask run input_test native` and `cargo xtask run input_test web`: they are compile-checked only so far. Include a gamepad (1.12) in both runs.
 2. Phase 3 (hecs world, `Commands`, type registry), now that the input system, schedule, fixed-step loop and headless mode (Phases 1–2) are in.
+3. Scripting E3–E5 (host registry, API index, engine bindings, mods) is done, together with 3.1–3.4. Next for Phase 3: 3.5–3.7. Not yet checked by hand: `cargo xtask run script_demo native` (window) and a web dist. See `crates/efescript/ROADMAP.md`.
 
 Input now flows through the engine, not the global message queue, and is polled and applied in the same frame it is used.
 
@@ -145,10 +146,10 @@ Goal: entities and components replace `EngineWorld`'s `Vec<GameObject>`.
 
 The world is designed so that scripts (Phase 5) can use it later without touching Rust types or pointers: script-visible data is plain bytes with a described layout, entities are numbers, and every structural change goes through `Commands`.
 
-- [ ] 3.1 **[S] Math and components.** Add `glam`, plus `Transform`, `Velocity`, `Name` and a `MeshHandle` placeholder. Components that scripts may see are `#[repr(C)]` and `bytemuck::Pod`, so they can be copied to and from VM memory as bytes.
-- [ ] 3.2 **[S] `hecs::World` in `EngineState`.** Re-export hecs instead of wrapping it. Remove `GameObject` and `add_object`, and port the example. Rust systems use typed hecs queries; don't build a byte-based custom ECS.
-- [ ] 3.3 **[S] `Commands`.** Spawn, despawn, insert and remove through a command buffer applied between stages, so despawning inside a query is safe. Rust systems and (later) scripts use the same path.
-- [ ] 3.4 **[S] Type registry.** `engine.register_component::<T>()` records, per type: a stable name, a numeric id, size, alignment, the field layout (name, offset, primitive type) and copy-in/copy-out functions.
+- [x] 3.1 **[S] Math and components.** Add `glam`, plus `Transform`, `Velocity`, `Name` and a `MeshHandle` placeholder. Components that scripts may see are `#[repr(C)]` and `bytemuck::Pod`, so they can be copied to and from VM memory as bytes. _Done: `glam` (with `bytemuck`), `Transform`, `Velocity`, `MeshHandle` (`#[repr(C)]`, `Pod`, `#[derive(ScriptType)]`) and the Rust-only `Name` in `engine/components.rs`. Tests: `components::tests::layouts_match_offset_of`._
+- [x] 3.2 **[S] `hecs::World` in `EngineState`.** Re-export hecs instead of wrapping it. Remove `GameObject` and `add_object`, and port the example. Rust systems use typed hecs queries; don't build a byte-based custom ECS. _Done: `EngineState.world` is a `hecs::World`; `GameObject`/`EngineWorld`/`add_object` are gone; `test_example` spawns `(Transform, MeshHandle)`. The placeholder renderer draws one triangle per `(Transform, MeshHandle)`; that path and the native window are compile-checked only (no window was opened)._
+- [x] 3.3 **[S] `Commands`.** Spawn, despawn, insert and remove through a command buffer applied between stages, so despawning inside a query is safe. Rust systems and (later) scripts use the same path. _Done: `Commands` (`engine/commands.rs`, `EngineCommands` is an alias): `cx.spawn`, `despawn`, `insert`, `remove`, byte-level `insert_raw`/`remove_raw`, applied in order after every stage; operations on dead entities are ignored. Tests: `tests/world.rs` (`despawn_inside_a_query_is_safe`, `hecs_reserved_entities`, …)._
+- [x] 3.4 **[S] Type registry.** `engine.register_component::<T>()` records, per type: a stable name, a numeric id, size, alignment, the field layout (name, offset, primitive type) and copy-in/copy-out functions. _Done: `TypeRegistry` (`engine/types.rs`): name, id (`fnv1a32(name)`), size, alignment, `efevm::StructDesc` layout, byte read/write/insert/remove; `#[derive(ScriptType)]` in `efeengine-macros`; runtime layout-only types via `Engine::register_struct`; `entity_to_bits`/`entity_from_bits`. `Engine::register_component` registers in the type registry and in the scripting index in one call. Scenes (3.7) do not use it yet. Tests: `tests/world.rs`, `types::tests`, `tests/api_index.rs`._
   - A derive macro in `efeengine-macros` generates the field layout.
   - Types can also be registered at runtime (by a mod), not only at compile time.
   - Entities cross any boundary as `u64` (`Entity::to_bits`), so a stale handle fails cleanly.
@@ -193,30 +194,33 @@ Today's efescript API is unstable and static (fixed syscall numbers compiled int
 - **One calling convention** (ABI) shared by the interpreter, the JIT and AOT-compiled code.
 - The bytecode is a stable, verifiable format with an import table and type information. No self-modifying code, and no raw host pointers visible to scripts.
 
-- [ ] 5.1 **VM as an embeddable library.**
+- [x] 5.1 **VM as an embeddable library.** _Done: the new VM is `crates/efevm` (efescript E1): no global state, `Result`s instead of panics, resumable `run(budget)`, no I/O. The legacy VM was deleted (efescript E3.6). `cargo check -p efevm --target wasm32-unknown-unknown` passes; there is no CI for it (efescript E1.8)._
   - A `Vm` / `Module` / `Instance` API with no global or static state.
   - Errors instead of panics on bad input; no `todo!()` opcodes; no raw pointers from threads into the runtime.
   - Resumable `run(budget)` with an instruction limit, so an endless loop costs one frame.
   - wasm-safe I/O (no direct `std::fs`/stdin in the VM core).
   - Fix the operand-decoding bugs listed in `crates/efescript/structure.md` as part of the rewrite.
-- [ ] 5.2 **Dynamic, structured host calls.**
+- [x] 5.2 **Dynamic, structured host calls.** _Done: `efevm::HostRegistry` (efescript E3): runtime registration by name with typed, named, documented signatures, versioned namespaces, link errors by name. The registry lives in efevm, so the engine depends on efevm only._
   - `HostRegistry::register(name, signature, function)` usable at any time, including by a loaded mod that exposes functions to other mods.
   - Signatures use a small type system: integers, floats, bool, entity, string/slice (pointer + length in VM memory), and structs described by the type registry (3.4).
   - Namespaced names (`engine.world.spawn`, `mymod.inventory.add`), with a version per namespace.
   - Modules list their imports; loading fails with a clear error when an import is missing or its signature differs.
   - The efescript crate defines the host trait; it must not depend on the engine.
-- [ ] 5.3 **API manifest (the "PDB" for mod developers).**
-  - The registry can export everything it knows to a versioned file: functions with signatures and docs, struct and component layouts, namespaces, and a content hash.
-  - Exported at build time (`cargo xtask api-export`) and at runtime, so functions registered dynamically by mods are included.
-  - A compiled module records the manifest hash it was built against, for compatibility checks.
-- [ ] 5.4 **Engine bindings.**
+- [x] 5.3 **API index (the "PDB" for mod developers).** Details: `crates/efescript/ROADMAP.md`, "The API index" and E4. _Done: efescript E4: `<game>.efapi` (format in `crates/efevm/API_INDEX.md`) from `cargo xtask api-export`, `cargo xtask build`/`dist` and `Engine::export_api_index`; modules record the index hash (section 12); the assembler, language server and debugger read only the file; the index tests are `crates/efescript/tests/api_index.rs` and `crates/core/tests/api_index.rs`._
+  - The registry *is* the index: registering a host function or a component type is the only way to make it visible to scripts, so every syscall an engine system or a mod adds is in the index automatically.
+  - Exported to a versioned file, `<game>.efapi`: functions with parameter names, types and docs, struct and component layouts, namespaces, owners, and a content hash.
+  - Written at build time (`cargo xtask api-export`, and next to the game by `cargo xtask build`/`dist`) and at runtime (`Engine::export_api_index`), so functions registered dynamically by mods are included.
+  - Tools (assembler, language server, debugger) read only this file, for any game built with the engine.
+  - A compiled module records the index hash it was built against, for compatibility checks.
+  - A test fails when something callable is missing from the index or undocumented.
+- [x] 5.4 **Engine bindings.** _Done: efescript E5.1/E5.2: engine host functions in six `engine.*` namespaces, the `Script` component and the script system in `Update`, one VM per world. Tested headless (`crates/core/tests/scripting.rs`, `examples/script_demo/tests/e2e.rs`)._
   - The engine registers its host functions: world access (`get`/`set` component bytes, queries), `Commands` (spawn, despawn, insert, remove), input, time, events and logging.
   - A `Script { module, entry, state }` component, and a `ScriptSystem` in the `Update` stage that calls each script's entry with the entity id and delta time.
   - One VM per world, not per entity. Script-private data lives in VM memory; hecs component types are not created dynamically.
-- [ ] 5.5 **Mods.** Load and unload modules at runtime, per-mod budgets and permissions (which namespaces a mod may call), and hot reload of scripts on native.
+- [x] 5.5 **Mods.** Load and unload modules at runtime, per-mod budgets and permissions (which namespaces a mod may call), and hot reload of scripts on native. _Done: efescript E5.3: `load_mod`/`unload_module`, per-mod budgets and namespace permissions, mod-exported functions in the index, hot reload on native (tested headless)._
 - [ ] 5.6 **Language frontend and language server.**
   - The high-level efescript language (only lexer and AST stubs exist today) compiles to the bytecode with typed imports.
-  - The language server reads the manifest from 5.3 and reloads it when the file changes, so completion, signatures and type errors follow the live API automatically.
+  - The language server reads the index file from 5.3 and reloads it when the file changes, so completion, signatures and type errors follow the live API automatically.
 - [ ] 5.7 **AOT compilation.** Compile modules ahead of time to native code (and to wasm for the web build), using the same ABI and import resolution as the interpreter.
 - [ ] 5.8 **JIT compilation.** Native only at first (for example with Cranelift). Browsers cannot run generated machine code, so the web build uses the interpreter or AOT-to-wasm modules.
 
@@ -239,7 +243,7 @@ Today's efescript API is unstable and static (fixed syscall numbers compiled int
 ## Bugs to fix along the way
 
 - efepages: a read or write that ends exactly on a page boundary across several pages drops the last page (verified: writing 8192 bytes and reading them back returns 4096).
-- efescript: operand-decoding bugs and `todo!()` opcodes, listed in `crates/efescript/structure.md`.
+- ~~efescript: operand-decoding bugs and `todo!()` opcodes~~ gone with the legacy VM (efescript E3.6).
 - calc: integer division by zero panics.
 - Renderer bugs are collected in Phase 4 (shared uniform buffer, missing `webgl` feature, no surface-error handling).
 

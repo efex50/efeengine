@@ -16,11 +16,23 @@ pub enum LoadError {
     Build(BuildError),
 }
 
+/// Why a module cannot be linked against an `Imports` (`Instance::new`,
+/// `Imports::check_module`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkError {
     MissingImport { namespace: String, name: String },
-    ImportTypeMismatch { namespace: String, name: String },
+    /// `module` is the signature the module imports, `host` the registered one, both in the
+    /// index spelling (`(i64, i64) -> i32`).
+    ImportTypeMismatch { namespace: String, name: String, module: String, host: String },
     MemoryTooLarge { min_pages: u32, cap: u32 },
+    /// The module's `api` section names a namespace the host does not define.
+    UnknownNamespace { namespace: String },
+    /// The module was built against version `module` of `namespace`, the host has `host`.
+    NamespaceVersion { namespace: String, module: u32, host: u32 },
+    /// Not an error by itself: `Imports::check_module` appends it after real errors when the
+    /// module's recorded index hash differs from the host's (`host` is `None` for imports not
+    /// built by a `HostRegistry`). `Instance::new` never returns it.
+    ApiHash { module: u64, host: Option<u64> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,11 +80,24 @@ impl fmt::Display for LinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LinkError::MissingImport { namespace, name } => write!(f, "missing import {namespace}.{name}"),
-            LinkError::ImportTypeMismatch { namespace, name } => {
-                write!(f, "import {namespace}.{name} has a different type than the host function")
+            LinkError::ImportTypeMismatch { namespace, name, module, host } => {
+                write!(f, "signature mismatch for {namespace}.{name}: module imports {module}, host has {host}")
             }
             LinkError::MemoryTooLarge { min_pages, cap } => {
                 write!(f, "module needs {min_pages} memory pages, limit is {cap}")
+            }
+            LinkError::UnknownNamespace { namespace } => {
+                write!(f, "module was built against namespace {namespace}, which the host does not define")
+            }
+            LinkError::NamespaceVersion { namespace, module, host } => {
+                write!(f, "namespace {namespace} is version {host}, module was built against version {module}")
+            }
+            LinkError::ApiHash { module, host } => {
+                write!(f, "module was built against API index fnv1a64:{module:016x}")?;
+                match host {
+                    Some(h) => write!(f, ", host index is fnv1a64:{h:016x}"),
+                    None => f.write_str(", host imports have no index"),
+                }
             }
         }
     }

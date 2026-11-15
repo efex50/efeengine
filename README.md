@@ -6,8 +6,9 @@ Monorepo for the efe game engine.
 |---|---|---|
 | `crates/core` | `efeengine-core` | Engine core: SDL3 (native) / web window, wgpu renderer, message queue |
 | `crates/core/macros` | `efeengine-macros` | `#[main]` entry-point macro (native + wasm) |
-| `crates/efescript` | `efescript` | Scripting language: assembler + bytecode VM (`proc_macros`, `strtohx` inside) |
-| `crates/efepages` | `efepages` | Paged memory used by the efescript VM (`page_size_macro` inside) |
+| `crates/efescript` | `efescript` | Scripting toolchain: `.efa` assembler and the `efescript` CLI (run, build, dis, bundle, api, lsp, debug) with the `std` host |
+| `crates/efevm` | `efevm` | Bytecode VM for scripts: verified `.efvm` modules, interpreter, fibers, budgets, host registry and API index (`.efapi`); no dependencies |
+| `crates/efepages` | `efepages` | Paged memory (`page_size_macro` inside); no longer used by efescript since the old `.efe` VM was removed |
 | `crates/calc` | `calc` | Expression parser / printer / simplifier |
 | `examples/test_example` | `test_example` | Example game (native binary + wasm) |
 
@@ -76,6 +77,24 @@ Output goes to `dist/<example>/` (gitignored). The page needs the
 headers for wasm threads: `scripts/serve.py` sends them locally, and `_headers` covers
 Netlify / Cloudflare Pages (GitHub Pages cannot set headers). See
 [templates/web/README.md](templates/web/README.md).
+
+## Scripting and the API index
+
+Scripts are `.efa` files. The assembler turns them into `efevm` modules (`.efvm`), and the
+engine runs them in its script system (`crates/core`, `engine::scripting`). Host functions are
+registered in one `HostRegistry`, and that registry is the only way to make a function callable.
+The registry is also written out as the API index, a JSON `.efapi` file. The index is the
+contract between the game, the assembler (`efescript build --api`) and the editor (`efescript lsp --api`).
+
+```sh
+cargo xtask api-export script_demo                    # writes target/efapi/script_demo.efapi
+cargo run -p efescript -- api target/efapi/script_demo.efapi
+cargo test -p script_demo                             # end to end: index, assemble, run, mods
+```
+
+- [crates/efescript/README.md](crates/efescript/README.md): the toolchain and CLI.
+- [crates/efevm/API_INDEX.md](crates/efevm/API_INDEX.md): the `.efapi` format.
+- [examples/script_demo](examples/script_demo): the example game (`cargo xtask run script_demo native` builds and runs its scripts).
 
 ## History
 

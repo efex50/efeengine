@@ -328,11 +328,17 @@ impl<'a> Parser<'a> {
                 None,
             );
         }
-        let params = self.type_list_paren("`(` after the import name")?;
-        let results = self.opt_results()?;
+        let has_sig = matches!(self.kind(), TokenKind::LParen);
+        let (params, results) = if has_sig {
+            let params = self.type_list_paren("`(` after the import name")?;
+            (params, self.opt_results()?)
+        } else {
+            // `import ns.name`: the signature comes from the API index.
+            (Vec::new(), Vec::new())
+        };
         let span = start.join(self.prev);
-        self.finish_line("the import signature")?;
-        Ok(Item::Import(ImportDecl { span, qualified, params, results }))
+        self.finish_line(if has_sig { "the import signature" } else { "the import name" })?;
+        Ok(Item::Import(ImportDecl { span, qualified, params, results, has_sig }))
     }
 
     fn memory(&mut self) -> PResult<Item> {
@@ -1471,6 +1477,16 @@ finish:
     #[test]
     fn err_global_bad_type() {
         one_err("global g: i65 = 0\n", "expected a type (`i32`, `i64`, `f32` or `f64`), found `i65`", 1, 11);
+    }
+
+    #[test]
+    fn import_without_signature() {
+        let m = ok("import std.println\nimport a.b.c() -> i64\n");
+        let Item::Import(i) = &m.items[0] else { panic!() };
+        assert!(!i.has_sig && i.params.is_empty() && i.results.is_empty());
+        let Item::Import(i) = &m.items[1] else { panic!() };
+        assert!(i.has_sig && i.results.len() == 1);
+        one_err("import std.println -> i64\n", "end of line", 1, 20);
     }
 
     #[test]

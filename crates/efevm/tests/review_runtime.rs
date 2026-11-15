@@ -1,5 +1,7 @@
 //! Review fixes for the runtime: boundary masking, trap locations, Caller::fiber, spawn errors,
 //! linear-time instantiation.
+mod common;
+use common::reg_host;
 use efevm::ValType::{F32, I32, I64};
 use efevm::*;
 
@@ -48,12 +50,12 @@ fn host_ret_module(t: ValType) -> Module {
 fn host_results_are_masked() {
     for (t, want) in [(I32, 0xFFFF_FFFFu64), (F32, 0xFFFF_FFFF), (I64, u64::MAX)] {
         let m = host_ret_module(t);
-        let mut imports = Imports::<()>::new();
-        imports.func("env", "h", ty(&[], &[t]), |_, _, r| {
+        let mut imports = HostRegistry::<()>::new();
+        reg_host(&mut imports, "env", "h", ty(&[], &[t]), |_, _, r| {
             r[0] = u64::MAX;
             Ok(HostOk::Continue)
         });
-        let mut i = Instance::new(&m, &imports, Limits::default()).unwrap();
+        let mut i = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
         let f = i.spawn("main", &[]).unwrap();
         assert_eq!(run_done(&mut i, &mut (), f), vec![want], "{t:?}");
     }
@@ -72,14 +74,14 @@ fn set_global_is_masked() {
     let f = mb.add_func(ty(&[], &[]), fb);
     mb.export_func("main", f);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<()>::new();
-    imports.func("env", "set", ty(&[], &[]), move |cx, _, _| {
+    let mut imports = HostRegistry::<()>::new();
+    reg_host(&mut imports, "env", "set", ty(&[], &[]), move |cx, _, _| {
         cx.set_global(g32, u64::MAX)?;
         cx.set_global(g64, u64::MAX)?;
         cx.set_global(gf, u64::MAX - 1)?;
         Ok(HostOk::Continue)
     });
-    let mut i = Instance::new(&m, &imports, Limits::default()).unwrap();
+    let mut i = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
     assert!(i.set_global(g32, u64::MAX));
     assert!(i.set_global(g64, u64::MAX));
     assert!(i.set_global(gf, u64::MAX));
@@ -147,9 +149,9 @@ fn host_trap_reports_call_instruction() {
     let f = mb.add_func(ty(&[], &[]), fb);
     mb.export_func("main", f);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<()>::new();
-    imports.func("env", "boom", ty(&[], &[]), |_, _, _| Err(Trap::Host("x".into())));
-    let mut i = Instance::new(&m, &imports, Limits::default()).unwrap();
+    let mut imports = HostRegistry::<()>::new();
+    reg_host(&mut imports, "env", "boom", ty(&[], &[]), |_, _, _| Err(Trap::Host("x".into())));
+    let mut i = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
     let fid = i.spawn("main", &[]).unwrap();
     assert!(matches!(i.resume(fid, &mut (), 100), Exit::Trap(Trap::Host(_))));
     assert_eq!(i.trap_location(fid), Some((f, 1)));
@@ -166,13 +168,13 @@ fn caller_fiber_matches_spawned_id() {
     let f = mb.add_func(ty(&[], &[]), fb);
     mb.export_func("main", f);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<Vec<FiberId>>::new();
-    imports.func("env", "who", ty(&[], &[]), |cx, _, _| {
+    let mut imports = HostRegistry::<Vec<FiberId>>::new();
+    reg_host(&mut imports, "env", "who", ty(&[], &[]), |cx, _, _| {
         let id = cx.fiber();
         cx.host().push(id);
         Ok(HostOk::Continue)
     });
-    let mut i = Instance::new(&m, &imports, Limits::default()).unwrap();
+    let mut i = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
     let a = i.spawn("main", &[]).unwrap();
     let b = i.spawn("main", &[]).unwrap();
     let mut seen = Vec::new();

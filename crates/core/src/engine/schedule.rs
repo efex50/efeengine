@@ -1,4 +1,6 @@
-//! System schedule: stages, the per-system context and engine control commands.
+//! System schedule: stages and the per-system context.
+
+use hecs::{DynamicBundle, Entity, World};
 
 use crate::engine::{
     WindowState,
@@ -6,8 +8,10 @@ use crate::engine::{
     input::{GamepadState, InputState},
     resources::Resources,
     time::Time,
-    world::EngineWorld,
+    scripting::Scripting,
+    types::TypeRegistry,
 };
+pub use crate::engine::commands::{Commands, EngineCommand, EngineCommands};
 
 /// When a system runs. See the frame order in `docs/design-io-and-loop.md` section 9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,28 +38,37 @@ impl Stage {
 
 /// Borrowed view of the engine handed to every system.
 pub struct Ctx<'a> {
-    pub world: &'a mut EngineWorld,
+    /// The game world. Query it freely; queue structural changes through `commands`
+    /// (or [`Ctx::spawn`]) so they are applied after the stage.
+    pub world: &'a mut World,
+    /// Registered script-visible types (components and structs).
+    pub types: &'a TypeRegistry,
     pub resources: &'a mut Resources,
     pub time: &'a Time,
     pub input: &'a InputState,
     pub gamepads: &'a GamepadState,
     pub window: &'a WindowState,
-    pub commands: &'a mut EngineCommands,
+    pub commands: &'a mut Commands,
+    /// The scripting runtime (host registry, loaded modules). Systems may register host
+    /// functions or load modules; the script system itself runs first in `Stage::Update`.
+    pub scripting: &'a mut Scripting,
     events: &'a mut EventRegistry,
 }
 
 impl<'a> Ctx<'a> {
     pub(crate) fn new(
-        world: &'a mut EngineWorld,
+        world: &'a mut World,
+        types: &'a TypeRegistry,
         resources: &'a mut Resources,
         time: &'a Time,
         input: &'a InputState,
         gamepads: &'a GamepadState,
         window: &'a WindowState,
-        commands: &'a mut EngineCommands,
+        commands: &'a mut Commands,
+        scripting: &'a mut Scripting,
         events: &'a mut EventRegistry,
     ) -> Self {
-        Self { world, resources, time, input, gamepads, window, commands, events }
+        Self { world, types, resources, time, input, gamepads, window, commands, scripting, events }
     }
 
     /// Events of type `T` readable this frame (empty if none were ever sent).
@@ -63,54 +76,15 @@ impl<'a> Ctx<'a> {
         self.events.get_or_empty::<T>()
     }
 
+    /// Spawn an entity with `bundle`: the entity is reserved now (the handle is valid for
+    /// further commands at once) and gets its components when the stage's commands apply.
+    pub fn spawn(&mut self, bundle: impl DynamicBundle) -> Entity {
+        self.commands.spawn(self.world, bundle)
+    }
+
     /// Send an event; readable by every system during the next frame.
     pub fn send<T: 'static>(&mut self, ev: T) {
         self.events.send(ev);
-    }
-}
-
-/// A control request a system makes of the engine; applied after the stage ends.
-#[derive(Debug, Clone, PartialEq)]
-pub enum EngineCommand {
-    Quit,
-    SetTitle(String),
-    SetFrameRate(f32),
-    SetCursorVisible(bool),
-    SetCursorGrab(bool),
-    SetTextInput(bool),
-}
-
-/// Buffer of [`EngineCommand`]s, applied by the engine after every stage.
-#[derive(Debug, Default)]
-pub struct EngineCommands {
-    list: Vec<EngineCommand>,
-}
-
-impl EngineCommands {
-    pub fn quit(&mut self) {
-        self.list.push(EngineCommand::Quit);
-    }
-    pub fn set_title(&mut self, t: impl Into<String>) {
-        self.list.push(EngineCommand::SetTitle(t.into()));
-    }
-    /// `fps <= 0` (or non-finite) removes the frame-rate cap.
-    pub fn set_frame_rate(&mut self, fps: f32) {
-        self.list.push(EngineCommand::SetFrameRate(fps));
-    }
-    pub fn set_cursor_visible(&mut self, v: bool) {
-        self.list.push(EngineCommand::SetCursorVisible(v));
-    }
-    pub fn set_cursor_grab(&mut self, g: bool) {
-        self.list.push(EngineCommand::SetCursorGrab(g));
-    }
-    pub fn set_text_input(&mut self, on: bool) {
-        self.list.push(EngineCommand::SetTextInput(on));
-    }
-    pub fn is_empty(&self) -> bool {
-        self.list.is_empty()
-    }
-    pub(crate) fn drain(&mut self) -> std::vec::Drain<'_, EngineCommand> {
-        self.list.drain(..)
     }
 }
 

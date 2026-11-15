@@ -6,6 +6,8 @@ marked **(verified)** were reproduced by running code; the rest come from readin
 
 ## Where efescript stands
 
+_Historical (the analysis that started E0). The legacy assembler and VM it describes were deleted in E3.6; the current state is in `structure.md`._
+
 About 4,100 lines: an x86-flavoured assembler (`nasm_efe`), a register VM
 (12 registers, flags, cooperative threads) on `efepages` memory, and a CLI.
 `hello.efe` and `call.efe` run; `heap.efe` and `test.efe` panic.
@@ -41,7 +43,7 @@ Design rules for v1 (these keep JIT, AOT and a wasm translator possible):
 2. **A module, not a byte stream.** Magic, version, and sections: types, imports, functions, code, data, exports, names/debug. Everything is validated at load.
 3. **Code is not data.** Code lives outside the script's address space and is immutable. Return addresses live on a separate call stack the script cannot write.
 4. **Functions are real.** Each has a signature and a frame; jumps stay inside a function and target instruction indices, never byte addresses.
-5. **A syscall is a host call.** `call_host <import index>`; imports are `(namespace, name, signature)` resolved at load against a registry filled at runtime.
+5. **A syscall is a host call.** `call_host <import index>`; imports are `(namespace, name, signature)` resolved at load against a registry filled at runtime. The registry is also the API index: whatever is callable is listed and exported (see "The API index" below).
 6. **One calling convention**, written down once, used by the interpreter, host calls, JIT and AOT.
 7. **No I/O in the core.** Printing, files and time are host functions supplied by the embedder (the CLI supplies std ones; the engine supplies its own).
 8. **No panics from guest input.** Loading returns `LoadError`; running returns `Exit::{Halt, Yield, Budget, Trap}`.
@@ -91,25 +93,68 @@ _Done 2026-11-15 in the new crate `crates/efevm` (spec: `crates/efevm/SPEC.md`):
 - [x] E2.5 A disassembler (`efescript dis file.efec`) and round-trip tests: assemble → disassemble → assemble gives identical bytes.
   _Done:_ `src/disasm.rs` and `efescript dis`. The round trip assemble → disassemble → assemble gives identical bytes apart from the `lines` section, tested for every example (`tests/v2_roundtrip.rs`).
 
-### E3: Host calls (the syscall redesign)
-- [ ] E3.1 `HostRegistry`: `register(namespace, name, signature, function)` at any time. Functions receive a host context `&mut H` chosen by the embedder, plus typed arguments, and return a value or a trap.
-- [ ] E3.2 Type descriptions for signatures: scalars, entity handles, `(pointer, length)` slices and strings in guest memory, and `#[repr(C)]` structs with named fields. Shared with the engine's type registry (repository roadmap 3.4).
-- [ ] E3.3 Import resolution at load, with clear errors for a missing name or a signature mismatch. Namespaces carry a version.
-- [ ] E3.4 Safe guest-memory access helpers for host functions (checked read and write of slices, strings and structs).
-- [ ] E3.5 A `std` host library in a separate crate or feature: print, read line, files, time. Used by the CLI; not linked into the engine. File access is opt-in and limited to a directory.
-- [ ] E3.6 Remove the old numbered `syscall` instruction and the `SysCalls` enum.
+### The API index (rule for E3–E5 and everything after)
 
-### E4: API manifest and tooling
-- [ ] E4.1 Manifest export from a registry: functions with parameter names, types and docs; struct layouts; namespaces and versions; a content hash. Human-readable text first (JSON), binary later if size matters.
-- [ ] E4.2 Modules record the manifest hash they were built against; the loader reports incompatibilities by name.
-- [ ] E4.3 The assembler reads a manifest to check `import` declarations and call arity at build time.
-- [ ] E4.4 Language server for the assembly language: diagnostics, go-to-label, completion and hover for host functions from the manifest, reloading when the manifest file changes.
-- [ ] E4.5 Debugger: breakpoints, single step, register and memory view over the debug section (replaces the empty `debugger` module).
+Every function a script can call is in **one table: the API index**. It lives in
+`efevm` (`HostRegistry`), so the engine, the CLI and mods all fill the same one.
+
+- **Registering is the only way in.** There is no path that makes a host function
+  callable without adding its index entry (namespace, name, parameter names and
+  types, results, doc text, the registering owner: `std`, `engine`, or a mod name).
+  An engine system or a mod that adds a host call therefore updates the index
+  by construction; nothing is kept in sync by hand.
+- **Types too.** Structs and components that cross the boundary are registered
+  with their field layout (name, offset, type, size, alignment) and appear in the
+  same index.
+- **Exported like a PDB.** The index is written to a versioned file, `<game>.efapi`
+  (JSON, with a content hash). Every game built with the engine gets one:
+  `cargo xtask api-export` writes it at build time, `cargo xtask build`/`dist`
+  place it next to the game, and the running engine can write it again
+  (`Engine::export_api_index`) so functions registered by loaded mods are in it.
+- **Tools read only the file.** The assembler (import checks), the language
+  server (completion, hover, signatures) and the debugger use the `.efapi` file
+  and never link the game. A mod developer needs the game's `.efapi`, not its source.
+- **Checked by a test.** A test fails when a host function is callable but
+  missing from the index, or has an entry without a doc line.
+
+### E3: Host calls (the syscall redesign)
+- [x] E3.1 `HostRegistry` in `efevm`: `register(namespace, name, signature, function)` at any time. Functions receive a host context `&mut H` chosen by the embedder, plus typed arguments, and return a value or a trap. It replaces direct use of `Imports`: a registry produces the `Imports` an instance is linked with, and is the API index above.
+  _Done:_ `efevm::HostRegistry<H>` (`crates/efevm/src/api/registry.rs`): `define_namespace`, `register(HostFn, f)`, `replace`, `register_type`, `unregister_owner`, `imports()`, `index()`. Host functions get `&mut Caller<H>`, typed `Args`/`Results` by logical parameter and return `Result<HostOk, Trap>`. `Imports` can no longer be filled by hand (the old `Imports::func` is deleted); `HostRegistry::imports()` is the only producer, so the registry is the index. Tests: `crates/efevm/tests/api.rs` (`registry_functions_are_callable`, `imports_are_exactly_the_index`) and registry unit tests; all efevm tests were moved onto the registry. Design: `docs/e3-design.md` section 2.
+- [x] E3.2 Type descriptions for signatures: scalars, entity handles, `(pointer, length)` slices and strings in guest memory, and `#[repr(C)]` structs with named fields. Shared with the engine's type registry (repository roadmap 3.4). Each parameter has a name and each function a doc string, because both go into the index.
+  _Done:_ `ApiType` (`i32 i64 f32 f64 bool entity ptr str bytes &Struct`), `HostFn` with named parameters/results and a required doc, `StructDesc`/`FieldDesc`/`Prim` with layout validation (`crates/efevm/src/api/types.rs`). The engine's type registry produces the same `StructDesc` (derive `ScriptType`, repository roadmap 3.4). Tests: `api::types` unit tests, `crates/core/tests/api_index.rs::every_registered_component_is_in_the_index_with_its_layout`.
+- [x] E3.3 Import resolution at load, with clear errors for a missing name or a signature mismatch. Namespaces carry a version.
+  _Done:_ `Instance::new` resolves imports by `namespace.name` and lowered signature and checks the namespace versions recorded in the module (section 12). New `LinkError::{UnknownNamespace, NamespaceVersion, ApiHash}`; `ImportTypeMismatch` shows both signatures; `Imports::check_module` lists every problem by name. Tests: `crates/efevm/tests/api.rs::{link_checks_namespace_versions, check_module_lists_every_problem}`, `crates/efescript/tests/api_index.rs::run_v2_reports_link_problems_by_name`.
+- [x] E3.4 Safe guest-memory access helpers for host functions (checked read and write of slices, strings and structs).
+  _Done:_ `Caller::{read_bytes, read_str, write_bytes, read_struct, write_struct, read_/write_u32/u64/f32/f64}` with checked arithmetic; negative pointers or lengths are out of bounds. Tests: `crates/efevm/tests/api.rs::caller_memory_helpers`, `crates/core/tests/scripting.rs::guest_out_of_bounds_pointer_traps_and_the_engine_keeps_running`.
+- [x] E3.5 A `std` host library in a separate crate or feature: print, read line, files, time. Used by the CLI; not linked into the engine. File access is opt-in and limited to a directory. `host_std.rs` moves onto the registry, so `std` is in the index like any other namespace.
+  _Done:_ `efescript::host_std::std_registry(&StdOptions)` registers `std`, `std.time` and `std.fs` (owner `std`) with parameter names and docs; the lowered signatures of the old `std` functions are unchanged. `std.fs` is always in the index but denied (-2) unless `--fs-root DIR` is given; `..`, absolute paths and symlinks out of the root are denied. It is a module of the efescript CLI crate, which the engine never depends on (no separate crate). Tests: `host_std` unit tests (fs escapes, time), `tests/v2_ported.rs` (`write_file.efa`).
+- [x] E3.6 Remove the old numbered `syscall` instruction and the `SysCalls` enum (the legacy `.efe` assembler and VM go with them; port any example worth keeping to `.efa`).
+  _Done:_ `src/nasm_efe`, `src/runtime`, `ops.rs`, `instruction.rs`, `syscalls.rs`, `funs.rs`, `macros.rs`, the `.efe` examples and their tests are deleted; efescript no longer depends on efepages or proc_macros. `Host`/`StdHost`/`CaptureHost` moved to `src/host.rs`. Ported: `call.efe` → `exit.efa`, `test.efe` → `echo.efa`, `create_e.efe` → `write_file.efa`; `heap.efe` was dropped. `.efe`/`.efec` files exit 2 with a message. Tests: `tests/v2_ported.rs`. Not ported as tests: legacy-only checks (deep recursion to depth 20000, data placed between code, unknown syscall numbers) have no v2 counterpart.
+
+### E4: API index file and tooling
+- [x] E4.1 Index export from a registry to `.efapi`: functions with parameter names, types and docs; struct layouts; namespaces, versions and owners; a format version and a content hash. JSON first, binary later if size matters. A reader for the same file (`efescript api <file>` prints it). The format is specified in `crates/efevm/API_INDEX.md`.
+  _Done:_ `ApiIndex::{to_json, from_json, hash}` (`crates/efevm/src/api/{index,json}.rs`, hand-written JSON, no dependencies), format in `crates/efevm/API_INDEX.md`. `efescript api FILE.efapi` prints it, `efescript api-export` writes the std index. The reader verifies format, version, hash and every `signature`, and never panics (mutation test). The reader accepts a hash computed over the file text or over its canonical re-serialisation, so reformatted files still load. Tests: `crates/efevm/tests/api.rs`, `crates/efescript/tests/api_index.rs::{json_round_trip_keeps_the_hash, api_export_cli_matches_the_library_index, api_cli_prints_every_function}`.
+- [x] E4.2 Modules record the index hash they were built against (plus the imports they use, which they already list); the loader reports incompatibilities by name, not just "hash differs".
+  _Done:_ `.efvm` section 12 `api` (index hash + version of every namespace imported), written by the assembler with `--api`; the linker checks versions and `Imports::check_module` reports incompatibilities by function and namespace name, adding the hash only as context. Tests: `crates/efevm/tests/api.rs::{api_section_round_trips, api_section_rejections}`, `examples/script_demo/tests/e2e.rs` (section 12 hash equals the exported index's).
+- [x] E4.3 The assembler reads a `.efapi` file (`--api <file>`) to check `import` declarations and call arity at build time, with "did you mean" for unknown names.
+  _Done:_ `efescript build|run --api FILE`, `asm::assemble_with(src, file, &AsmOptions { api })`: unknown imports with "did you mean", signature mismatches shown with parameter names, `import ns.name` without a signature, struct constants `S.size`, `S.align`, `S.<field>`, `S.id`. Tests: 11 diagnostics tests in `src/asm/lower/tests.rs`, `tests/api_index.rs::{assemble_an_example_against_an_index_read_from_json, run_and_build_with_api_through_the_cli}`.
+- [x] E4.4 Language server for the assembly language (`efescript lsp`): diagnostics, go-to-label, completion and hover for host functions from the `.efapi` file, reloading when the file changes.
+  _Done:_ `efescript lsp [--api FILE]` (`src/lsp/`, `lsp-server` + `lsp-types`): diagnostics, go to definition, completion of host functions/struct constants/mnemonics/local symbols, hover; finds a single `*.efapi` in the workspace root without `--api`; reloads it when its modification time changes and republishes diagnostics. Tests: `tests/v2_lsp.rs` (11, including the binary over stdio). Not checked with a real editor; definition/hover are single-file and use the last AST that parsed.
+- [x] E4.5 Debugger: breakpoints, single step, register and memory view over the debug section (replaces the empty `debugger` module). Host calls are shown by index name.
+  _Done:_ `efescript debug FILE [--api FILE]` (`src/debugger/`, a line debugger on stdin/stdout): `break LINE|FILE:LINE|FUNC`, `delete`, `step` (resume with budget 1), `next`, `continue`, `regs` (with register names), `mem`, `bt`, `list`, `where`, `quit`; import calls are shown by index name and parameter names (`call std.println(text = r0..r1)`). efevm gained `Instance::{fiber_location, fiber_registers, fiber_backtrace}`. Tests: `tests/v2_debugger.rs` (9, including the CLI), `crates/efevm/tests/api.rs::single_step_debugger_hooks`. There is no DAP (editor) protocol, only the command line.
+- [x] E4.6 The index test: every callable host function has an index entry with a doc line; run for the `std` registry and for the engine registry.
+  _Done:_ `crates/efescript/tests/api_index.rs` (std registry) and `crates/core/tests/api_index.rs` (engine registry): every name in `imports().names()` has an index entry with a non-empty doc and the same lowered type, and the other way round; the JSON round trip keeps the hash; every engine component is in the index with its layout.
 
 ### E5: Engine integration (repository roadmap 5.4–5.5)
-- [ ] E5.1 The engine registers its host functions (world, commands, input, time, events, log) and exports the manifest with `cargo xtask api-export`.
-- [ ] E5.2 `Script` component and `ScriptSystem` with a per-frame budget.
-- [ ] E5.3 Mods: load and unload modules, mods registering functions for other mods, per-mod budgets and namespace permissions, hot reload on native.
+Needs the world, `Commands` and type registry of repository roadmap 3.2–3.4; those are pulled forward as part of this work.
+- [x] E5.1 The engine registers its host functions (world, commands, input, time, events, log) in the registry and exports the index with `cargo xtask api-export`; `Engine::export_api_index` does the same at runtime. Registered components appear in the index with their layouts.
+  _Done:_ the engine registers `engine.world`, `engine.input`, `engine.time`, `engine.events`, `engine.log`, `engine.mods` (27 functions, `crates/core/src/engine/scripting/api_engine.rs`); games add their own with `Engine::define_namespace`/`register_host_fn`. `Engine::register_component` is the one public path that registers a component in the type registry and in the index. `Engine::api_index()`/`export_api_index()`; `cargo xtask api-export <example>` runs the game with `EFE_API_EXPORT`. Tests: `crates/core/tests/api_index.rs`, `examples/script_demo/tests/e2e.rs::the_native_binary_writes_the_index_with_efe_api_export`.
+- [x] E5.2 `Script` component and `ScriptSystem` with a per-frame budget.
+  _Done:_ `Script { module, entry, state }` component and the script system (first in `Update`): `entry(entity, dt, state) -> state` per entity, optional `init`/`frame` exports, one instance per module (one VM per world), per-module per-frame budget. Tests: `crates/core/tests/scripting.rs::{script_moves_its_entitys_transform, budget_exhaustion_skips_the_module_but_not_the_frame, a_script_with_an_entry_that_runs_out_skips_the_modules_other_scripts}`.
+- [x] E5.3 Mods: load and unload modules, mods registering functions for other mods (added to the index under the mod's name, removed on unload), per-mod budgets and namespace permissions, hot reload on native.
+  _Done:_ `Engine::load_mod(bytes, ModOptions)` with namespace-prefix permissions and budget, `unload_module`; `engine.mods.export` registers a mod function under the mod's namespace (owner = the mod, parameter names from the names section), callable by other modules, removed from the index on unload (callers then get a clean trap); hot reload with `watch_module` (native only, polls the file's modification time). Tests: `crates/core/tests/scripting.rs::{mod_exports_appear_in_the_index_are_callable_and_vanish_on_unload, disallowed_namespace_and_link_errors_are_reported_by_name, hot_reload_swaps_the_module_and_resets_script_state}`, `examples/script_demo/tests/e2e.rs::a_mod_exports_a_function_that_another_script_calls`. A mod can register layout-only structs only from Rust (`Engine::register_struct`), not from script code.
+- [x] E5.4 Every game build ships its index: `cargo xtask build`/`dist` write `<game>.efapi` next to the game, and an example game shows a script calling an engine function checked against that file.
+  _Done:_ `cargo xtask build|run <example> native` writes `<example>.efapi` next to the binary and assembles `examples/<example>/scripts/*.efa` against it into `scripts/*.efvm`; `dist` copies the `.efapi` into `dist/<example>/`. `examples/script_demo` runs `mover.efa`, which moves entities through `engine.world.get/set` and calls the game's own `game.score_add`. Tests: `examples/script_demo/tests/e2e.rs::mover_script_assembled_against_the_exported_index_moves_entities` (headless). Not run: the SDL window (`cargo xtask run script_demo native`) and the web dist (wasm-bindgen-cli is not installed); both are compile-checked only. Scripts marked `; needs-mod:` are not assembled by xtask.
 
 ### E6: High-level language
 - [ ] E6.1 Language design: syntax, type system, how host types and imports appear. (Today only a symbol lexer and empty AST types exist; `main.sfe` is `fn main(){ }`.)

@@ -1,5 +1,7 @@
 //! Value types, function types and embedder limits.
 
+use std::fmt;
+
 /// A value type. Registers are untyped 64-bit slots; types matter only at function boundaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -39,6 +41,38 @@ impl FuncType {
     }
 }
 
+impl ValType {
+    /// `i32`, `i64`, `f32` or `f64`.
+    pub fn name(self) -> &'static str {
+        match self {
+            ValType::I32 => "i32",
+            ValType::I64 => "i64",
+            ValType::F32 => "f32",
+            ValType::F64 => "f64",
+        }
+    }
+}
+
+impl fmt::Display for ValType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The lowered signature as written in the API index (API_INDEX.md, key `signature`):
+/// `(i64, i32) -> i32`, `(f32) -> (i32, i64)` or `(i64, i64)` without results.
+impl fmt::Display for FuncType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let list = |v: &[ValType]| v.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
+        write!(f, "({})", list(&self.params))?;
+        match self.results.len() {
+            0 => Ok(()),
+            1 => write!(f, " -> {}", self.results[0]),
+            _ => write!(f, " -> ({})", list(&self.results)),
+        }
+    }
+}
+
 /// Size of a memory page in bytes.
 pub const PAGE_SIZE: u64 = 65536;
 
@@ -75,5 +109,13 @@ mod tests {
         assert_eq!(ValType::from_byte(3), Some(ValType::F64));
         assert_eq!(ValType::from_byte(4), None);
         assert_eq!(Limits::default().max_memory_pages, 1024);
+    }
+
+    #[test]
+    fn signature_text() {
+        use ValType::*;
+        assert_eq!(FuncType::new([I64, I32, I64], [I32]).to_string(), "(i64, i32, i64) -> i32");
+        assert_eq!(FuncType::new([F32], [I32, I64]).to_string(), "(f32) -> (i32, i64)");
+        assert_eq!(FuncType::new([], []).to_string(), "()");
     }
 }

@@ -136,13 +136,6 @@ fn build_without_output_exits_2() {
 }
 
 #[test]
-fn legacy_efe_example_still_runs() {
-    let o = efescript(&["examples/hello.efe"]);
-    assert_eq!(stdout(&o), "hello world!\n");
-    assert_eq!(o.status.code(), Some(0));
-}
-
-#[test]
 fn no_efvm_is_left_in_the_crate_directory() {
     for dir in [PathBuf::from(ROOT), PathBuf::from(ROOT).join("examples")] {
         let entries = std::fs::read_dir(&dir).expect("crate directory is readable");

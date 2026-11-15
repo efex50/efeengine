@@ -1,0 +1,35 @@
+; mover.efa - a per-entity script: moves its entity along +x and scores a point per frame.
+;
+; Attached with `Script::new(module, "update")`; the engine calls, once per frame per entity,
+;   update(entity, dt, state) -> state
+; Reads the entity's Transform with engine.world.get into `buf` (sized with the struct
+; constant Transform.size), adds speed*dt to position.x (at offset Transform.position),
+; writes it back with engine.world.set and calls the game function game.score_add.
+; The returned state counts the frames the script has run.
+;
+; Assembled against the game's index (needs `Transform.*` and the imports without
+; signatures):  cargo xtask build script_demo native   (or: efescript build mover.efa
+;   --api script_demo.efapi -o mover.efvm)
+
+import engine.world.get
+import engine.world.set
+import game.score_add
+
+const SPEED = 60.0          ; world units per second
+
+buf resb Transform.size
+
+export fn update(entity: i64, dt: f32, state: i64) -> i64 {
+    reg status, x, step, total
+    call engine.world.get(entity, Transform.id, buf) -> status
+    br_if status, done            ; stale entity or no Transform: do nothing
+    f32.load x, buf, Transform.position
+    f32.mul step, dt, SPEED
+    f32.add x, x, step
+    f32.store x, buf, Transform.position
+    call engine.world.set(entity, Transform.id, buf) -> status
+    call game.score_add(1) -> total
+done:
+    i64.add state, state, 1
+    ret state
+}

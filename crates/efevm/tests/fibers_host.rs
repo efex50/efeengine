@@ -1,4 +1,6 @@
 //! Budget, yield, fiber lifecycle, host calls and linking (SPEC sections 7, 10).
+mod common;
+use common::reg_host;
 use efevm::ValType::I64;
 use efevm::*;
 
@@ -503,9 +505,9 @@ fn spawn_errors() {
     mb.export_global("g", g);
     mb.export_func("imp", host);
     let module = mb.finish().unwrap();
-    let mut imports = Imports::<()>::new();
-    imports.func("env", "h", ty(0, 0), |_c, _a, _r| Ok(HostOk::Continue));
-    let mut inst = Instance::new(&module, &imports, Limits::default()).unwrap();
+    let mut imports = HostRegistry::<()>::new();
+    reg_host(&mut imports, "env", "h", ty(0, 0), |_c, _a, _r| Ok(HostOk::Continue));
+    let mut inst = Instance::new(&module, &imports.imports(), Limits::default()).unwrap();
     assert_eq!(inst.spawn("nope", &[]).unwrap_err(), SpawnError::NoSuchExport);
     assert_eq!(inst.spawn("g", &[]).unwrap_err(), SpawnError::NotAFunction);
     assert_eq!(inst.spawn("imp", &[]).unwrap_err(), SpawnError::ImportEntry);
@@ -559,15 +561,15 @@ fn host_args_results_and_state() {
     let id = mb.add_func(ty(0, 6), f);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "mix", ty(3, 2), |c, a, r| {
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "mix", ty(3, 2), |c, a, r| {
         c.host().calls.push(a.to_vec());
         r[0] = a[0] + a[1] + a[2];
         r[1] = a[0] * a[1] * a[2];
         Ok(HostOk::Continue)
     });
     let mut st = St::default();
-    let (e, res) = run_st(&m, &imports, &mut st, &[]);
+    let (e, res) = run_st(&m, &imports.imports(), &mut st, &[]);
     assert_eq!(e, Exit::Done);
     // after 1st call: r1=9 r2=24 r3=4; 2nd: r1=37 r2=864 r3=4
     assert_eq!(res, vec![55, 37, 864, 4, 66, 66]);
@@ -587,14 +589,14 @@ fn host_zero_args_zero_results() {
     let id = mb.add_func(ty(0, 1), f);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "tick", ty(0, 0), |c, a, r| {
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "tick", ty(0, 0), |c, a, r| {
         assert!(a.is_empty() && r.is_empty());
         c.host().count += 1;
         Ok(HostOk::Continue)
     });
     let mut st = St::default();
-    assert_eq!(run_st(&m, &imports, &mut st, &[]), (Exit::Done, vec![7]));
+    assert_eq!(run_st(&m, &imports.imports(), &mut st, &[]), (Exit::Done, vec![7]));
     assert_eq!(st.count, 3);
 }
 
@@ -610,10 +612,10 @@ fn host_results_start_zeroed_and_unset_results_are_zero() {
     let id = mb.add_func(ty(0, 1), f);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "noop", ty(1, 1), |_c, _a, _r| Ok(HostOk::Continue));
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "noop", ty(1, 1), |_c, _a, _r| Ok(HostOk::Continue));
     let mut st = St::default();
-    let (e, res) = run_st(&m, &imports, &mut st, &[]);
+    let (e, res) = run_st(&m, &imports.imports(), &mut st, &[]);
     assert_eq!(e, Exit::Done);
     assert_eq!(res, vec![0]);
 }
@@ -636,15 +638,15 @@ fn host_reads_string_written_by_guest() {
     let id = mb.add_func(ty(0, 0), f);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "print", ty(2, 0), |c, a, _r| {
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "print", ty(2, 0), |c, a, _r| {
         let mut buf = vec![0u8; a[1] as usize];
         c.read(a[0], &mut buf)?;
         c.host().text.push_str(std::str::from_utf8(&buf).unwrap());
         Ok(HostOk::Continue)
     });
     let mut st = St::default();
-    assert_eq!(run_st(&m, &imports, &mut st, &[]).0, Exit::Done);
+    assert_eq!(run_st(&m, &imports.imports(), &mut st, &[]).0, Exit::Done);
     assert_eq!(st.text, "hello world!");
 }
 
@@ -662,13 +664,13 @@ fn host_writes_memory_guest_loads() {
     let id = mb.add_func(ty(0, 2), f);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "fill", ty(1, 0), |c, a, _r| {
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "fill", ty(1, 0), |c, a, _r| {
         c.write(a[0], b"ABCDEFGH")?;
         Ok(HostOk::Continue)
     });
     let mut st = St::default();
-    let (e, res) = run_st(&m, &imports, &mut st, &[]);
+    let (e, res) = run_st(&m, &imports.imports(), &mut st, &[]);
     assert_eq!(e, Exit::Done);
     assert_eq!(res, vec![u64::from_le_bytes(*b"ABCDEFGH"), b'D' as u64]);
 }
@@ -690,8 +692,8 @@ fn host_out_of_range_access_gives_out_of_bounds() {
     let id = mb.add_func(ty(2, 1), g);
     mb.export_func("poke", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "peek", ty(2, 1), |c, a, r| {
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "peek", ty(2, 1), |c, a, r| {
         let mut buf = vec![0u8; a[1] as usize];
         match c.read(a[0], &mut buf) {
             Ok(()) => r[0] = 1,
@@ -702,7 +704,7 @@ fn host_out_of_range_access_gives_out_of_bounds() {
         }
         Ok(HostOk::Continue)
     });
-    imports.func("env", "poke", ty(2, 1), |c, a, r| {
+    reg_host(&mut imports, "env", "poke", ty(2, 1), |c, a, r| {
         let buf = vec![9u8; a[1] as usize];
         c.write(a[0], &buf)?;
         r[0] = 1;
@@ -720,13 +722,13 @@ fn host_out_of_range_access_gives_out_of_bounds() {
     ];
     for (addr, len, ok) in cases {
         let before = st.errs.len();
-        let (e, res) = run_st(&m, &imports, &mut st, &[addr, len]);
+        let (e, res) = run_st(&m, &imports.imports(), &mut st, &[addr, len]);
         assert_eq!((e, res), (Exit::Done, vec![ok]), "peek {addr} {len}");
         assert_eq!(st.errs.len() - before, (ok == 0) as usize);
     }
     assert!(st.errs.iter().all(|e| *e == Trap::OutOfBounds));
     // propagating the error with `?` traps the fiber with OutOfBounds
-    let mut inst = Instance::new(&m, &imports, Limits::default()).unwrap();
+    let mut inst = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
     let f = inst.spawn("poke", &[65535, 2]).unwrap();
     assert_eq!(inst.resume(f, &mut st, 100), Exit::Trap(Trap::OutOfBounds));
     // and in-range writes land in memory
@@ -746,14 +748,14 @@ fn host_failed_write_does_not_modify_memory() {
     let id = mb.add_func(ty(2, 1), g);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "poke", ty(2, 1), |c, a, r| {
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "poke", ty(2, 1), |c, a, r| {
         let buf = vec![9u8; a[1] as usize];
         c.write(a[0], &buf)?;
         r[0] = 1;
         Ok(HostOk::Continue)
     });
-    let mut inst = Instance::new(&m, &imports, Limits::default()).unwrap();
+    let mut inst = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
     let f = inst.spawn("main", &[65535, 2]).unwrap();
     let mut st = St::default();
     assert_eq!(inst.resume(f, &mut st, 100), Exit::Trap(Trap::OutOfBounds));
@@ -771,9 +773,9 @@ fn host_trap_boom() {
     let id = mb.add_func(ty(0, 1), f);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "boom", ty(0, 0), |_c, _a, _r| Err(Trap::Host("boom".to_string())));
-    let mut inst = Instance::new(&m, &imports, Limits::default()).unwrap();
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "boom", ty(0, 0), |_c, _a, _r| Err(Trap::Host("boom".to_string())));
+    let mut inst = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
     let mut st = St::default();
     let f = inst.spawn("main", &[]).unwrap();
     assert_eq!(inst.resume(f, &mut st, 100), Exit::Trap(Trap::Host("boom".into())));
@@ -803,13 +805,13 @@ fn host_yield_writes_results_first_and_resume_continues() {
     let id = mb.add_func(ty(0, 1), f);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "ask", ty(1, 1), |c, a, r| {
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "ask", ty(1, 1), |c, a, r| {
         c.host().count += 1;
         r[0] = a[0] + 1;
         Ok(HostOk::Yield)
     });
-    let mut inst = Instance::new(&m, &imports, Limits::default()).unwrap();
+    let mut inst = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
     let mut st = St::default();
     let fb = inst.spawn("main", &[]).unwrap();
     assert_eq!(inst.resume(fb, &mut st, 100), Exit::Yield);
@@ -835,9 +837,9 @@ fn host_yield_costs_one_like_any_call() {
     let id = mb.add_func(ty(0, 0), f);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "y", ty(0, 0), |_c, _a, _r| Ok(HostOk::Yield));
-    let mut inst = Instance::new(&m, &imports, Limits::default()).unwrap();
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "y", ty(0, 0), |_c, _a, _r| Ok(HostOk::Yield));
+    let mut inst = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
     let mut st = St::default();
     let f = inst.spawn("main", &[]).unwrap();
     assert_eq!(inst.resume_counted(f, &mut st, 100), (Exit::Yield, 1));
@@ -875,12 +877,12 @@ fn host_reads_and_sets_globals() {
     let id = mb.add_func(ty(0, 8), f);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "getg", ty(1, 1), |c, a, r| {
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "getg", ty(1, 1), |c, a, r| {
         r[0] = c.global(a[0] as u32).unwrap_or(u64::MAX);
         Ok(HostOk::Continue)
     });
-    imports.func("env", "setg", ty(2, 1), |c, a, r| {
+    reg_host(&mut imports, "env", "setg", ty(2, 1), |c, a, r| {
         match c.set_global(a[0] as u32, a[1]) {
             Ok(()) => r[0] = 1,
             Err(e) => {
@@ -891,7 +893,7 @@ fn host_reads_and_sets_globals() {
         Ok(HostOk::Continue)
     });
     let mut st = St::default();
-    let mut inst = Instance::new(&m, &imports, Limits::default()).unwrap();
+    let mut inst = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
     let f = inst.spawn("main", &[]).unwrap();
     assert_eq!(inst.resume(f, &mut st, 1000), Exit::Done);
     assert_eq!(inst.results(f), Some(&[123, 9, 0, 0, 9, u64::MAX, 1, 0][..]));
@@ -912,12 +914,12 @@ fn host_set_immutable_or_missing_global_propagated_traps_fiber() {
     let id = mb.add_func(ty(2, 0), f);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "setg", ty(2, 0), |c, a, _r| {
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "setg", ty(2, 0), |c, a, _r| {
         c.set_global(a[0] as u32, a[1])?;
         Ok(HostOk::Continue)
     });
-    let mut inst = Instance::new(&m, &imports, Limits::default()).unwrap();
+    let mut inst = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
     let mut st = St::default();
     for idx in [0u64, 1, 1000] {
         let f = inst.spawn("main", &[idx, 5]).unwrap();
@@ -938,12 +940,12 @@ fn host_state_persists_across_fibers_and_resumes() {
     let id = mb.add_func(ty(0, 0), f);
     mb.export_func("main", id);
     let m = mb.finish().unwrap();
-    let mut imports = Imports::<St>::new();
-    imports.func("env", "tick", ty(0, 0), |c, _a, _r| {
+    let mut imports = HostRegistry::<St>::new();
+    reg_host(&mut imports, "env", "tick", ty(0, 0), |c, _a, _r| {
         c.host().count += 1;
         Ok(HostOk::Continue)
     });
-    let mut inst = Instance::new(&m, &imports, Limits::default()).unwrap();
+    let mut inst = Instance::new(&m, &imports.imports(), Limits::default()).unwrap();
     let mut st = St::default();
     let a = inst.spawn("main", &[]).unwrap();
     let b = inst.spawn("main", &[]).unwrap();
@@ -984,17 +986,17 @@ fn link_missing_import() {
         LoadError::Link(LinkError::MissingImport { namespace: "env".into(), name: "f".into() })
     );
     // right name, wrong namespace; right namespace, wrong name
-    let mut imp = Imports::<()>::new();
-    imp.func("other", "f", ty(1, 1), |_c, a, r| {
+    let mut imp = HostRegistry::<()>::new();
+    reg_host(&mut imp, "other", "f", ty(1, 1), |_c, a, r| {
         r[0] = a[0];
         Ok(HostOk::Continue)
     });
-    imp.func("env", "g", ty(1, 1), |_c, a, r| {
+    reg_host(&mut imp, "env", "g", ty(1, 1), |_c, a, r| {
         r[0] = a[0];
         Ok(HostOk::Continue)
     });
     assert_eq!(
-        link_err(&m, &imp, Limits::default()),
+        link_err(&m, &imp.imports(), Limits::default()),
         LoadError::Link(LinkError::MissingImport { namespace: "env".into(), name: "f".into() })
     );
 }
@@ -1009,27 +1011,29 @@ fn link_import_type_mismatch() {
         (vec![ValType::I32], vec![I64]),
     ];
     for (p, r) in wrong {
-        let mut imp = Imports::<()>::new();
-        imp.func("env", "f", FuncType::new(p.clone(), r.clone()), |_c, _a, _r| {
+        let mut imp = HostRegistry::<()>::new();
+        reg_host(&mut imp, "env", "f", FuncType::new(p.clone(), r.clone()), |_c, _a, _r| {
             Ok(HostOk::Continue)
         });
         assert_eq!(
-            link_err(&m, &imp, Limits::default()),
+            link_err(&m, &imp.imports(), Limits::default()),
             LoadError::Link(LinkError::ImportTypeMismatch {
                 namespace: "env".into(),
-                name: "f".into()
+                name: "f".into(),
+                module: "(i64) -> i64".into(),
+                host: FuncType::new(p.clone(), r.clone()).to_string(),
             }),
             "{p:?} -> {r:?}"
         );
     }
-    let mut imp = Imports::<()>::new();
-    imp.func("env", "f", FuncType::new([ValType::I32], [I64]), |_c, _a, _r| Ok(HostOk::Continue));
-    imp.func("env", "f", FuncType::new([I64], [I64]), |_c, a, r| {
+    let mut imp = HostRegistry::<()>::new();
+    reg_host(&mut imp, "env", "f", FuncType::new([ValType::I32], [I64]), |_c, _a, _r| Ok(HostOk::Continue));
+    reg_host(&mut imp, "env", "f", FuncType::new([I64], [I64]), |_c, a, r| {
         r[0] = a[0] * 2;
         Ok(HostOk::Continue)
     });
     // the later registration replaces the earlier one
-    let mut inst = Instance::new(&m, &imp, Limits::default()).unwrap();
+    let mut inst = Instance::new(&m, &imp.imports(), Limits::default()).unwrap();
     let f = inst.spawn("main", &[21]).unwrap();
     assert_eq!(inst.resume(f, &mut (), 100), Exit::Done);
     assert_eq!(inst.results(f), Some(&[42u64][..]));
@@ -1038,13 +1042,13 @@ fn link_import_type_mismatch() {
 #[test]
 fn link_extra_host_functions_are_ignored() {
     let m = import_module();
-    let mut imp = Imports::<()>::new();
-    imp.func("env", "f", ty(1, 1), |_c, a, r| {
+    let mut imp = HostRegistry::<()>::new();
+    reg_host(&mut imp, "env", "f", ty(1, 1), |_c, a, r| {
         r[0] = a[0] + 1;
         Ok(HostOk::Continue)
     });
-    imp.func("env", "unused", ty(5, 5), |_c, _a, _r| Ok(HostOk::Continue));
-    let mut inst = Instance::new(&m, &imp, Limits::default()).unwrap();
+    reg_host(&mut imp, "env", "unused", ty(5, 5), |_c, _a, _r| Ok(HostOk::Continue));
+    let mut inst = Instance::new(&m, &imp.imports(), Limits::default()).unwrap();
     let f = inst.spawn("main", &[1]).unwrap();
     assert_eq!(inst.resume(f, &mut (), 100), Exit::Done);
     assert_eq!(inst.results(f), Some(&[2u64][..]));

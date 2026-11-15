@@ -130,6 +130,9 @@ pub struct ImportDecl {
     pub qualified: Ident,
     pub params: Vec<TypeRef>,
     pub results: Vec<TypeRef>,
+    /// `false` for `import ns.name` written without a parameter list: `params` and `results`
+    /// are then empty and the signature comes from the API index (`--api`).
+    pub has_sig: bool,
 }
 
 impl ImportDecl {

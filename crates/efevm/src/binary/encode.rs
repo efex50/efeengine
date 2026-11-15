@@ -15,6 +15,7 @@
 //!   - 9: Code (function bodies / instruction streams)
 //!   - 10: Names (debug names for functions and registers)
 //!   - 11: Lines (source file and line mappings)
+//!   - 12: Api (index hash and namespace versions; written when `ModuleData::api` is `Some`)
 //!
 //! Each section consists of:
 //! - 1-byte section ID
@@ -292,6 +293,18 @@ pub(crate) fn encode(m: &ModuleData) -> Vec<u8> {
             }
         }
         emit_section(&mut out, 11, &payload);
+    }
+
+    // Section 12: API index reference (written whenever present, even with no namespaces)
+    if let Some(api) = &m.api {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&api.hash.to_le_bytes());
+        write_len(&mut payload, api.namespaces.len());
+        for (name, version) in &api.namespaces {
+            write_str(&mut payload, name);
+            leb::write_u32(&mut payload, *version);
+        }
+        emit_section(&mut out, 12, &payload);
     }
 
     out

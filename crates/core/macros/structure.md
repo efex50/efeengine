@@ -1,6 +1,6 @@
 # efeengine-macros
 
-A tiny proc-macro crate that provides the `#[main]` attribute for efeengine games. It rewrites the user's `main` function into a platform-specific entry point so the same game source builds as a native binary and as a wasm module. It is re-exported by `efeengine-core` (`pub use efeengine_macros::main`), so games normally get it from `efeengine_core::prelude::*`.
+A tiny proc-macro crate that provides the `#[main]` attribute for efeengine games and the `#[derive(ScriptType)]` layout derive. It rewrites the user's `main` function into a platform-specific entry point so the same game source builds as a native binary and as a wasm module. It is re-exported by `efeengine-core` (`pub use efeengine_macros::main`), so games normally get it from `efeengine_core::prelude::*`.
 
 ## At a glance
 | | |
@@ -8,8 +8,8 @@ A tiny proc-macro crate that provides the `#[main]` attribute for efeengine game
 | Path | `crates/core/macros` |
 | Kind | proc-macro (`[lib] proc-macro = true`) |
 | Depends on (workspace) | none |
-| Used by | `efeengine-core` (re-export); games such as `examples/test_example` through the prelude |
-| Key external deps | `syn` 2 (`full`, parses the `ItemFn`), `quote` (generates tokens), `proc-macro2` (declared; not imported directly in the source) |
+| Used by | `efeengine-core` (re-export; also derives `ScriptType` for its own components); games such as `examples/test_example` through the prelude |
+| Key external deps | `syn` 2 (`full`, parses the `ItemFn` and the derive input), `quote` (generates tokens), `proc-macro2` (token streams in the derive) |
 | Targets | the macro runs on the host at compile time; its output has separate native and `wasm32` branches |
 | Features | none |
 
@@ -17,7 +17,7 @@ A tiny proc-macro crate that provides the `#[main]` attribute for efeengine game
 ```text
 crates/core/macros
 ├── Cargo.toml    package metadata, proc-macro = true, deps syn/quote/proc-macro2
-└── src/lib.rs    the single `#[proc_macro_attribute] pub fn main`
+└── src/lib.rs    `#[proc_macro_attribute] pub fn main` and `#[proc_macro_derive(ScriptType, attributes(script))]`
 ```
 
 ## Main concepts
@@ -31,11 +31,15 @@ crates/core/macros
      - `#[wasm_bindgen] pub fn __engine_start(config: JsValue) -> Result<(), JsValue>`, the real start of the game; JS must call it explicitly (e.g. `__engine_start({ wasmJsPath: "./pkg/<crate>.js" })`). It calls `efeengine_core::config::__start_from_js(config)?` (parses the optional JS startup config object `{ wasmJsPath, threads, canvasId, externalApi, graphicsBackend }` with serde-wasm-bindgen; undefined/null = defaults) and then the user's main (`__engine_user_main()`).
      - `#[wasm_bindgen(start)] pub fn main() {}`, an empty start function. The in-code comment says it inits without starting the game so that workers do not start it.
 
+### `#[derive(ScriptType)]` (`src/lib.rs`)
+For a `#[repr(C)]` struct with named fields and no generics it emits `impl ::efeengine_core::engine::types::ScriptType for T { const NAME = "T"; fn layout() -> ::efeengine_core::efevm::StructDesc }`: size and alignment from `size_of` / `align_of`, one `FieldDesc` per field with `offset_of!(Self, field)` and `<FieldTy as ScriptField>::PRIM` / `::COUNT`. `#[script(name = "...")]` on the struct overrides the name; `#[script(entity)]` on a field gives `Prim::Entity` (a const assertion requires the field's `PRIM` to be `U64`). `///` doc comments of the struct and fields become `doc` strings (each line trimmed, joined with `\n`). Tuple / unit structs, enums, unions, generics and a missing `repr(C)` are compile errors at the offending span (compile_fail doctests in `crates/core/src/engine/types.rs`). The generated paths need `efeengine_core` as a crate name; inside core itself `lib.rs` has `extern crate self as efeengine_core;`. The trait requires `bytemuck::Pod`, so the type must also derive `Pod` / `Zeroable`.
+
 ### Why the wasm split matters
 Web Workers in `efeengine-core` instantiate the same wasm module with shared memory. A start function that ran the game would run it in every worker, so the game start is moved to the explicit `__engine_start({ ... })` export that the page calls once.
 
 ## Public API
 - `#[main]` (attribute macro, no arguments), applied to the game's `fn main()`.
+- `#[derive(ScriptType)]` with helper attribute `#[script(...)]`; re-exported from `efeengine_core::prelude`.
 - Generated items: `__engine_user_main` (renamed user fn), native `main`, wasm exports `__engine_start` and `main` (wasm-bindgen start).
 - On wasm the expansion refers to `wasm_bindgen` by crate name (`use wasm_bindgen::prelude::*;`), so `wasm_bindgen` must resolve in the module where `#[main]` is used. The game example only depends on `efeengine-core`, relying on the prelude glob import (`pub use wasm_bindgen` on wasm) to bring it into scope.
 
@@ -46,4 +50,4 @@ Native: standard `fn main`. Wasm: build the game crate as `cdylib` with the root
 - Attribute arguments are silently ignored; async or generic `main` is not handled specially.
 - The wasm `main()` start function is intentionally empty (`src/lib.rs`, last block); no panic hook or logger setup in the macro (the panic hook is installed in `Engine::new` on wasm).
 - The generated `main` and `use wasm_bindgen::prelude::*` are not hygienic and can collide with user items of the same name; the user's function name is replaced by `__engine_user_main`.
-- `proc-macro2` is declared but unused directly; no tests.
+- `proc-macro2` is used for the derive's token streams; the derive is tested from core (`engine/types.rs`, `engine/components.rs`, `tests/world.rs`).

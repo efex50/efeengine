@@ -6,7 +6,9 @@
 //! the final verification); `func.rs` lowers function bodies; `value.rs` types immediates.
 //! It never panics; it collects as many diagnostics as it can.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use efevm::api::ApiIndex;
 
 use efevm::{FuncType, LoadError, ModuleBuilder, Op, ValType};
 
@@ -73,6 +75,8 @@ struct Env<'a> {
     pub values: HashMap<String, ValueInfo>,
     pub value_names: Vec<String>,
     pub ops: HashMap<&'static str, Op>,
+    /// Names of the constants that come from the API index (`Transform.size`, ...).
+    pub api_consts: HashSet<String>,
 }
 
 fn idx(n: usize) -> u32 {
@@ -95,6 +99,15 @@ fn func_type(params: &[ast::TypeRef], results: &[ast::TypeRef]) -> FuncType {
     )
 }
 
+fn ty_of_val(t: ValType) -> Ty {
+    match t {
+        ValType::I32 => Ty::I32,
+        ValType::I64 => Ty::I64,
+        ValType::F32 => Ty::F32,
+        ValType::F64 => Ty::F64,
+    }
+}
+
 fn func_type_of(params: &[Ty], results: &[Ty]) -> FuncType {
     FuncType::new(params.iter().map(|t| val_type(*t)), results.iter().map(|t| val_type(*t)))
 }
@@ -111,6 +124,7 @@ impl<'a> Env<'a> {
             values: HashMap::new(),
             value_names: Vec::new(),
             ops: Op::ALL.iter().map(|o| (o.name(), *o)).collect(),
+            api_consts: HashSet::new(),
         }
     }
 
@@ -366,13 +380,57 @@ fn global_init(env: &Env, g: &GlobalDecl) -> Res<Konst> {
     type_val(g.ty.ty, &val).map_err(|m| env.err(g.init.span(), m))
 }
 
+/// Defines `S.size`, `S.align`, `S.id` (components) and `S.<field>` (byte offset) for every
+/// struct of the index. A field named `size`, `align` or `id` loses against the structural
+/// constant of the same name.
+fn define_api_consts(env: &mut Env, api: &ApiIndex) {
+    for t in &api.types {
+        let mut consts: Vec<(String, i128)> = vec![
+            (format!("{}.size", t.name), i128::from(t.size)),
+            (format!("{}.align", t.name), i128::from(t.align)),
+        ];
+        if let Some(id) = t.component {
+            consts.push((format!("{}.id", t.name), i128::from(id)));
+        }
+        for f in &t.fields {
+            consts.push((format!("{}.{}", t.name, f.name), i128::from(f.offset)));
+        }
+        for (name, v) in consts {
+            if env.values.contains_key(&name) {
+                continue;
+            }
+            env.value_names.push(name.clone());
+            env.api_consts.insert(name.clone());
+            env.values.insert(name, ValueInfo { val: Val::Int(v), span: Span::none(), kind: VKind::Const });
+        }
+    }
+}
+
+/// The diagnostic for `import ns.name(...)` whose declaration differs from the index.
+fn import_mismatch(env: &Env, imp: &ImportDecl, f: &efevm::api::HostFn, declared: &FuncType) -> Diagnostic {
+    env.err(
+        imp.qualified.span,
+        format!(
+            "signature mismatch for `{}`: declared {declared}, but the API index has {}{} which lowers to {}",
+            imp.qualified.name,
+            imp.qualified.name,
+            f.signature_text(),
+            f.func_type()
+        ),
+    )
+}
+
 pub(super) fn lower(
     m: &ast::Module,
     src: &str,
     file: &str,
+    api: Option<&ApiIndex>,
 ) -> Result<efevm::Module, Vec<Diagnostic>> {
     let mut env = Env::new(file, src);
     let mut diags: Vec<Diagnostic> = Vec::new();
+    if let Some(api) = api {
+        define_api_consts(&mut env, api);
+    }
 
     let mut consts = Vec::new();
     let mut imports: Vec<&ImportDecl> = Vec::new();
@@ -432,14 +490,42 @@ pub(super) fn lower(
                 (String::new(), imp.qualified.name.clone())
             }
         };
+        let declared = func_type(&imp.params, &imp.results);
+        // With an index: the function must exist and match; a missing signature comes from it.
+        let mut ty = declared.clone();
+        if let Some(api) = api.filter(|_| !ns.is_empty()) {
+            match api.function(&ns, &name) {
+                None => {
+                    let q = &imp.qualified.name;
+                    let mut d = env.err(imp.qualified.span, format!("unknown host function `{q}`"));
+                    if let Some(s) = did_you_mean(q, api.qualified_names()) {
+                        d = d.with_note(format!("did you mean `{s}`?"));
+                    }
+                    diags.push(d);
+                }
+                Some(f) if !imp.has_sig => ty = f.func_type(),
+                Some(f) if f.func_type() != declared => {
+                    diags.push(import_mismatch(&env, imp, f, &declared));
+                }
+                Some(_) => {}
+            }
+        } else if !imp.has_sig {
+            diags.push(env.err(
+                imp.qualified.span,
+                format!(
+                    "import `{}` has no signature: write the parameter list, or assemble against an API index (`--api FILE.efapi`)",
+                    imp.qualified.name
+                ),
+            ));
+        }
         let sig = Sig {
             index: idx(import_list.len()),
-            params: imp.params.iter().map(|t| t.ty).collect(),
-            results: imp.results.iter().map(|t| t.ty).collect(),
+            params: ty.params.iter().map(|t| ty_of_val(*t)).collect(),
+            results: ty.results.iter().map(|t| ty_of_val(*t)).collect(),
             span: imp.qualified.span,
         };
         env.define_func(&imp.qualified.name, sig, &mut diags);
-        import_list.push((ns, name, func_type(&imp.params, &imp.results)));
+        import_list.push((ns, name, ty));
     }
     let nimports = import_list.len();
     for (k, f) in funcs.iter().enumerate() {
@@ -464,7 +550,15 @@ pub(super) fn lower(
         let span = d.name.span;
         env.define_value(&d.name.name, span, Val::Int(i128::from(addr)), VKind::Data, &mut diags);
         let len_name = format!("{}.len", d.name.name);
-        if !env.values.contains_key(&len_name) {
+        if env.api_consts.contains(&len_name) {
+            diags.push(env.err(
+                span,
+                format!(
+                    "data symbol `{0}` collides with the API index: `{0}.len` is already the offset of a field of struct `{0}`",
+                    d.name.name
+                ),
+            ));
+        } else if !env.values.contains_key(&len_name) {
             env.value_names.push(len_name.clone());
             env.values.insert(
                 len_name,
@@ -649,6 +743,13 @@ pub(super) fn lower(
         mb.define(idx(nimports + k), out.body);
         span_tables.push(out.spans);
         reg_names.push(out.reg_names);
+    }
+    if let Some(api) = api {
+        let used: BTreeMap<&str, u32> = import_list
+            .iter()
+            .filter_map(|(ns, _, _)| api.namespace(ns).map(|n| (n.name.as_str(), n.version)))
+            .collect();
+        mb.api_ref(api.hash(), used);
     }
     for (name, i) in &func_exports {
         mb.export_func(name, *i);

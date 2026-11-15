@@ -152,6 +152,16 @@ pub struct Lines {
     pub funcs: Vec<FuncLines>,
 }
 
+/// Section 12 `api`: the API index a module was assembled against (SPEC.md 9.1,
+/// API_INDEX.md "How modules use the hash").
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ApiRef {
+    /// `ApiIndex::hash()` of the index.
+    pub hash: u64,
+    /// `(namespace, version)` for every namespace the module imports from; names are unique.
+    pub namespaces: Vec<(String, u32)>,
+}
+
 /// Unverified module contents.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ModuleData {
@@ -165,6 +175,8 @@ pub struct ModuleData {
     pub data: Vec<DataSegment>,
     pub names: Names,
     pub lines: Lines,
+    /// `None` for modules assembled without an index (no section 12).
+    pub api: Option<ApiRef>,
 }
 
 impl ModuleData {

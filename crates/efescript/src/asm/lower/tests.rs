@@ -4,7 +4,7 @@ use std::rc::Rc;
 use efevm::{CallError, ExportKind, Inst, Instance, Limits, Module, Op, ValType};
 
 use crate::asm::{assemble, Diagnostic};
-use crate::host_std::{std_imports, StdEnv};
+use crate::host_std::{std_registry, StdEnv, StdOptions};
 use crate::prelude::CaptureHost;
 
 fn asm(src: &str) -> Module {
@@ -32,7 +32,7 @@ fn one(src: &str) -> (String, u32, u32, Option<String>) {
 fn run(m: &Module, export: &str, args: &[u64]) -> (Result<Vec<u64>, CallError>, String) {
     let cap = CaptureHost::shared();
     let mut env = StdEnv::new(cap.clone());
-    let imports = std_imports::<Rc<RefCell<CaptureHost>>>();
+    let imports = std_registry::<Rc<RefCell<CaptureHost>>>(&StdOptions::default()).imports();
     let mut inst = match Instance::new(m, &imports, Limits::default()) {
         Ok(i) => i,
         Err(e) => panic!("link failed: {e}"),
@@ -813,4 +813,204 @@ fn diagnostics_are_capped_at_100() {
     assert_eq!(v.len(), 100);
     assert_eq!(v[99].line, 0);
     assert!(v[99].message.starts_with("too many errors"));
+}
+
+// ---- assembling against an API index (e3-design section 7) ----
+
+mod with_api {
+    use super::*;
+    use crate::asm::{assemble_with, AsmOptions};
+    use efevm::api::{ApiIndex, ApiType, FieldDesc, HostFn, HostRegistry, Prim, StructDesc};
+    use efevm::ApiRef;
+
+    /// `engine.world` v3, `engine.log` v1, and the component `Transform`.
+    pub(super) fn index() -> ApiIndex {
+        let mut r: HostRegistry<()> = HostRegistry::new();
+        r.define_namespace("engine.world", 3, "engine", "The world.").unwrap();
+        r.define_namespace("engine.log", 1, "engine", "Logging.").unwrap();
+        let mut t = StructDesc::new("Transform", 20, 4)
+            .field(FieldDesc::new("pos", 0, Prim::F32, 2))
+            .field(FieldDesc::new("rot", 8, Prim::F32, 1))
+            .field(FieldDesc::new("scale", 12, Prim::F32, 2))
+            .doc("Position, rotation and scale.");
+        t.owner = "engine".into();
+        t.component = Some(77);
+        r.register_type(t).unwrap();
+        r.register(
+            HostFn::new("engine.world", "spawn").doc("Create an entity.").result("e", ApiType::Entity),
+            |_, _, _| Ok(efevm::HostOk::Continue),
+        )
+        .unwrap();
+        r.register(
+            HostFn::new("engine.world", "get")
+                .doc("Copy a component out.")
+                .param("e", ApiType::Entity)
+                .param("component", ApiType::I32)
+                .param("out", ApiType::Ptr)
+                .result("status", ApiType::I32),
+            |_, _, _| Ok(efevm::HostOk::Continue),
+        )
+        .unwrap();
+        r.register(
+            HostFn::new("engine.log", "info").doc("Log a line.").param("text", ApiType::Str),
+            |_, _, _| Ok(efevm::HostOk::Continue),
+        )
+        .unwrap();
+        r.index()
+    }
+
+    fn asm_api(src: &str) -> Result<Module, Vec<Diagnostic>> {
+        let ix = index();
+        assemble_with(src, "t.efa", &AsmOptions { api: Some(&ix) }).map_err(|e| e.0)
+    }
+
+    /// The only diagnostic: (message, line, column, note).
+    fn one_api(src: &str) -> (String, u32, u32, Option<String>) {
+        let mut v = match asm_api(src) {
+            Ok(_) => panic!("expected errors for:\n{src}"),
+            Err(e) => e,
+        };
+        assert_eq!(v.len(), 1, "expected one diagnostic, got:\n{}", crate::asm::Diagnostics(v));
+        let d = v.remove(0);
+        (d.message, d.line, d.column, d.note)
+    }
+
+    #[test]
+    fn unknown_import_suggests_a_name() {
+        let (m, l, c, note) = one_api("memory 1\nimport engine.world.spwan() -> i64\n");
+        assert_eq!(m, "unknown host function `engine.world.spwan`");
+        assert_eq!((l, c), (2, 8));
+        assert_eq!(note.as_deref(), Some("did you mean `engine.world.spawn`?"));
+        // nothing close: no suggestion
+        let (m, _, _, note) = one_api("import zzz.qqqqqq(i64)\n");
+        assert_eq!(m, "unknown host function `zzz.qqqqqq`");
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn signature_mismatch_shows_the_index_signature() {
+        let (m, l, c, _) = one_api("\n\nimport engine.log.info(i64) -> i32\n");
+        assert_eq!((l, c), (3, 8));
+        assert!(m.contains("signature mismatch for `engine.log.info`"), "{m}");
+        assert!(m.contains("declared (i64) -> i32"), "{m}");
+        assert!(m.contains("engine.log.info(text: str)"), "{m}");
+        assert!(m.contains("lowers to (i64, i64)"), "{m}");
+    }
+
+    #[test]
+    fn matching_signature_is_accepted() {
+        asm_api("import engine.log.info(i64, i64)\nimport engine.world.get(i64, i32, i64) -> i32\nexport fn main() {\n    ret\n}\n").unwrap();
+    }
+
+    #[test]
+    fn import_without_signature_takes_it_from_the_index() {
+        let m = asm_api(
+            "import engine.world.spawn\nimport engine.log.info\nmsg db \"hi\"\n\
+             export fn main() {\n    reg e\n    call engine.world.spawn() -> e\n    call engine.log.info(msg, msg.len)\n    ret\n}\n",
+        )
+        .unwrap();
+        let d = m.data();
+        assert_eq!(d.types[d.imports[0].type_idx as usize].to_string(), "() -> i64");
+        assert_eq!(d.types[d.imports[1].type_idx as usize].to_string(), "(i64, i64)");
+        // call arity is still checked against the index signature
+        let (m, l, _, _) = one_api("import engine.log.info\nexport fn main() {\n    call engine.log.info(1)\n    ret\n}\n");
+        assert_eq!(l, 3);
+        assert!(m.contains("engine.log.info"), "{m}");
+    }
+
+    #[test]
+    fn unknown_import_without_signature_is_one_diagnostic() {
+        let (m, l, c, note) = one_api("import engine.log.infoo\n");
+        assert_eq!(m, "unknown host function `engine.log.infoo`");
+        assert_eq!((l, c), (1, 8));
+        assert_eq!(note.as_deref(), Some("did you mean `engine.log.info`?"));
+    }
+
+    #[test]
+    fn import_without_signature_needs_an_index() {
+        let (m, l, c, _) = one("\nimport std.println\n");
+        assert_eq!((l, c), (2, 8));
+        assert!(m.contains("`std.println` has no signature"), "{m}");
+        assert!(m.contains("--api"), "{m}");
+    }
+
+    #[test]
+    fn struct_constants() {
+        let m = asm_api(
+            "export fn main() -> i64 {\n    reg a, b, c, d, e\n    const.i64 a, Transform.size\n    const.i64 b, Transform.align\n    \
+             const.i64 c, Transform.scale\n    const.i64 d, Transform.id\n    const.i64 e, Transform.rot\n    ret a\n}\n",
+        )
+        .unwrap();
+        let code = code(&m, 0);
+        let consts: Vec<Inst> = (0..5).map(|k| code[k]).collect();
+        assert_eq!(
+            consts,
+            vec![
+                Inst::const_i64(0, 20),
+                Inst::const_i64(1, 4),
+                Inst::const_i64(2, 12),
+                Inst::const_i64(3, 77),
+                Inst::const_i64(4, 8),
+            ]
+        );
+        // usable where a `const` integer is (memory size, resb)
+        asm_api("buf resb Transform.size\nexport fn main() {\n    ret\n}\n").unwrap();
+        // without the index they are unknown
+        let (m, _, _, _) = one("export fn main() -> i64 {\n    reg a\n    const.i64 a, Transform.size\n    ret a\n}\n");
+        assert!(m.contains("Transform.size"), "{m}");
+    }
+
+    #[test]
+    fn unknown_struct_constant_suggests() {
+        let (m, l, c, note) =
+            one_api("export fn main() {\n    reg a\n    const.i64 a, Transform.scal\n    ret\n}\n");
+        assert!(m.contains("Transform.scal"), "{m}");
+        assert_eq!((l, c), (3, 18));
+        assert_eq!(note.as_deref(), Some("did you mean `Transform.scale`?"));
+    }
+
+    #[test]
+    fn data_symbol_collides_with_a_field_named_len() {
+        // `Blob.len` would be both the data length and a field offset.
+        let mut ix = index();
+        let mut blob = StructDesc::new("Blob", 8, 4)
+            .field(FieldDesc::new("len", 4, Prim::U32, 1))
+            .field(FieldDesc::new("tag", 0, Prim::U32, 1));
+        blob.owner = "engine".into();
+        ix.types.push(blob);
+        ix.sort();
+        let src = "\n  Blob db 1, 2\nexport fn main() {\n    ret\n}\n";
+        let d = assemble_with(src, "t.efa", &AsmOptions { api: Some(&ix) }).unwrap_err().0;
+        assert_eq!(d.len(), 1, "{}", crate::asm::Diagnostics(d.clone()));
+        assert!(d[0].message.contains("`Blob` collides with the API index"), "{}", d[0].message);
+        assert!(d[0].message.contains("`Blob.len`"), "{}", d[0].message);
+        assert_eq!((d[0].line, d[0].column), (2, 3));
+        // other data symbols are fine
+        assemble_with("Other db 1\nexport fn main() {\n    ret\n}\n", "t.efa", &AsmOptions { api: Some(&ix) }).unwrap();
+    }
+
+    #[test]
+    fn section_12_records_hash_and_used_namespaces() {
+        let ix = index();
+        let m = asm_api("import engine.log.info\nimport engine.world.spawn\nexport fn main() {\n    ret\n}\n").unwrap();
+        assert_eq!(
+            m.data().api,
+            Some(ApiRef {
+                hash: ix.hash(),
+                namespaces: vec![("engine.log".to_string(), 1), ("engine.world".to_string(), 3)],
+            })
+        );
+        // an index with no imports still records the hash
+        let m = asm_api("export fn main() {\n    ret\n}\n").unwrap();
+        assert_eq!(m.data().api, Some(ApiRef { hash: ix.hash(), namespaces: vec![] }));
+        // survives encode/decode
+        let back = Module::decode(&m.encode()).unwrap();
+        assert_eq!(back.data().api, m.data().api);
+    }
+
+    #[test]
+    fn no_index_means_no_section_12() {
+        let m = asm("import std.println(i64, i64)\nexport fn main() {\n    ret\n}\n");
+        assert_eq!(m.data().api, None);
+    }
 }

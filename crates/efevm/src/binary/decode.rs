@@ -4,7 +4,7 @@ use super::leb::{self, LebError};
 use super::DecodeError;
 use crate::error::LoadError;
 use crate::module::{
-    BrTable, DataSegment, Export, ExportKind, FuncLines, Function, Global, Import, Inst,
+    ApiRef, BrTable, DataSegment, Export, ExportKind, FuncLines, Function, Global, Import, Inst,
     LineEntry, MemoryType, ModuleData,
 };
 use crate::op::{Op, Shape};
@@ -174,7 +174,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<ModuleData, LoadError> {
         if id >= 128 {
             continue;
         }
-        if !(1..=11).contains(&id) {
+        if !(1..=12).contains(&id) {
             return Err(r.err_at(id_pos, DecodeError::UnknownSection(id)));
         }
         if id <= last_id {
@@ -196,7 +196,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<ModuleData, LoadError> {
                 code(&mut p, &mut m)?;
             }
             10 => names(&mut p, &mut m)?,
-            _ => lines(&mut p, &mut m)?,
+            11 => lines(&mut p, &mut m)?,
+            _ => api(&mut p, &mut m)?,
         }
         p.finish(id)?;
     }
@@ -420,6 +421,20 @@ fn inst(p: &mut Reader, br_tables: &mut Vec<BrTable>) -> Res<Inst> {
         Shape::Ret => (p.reg()?, 0, 0),
     };
     Ok(Inst { op, a, b, c })
+}
+
+/// Section 12: `u64` hash (8 bytes little-endian), then `vec((string namespace, uleb version))`.
+fn api(p: &mut Reader, m: &mut ModuleData) -> Res<()> {
+    let hash = u64::from_le_bytes(p.array::<8>()?);
+    let n = p.count()?;
+    let mut namespaces = Vec::with_capacity(n);
+    for _ in 0..n {
+        let name = p.string()?;
+        let version = p.u32()?;
+        namespaces.push((name, version));
+    }
+    m.api = Some(ApiRef { hash, namespaces });
+    Ok(())
 }
 
 fn names(p: &mut Reader, m: &mut ModuleData) -> Res<()> {
@@ -696,7 +711,7 @@ mod tests {
         let b = section(4, &u(0));
         assert_eq!(err_kind(&module(&[a.clone(), b])), DecodeError::SectionOutOfOrder(4));
         assert_eq!(err_kind(&module(&[a.clone(), a.clone()])), DecodeError::SectionOutOfOrder(5));
-        assert_eq!(err_kind(&module(&[section(12, &[])])), DecodeError::UnknownSection(12));
+        assert_eq!(err_kind(&module(&[section(13, &[])])), DecodeError::UnknownSection(13));
         assert_eq!(err_kind(&module(&[section(0, &[])])), DecodeError::UnknownSection(0));
         assert_eq!(err_kind(&module(&[section(127, &[])])), DecodeError::UnknownSection(127));
     }

@@ -3,6 +3,7 @@
 //! Rust port of build.py (which is kept). Run `cargo xtask` with no arguments in a
 //! terminal to pick an example and run it native or on the web.
 
+mod api;
 mod project;
 mod serve;
 mod toolchain;
@@ -24,6 +25,9 @@ use util::{cargo, dry_run, miss_line, ok_line, root, run, stdin_is_tty, step, wa
     bin_name = "cargo xtask",
     about = "Build, run and serve efeengine examples (native SDL3 or web/wasm)",
     after_help = "Run without a command in a terminal to choose an example interactively.\n\
+                  Native builds also write <example>.efapi (the script API index) next to the binary and \
+                  assemble examples/<example>/scripts/*.efa into scripts/*.efvm beside it (scripts with a \
+                  `; needs-mod:` header are skipped); `run` sets EFE_SCRIPT_DIR. See `api-export`.\n\
                   Environment: CARGO_TARGET_DIR is respected; WASM_BINDGEN selects a wasm-bindgen binary."
 )]
 struct Cli {
@@ -43,7 +47,20 @@ enum Cmd {
     Run(BuildArgs),
     /// Build an example without running it.
     Build(BuildArgs),
-    /// Release web build ready to publish (dist/<example>/).
+    /// Build an example natively and write its API index (.efapi), the file scripts are checked against.
+    ApiExport {
+        example: Option<String>,
+        /// Output file (default: target/efapi/<example>.efapi).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Export from a release build.
+        #[arg(long)]
+        release: bool,
+        /// Build SDL3 from source and link statically.
+        #[arg(long = "static")]
+        static_sdl: bool,
+    },
+    /// Release web build ready to publish (dist/<example>/, with <example>.efapi).
     Dist {
         example: Option<String>,
     },
@@ -143,6 +160,14 @@ fn real_main(cli: Cli) -> Result<()> {
     match cmd {
         Cmd::Run(a) => build_or_run(Action::Run, a, preflight),
         Cmd::Build(a) => build_or_run(Action::Build, a, preflight),
+        Cmd::ApiExport { example, output, release, static_sdl } => {
+            let project = Project::load()?;
+            let ex = pick_example(&project, example.as_deref())?;
+            if preflight {
+                preflight_native(static_sdl)?;
+            }
+            api::api_export(&project, &ex, output, release, static_sdl)
+        }
         Cmd::Dist { example } => {
             let project = Project::load()?;
             let ex = pick_example(&project, example.as_deref())?;
@@ -246,7 +271,7 @@ fn dispatch(
     preflight: bool,
 ) -> Result<()> {
     match target {
-        Target::Native => native(ex, action, release, static_sdl, preflight),
+        Target::Native => native(&project, ex, action, release, static_sdl, preflight),
         Target::Web => {
             if static_sdl {
                 warn("--static is ignored for web");
@@ -310,17 +335,11 @@ fn preflight_native(static_sdl: bool) -> Result<()> {
     Ok(())
 }
 
-fn native(ex: &Example, action: Action, release: bool, static_sdl: bool, preflight: bool) -> Result<()> {
+fn native(project: &Project, ex: &Example, action: Action, release: bool, static_sdl: bool, preflight: bool) -> Result<()> {
     if preflight {
         preflight_native(static_sdl)?;
     }
-    let mut extra: Vec<&str> = vec![];
-    if release {
-        extra.push("--release");
-    }
-    if static_sdl {
-        extra.extend(["--features", "efeengine-core/static"]);
-    }
+    let extra = api::build_flags(release, static_sdl);
     let desc = format!(
         "{}{}",
         if release { "release" } else { "debug" },
@@ -336,15 +355,25 @@ fn native(ex: &Example, action: Action, release: bool, static_sdl: bool, preflig
         }
         return Ok(());
     }
-    let verb = if action == Action::Run { "run" } else { "build" };
-    step(format!("native {verb}: {} ({desc})", ex.package));
+    step(format!("native build: {} ({desc})", ex.package));
     let mut c = cargo();
-    c.args([verb, "-p", &ex.package, "--bin", "native"]).args(&extra);
+    c.args(["build", "-p", &ex.package, "--bin", "native"]).args(&extra);
     run(c).inspect_err(|_| {
         if static_sdl {
             eprintln!("{STATIC_DEPS_HINT}");
         }
-    })
+    })?;
+    let scripts = api::after_native_build(project, ex, release)?;
+    if action == Action::Run {
+        step(format!("native run: {} ({desc})", ex.package));
+        let mut c = cargo();
+        c.args(["run", "-p", &ex.package, "--bin", "native"]).args(&extra);
+        if let Some(dir) = scripts {
+            c.env("EFE_SCRIPT_DIR", dir);
+        }
+        run(c)?;
+    }
+    Ok(())
 }
 
 // -------------------------------------------------------------- other commands --
@@ -355,8 +384,11 @@ fn list() -> Result<()> {
         println!("no examples found");
     }
     for e in &project.examples {
+        let scripts = std::fs::read_dir(root().join("examples").join(&e.dir).join("scripts"))
+            .map(|d| d.filter_map(|f| f.ok()).filter(|f| f.path().extension().is_some_and(|x| x == "efa")).count())
+            .unwrap_or(0);
         println!(
-            "{} (package {}, native bin: {})",
+            "{} (package {}, native bin: {}, scripts: {scripts})",
             e.dir,
             e.package,
             if e.native_bin { "yes" } else { "no" }

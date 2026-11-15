@@ -33,6 +33,8 @@ pub enum VerifyError {
     NonZeroUnusedOperand,
     NameIndex,
     LineIndex,
+    /// A namespace in the `api` section (12) that is not a valid namespace name or appears twice.
+    ApiNamespace,
 }
 
 impl fmt::Display for VerifyError {
@@ -57,6 +59,7 @@ impl fmt::Display for VerifyError {
             VerifyError::NonZeroUnusedOperand => "unused operand field is not zero",
             VerifyError::NameIndex => "name entry index out of range",
             VerifyError::LineIndex => "line entry index out of range",
+            VerifyError::ApiNamespace => "invalid or duplicate namespace in the api section",
         };
         f.write_str(s)
     }
@@ -75,6 +78,13 @@ pub(crate) fn verify(m: &ModuleData) -> Result<(), LoadError> {
     let nfuncs = m.num_funcs() as u64;
     let nglobals = m.globals.len();
 
+    if let Some(api) = &m.api {
+        for (i, (ns, _)) in api.namespaces.iter().enumerate() {
+            if !crate::api::is_namespace(ns) || api.namespaces[..i].iter().any(|(o, _)| o == ns) {
+                return fail(None, None, VerifyError::ApiNamespace);
+            }
+        }
+    }
     for (i, imp) in m.imports.iter().enumerate() {
         if imp.type_idx as usize >= ntypes {
             return fail(Some(i as u32), None, VerifyError::TypeIndex);

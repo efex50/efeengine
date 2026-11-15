@@ -1,0 +1,17 @@
+; needs-mod: adder
+; mod_user.efa - a script that calls a function exported by a mod.
+;
+; `adder.add` exists in the API index only after mod_adder is loaded, so this file must be
+; assembled against an index exported *after* that (the e2e test does; `cargo xtask build`
+; skips files with a `needs-mod:` header line). Attach it with Script::new(module, "update").
+; Each frame: state = adder.add(state, 10), and the game scores a point.
+
+import adder.add
+import game.score_add
+
+export fn update(entity: i64, dt: f32, state: i64) -> i64 {
+    reg total
+    call adder.add(state, 10) -> state
+    call game.score_add(1) -> total
+    ret state
+}

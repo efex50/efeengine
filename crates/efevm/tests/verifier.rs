@@ -1,6 +1,8 @@
 //! One rejecting test per load-time verification rule (SPEC.md section 8), plus the
 //! link-time import rule and the builder `finish()` path. Black-box, public API only.
 
+mod common;
+use common::reg_host;
 use efevm::*;
 
 fn ty(p: usize, r: usize) -> FuncType {
@@ -486,14 +488,14 @@ fn link_missing_import() {
 #[test]
 fn link_import_type_mismatch() {
     let m = import_module();
-    let mut imports: Imports<()> = Imports::new();
-    imports.func("env", "f", FuncType::new([ValType::I64], [ValType::I32]), |_c, _a, _r| {
+    let mut imports = HostRegistry::<()>::new();
+    reg_host(&mut imports, "env", "f", FuncType::new([ValType::I64], [ValType::I32]), |_c, _a, _r| {
         Ok(HostOk::Continue)
     });
-    let e = Instance::new(&m, &imports, Limits::default()).err().expect("expected link error");
+    let e = Instance::new(&m, &imports.imports(), Limits::default()).err().expect("expected link error");
     assert!(
-        matches!(e, LoadError::Link(LinkError::ImportTypeMismatch { ref namespace, ref name })
-            if namespace == "env" && name == "f"),
+        matches!(e, LoadError::Link(LinkError::ImportTypeMismatch { ref namespace, ref name, ref module, ref host })
+            if namespace == "env" && name == "f" && module == "(i32) -> i32" && host == "(i64) -> i32"),
         "{e:?}"
     );
 }
@@ -501,9 +503,9 @@ fn link_import_type_mismatch() {
 #[test]
 fn link_import_exact_type_accepted() {
     let m = import_module();
-    let mut imports: Imports<()> = Imports::new();
-    imports.func("env", "f", ty(1, 1), |_c, _a, _r| Ok(HostOk::Continue));
-    assert!(Instance::new(&m, &imports, Limits::default()).is_ok());
+    let mut imports = HostRegistry::<()>::new();
+    reg_host(&mut imports, "env", "f", ty(1, 1), |_c, _a, _r| Ok(HostOk::Continue));
+    assert!(Instance::new(&m, &imports.imports(), Limits::default()).is_ok());
 }
 
 #[test]

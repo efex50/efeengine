@@ -414,9 +414,12 @@ impl SurfaceManager {
             render_pass.set_pipeline(&self.render_pipeline);
             // world objeleri ekle
             {
-                for obj in &engine.world.objects{
-                    
-                    self.uniforms.position = obj.position;
+                // Placeholder adapter until the render extract (ROADMAP 3.5): one triangle per
+                // (Transform, MeshHandle) at the transform's position.
+                use crate::engine::components::{MeshHandle, Transform};
+                for (transform, _mesh) in engine.world.query::<(&Transform, &MeshHandle)>().iter(){
+
+                    self.uniforms.position = transform.position.to_array();
                     self.uniforms.time += 0.005;
 
                     queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.uniforms]));

@@ -1,3 +1,6 @@
+// Lets `#[derive(ScriptType)]` (which names `::efeengine_core::...`) work inside this crate.
+extern crate self as efeengine_core;
+
 #[allow(unused)]
 pub mod engine;
 pub mod prelude;
@@ -7,6 +10,10 @@ pub use prelude::*;
 pub use engine::*;
 /// The ECS used for the game world (ROADMAP Phase 3), re-exported as-is.
 pub use hecs;
+/// Math types used by components, re-exported as-is.
+pub use glam;
+/// The VM crate; its `StructDesc` / `FieldDesc` / `Prim` describe script-visible layouts.
+pub use efevm;
 
 
 

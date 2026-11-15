@@ -1,7 +1,0 @@
-; heap.efe - EXPECTED FAULT example: HeapAlloc (syscall 9) is not implemented yet.
-; Run from the crate dir:  cargo run -q -p efescript -- examples/heap.efe
-; Expected: no output on stdout; stderr says "runtime error: syscall 9 is not
-; implemented" and the exit code is 3 (a runtime fault, not a Rust panic).
-mov ra, 9           ; HeapAlloc
-mov rb, 20          ; size
-syscall

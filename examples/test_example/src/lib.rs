@@ -4,7 +4,7 @@ use efeengine_core::prelude::*;
 fn main(){
     match Engine::new("hello") {
         Ok(mut w) => {
-            w.state.world.add_object([0.0,0.]);
+            w.world_mut().spawn((Transform::default(), MeshHandle { id: 0 }));
             global_info("sa");
             w.game_loop();
         }

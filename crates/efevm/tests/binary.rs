@@ -1,5 +1,7 @@
 //! Binary format tests (SPEC.md sections 9, 9.1, 10): round trips, format details, never-panics.
 
+mod common;
+use common::try_host;
 use efevm::binary::{decode, encode};
 use efevm::*;
 use std::collections::HashSet;
@@ -65,7 +67,7 @@ fn build_big(n_hint: u32) -> ModuleData {
 
     let imports = vec![
         Import { namespace: "env".into(), name: "imp".into(), type_idx: 0 },
-        Import { namespace: "env\u{e9}".into(), name: "other".into(), type_idx: 2 },
+        Import { namespace: "env.other".into(), name: "other".into(), type_idx: 2 },
     ];
 
     let mut functions = Vec::new();
@@ -207,6 +209,10 @@ fn build_big(n_hint: u32) -> ModuleData {
                 },
             ],
         },
+        api: Some(ApiRef {
+            hash: 0x9f0c_2b5e_17a4_d3c8,
+            namespaces: vec![("env".into(), 1), ("engine.world".into(), u32::MAX)],
+        }),
     }
 }
 
@@ -411,6 +417,7 @@ fn all_sections_module(memory: MemoryType) -> ModuleData {
                 },
             ],
         },
+        api: Some(ApiRef { hash: u64::MAX, namespaces: vec![("".into(), 0), ("x\u{e9}".into(), 300)] }),
     }
 }
 
@@ -432,7 +439,7 @@ fn every_section_round_trips() {
         if expect_mem {
             expect.push(5);
         }
-        expect.extend([6, 7, 8, 9, 10, 11]);
+        expect.extend([6, 7, 8, 9, 10, 11, 12]);
         assert_eq!(ids, expect, "{memory:?}");
         let back = decode(&bytes).unwrap_or_else(|e| panic!("{memory:?}: {e}"));
         assert_eq!(back, m, "{memory:?}");
@@ -545,7 +552,7 @@ fn duplicate_section_rejected() {
 
 #[test]
 fn unknown_section_ids_rejected() {
-    for id in [0u8, 12, 13, 50, 127] {
+    for id in [0u8, 13, 14, 50, 127] {
         let mut b = HEADER.to_vec();
         b.extend_from_slice(&[id, 0]);
         assert_eq!(decode_err(&b), DecodeError::UnknownSection(id), "id {id}");
@@ -695,13 +702,17 @@ fn hex(b: &[u8]) -> String {
 
 fn instantiate_and_run(module: &Module) -> bool {
     let data = module.data();
-    let mut imports = Imports::<()>::new();
+    let mut reg = HostRegistry::<()>::new();
+    for (ns, v) in data.api.iter().flat_map(|a| &a.namespaces) {
+        let _ = reg.define_namespace(ns, *v, "test", "Test functions.");
+    }
     for imp in &data.imports {
         let ty = data.types[imp.type_idx as usize].clone();
-        imports.func(&imp.namespace, &imp.name, ty, |_c, _a, _r| Ok(HostOk::Continue));
+        // Invalid names cannot be registered; such a module then fails to link.
+        let _ = try_host(&mut reg, &imp.namespace, &imp.name, ty, |_c, _a, _r| Ok(HostOk::Continue));
     }
     let limits = Limits { max_memory_pages: 16, max_call_depth: 64, max_registers: 1 << 16, max_fibers: 8 };
-    let Ok(mut inst) = Instance::new(module, &imports, limits) else {
+    let Ok(mut inst) = Instance::new(module, &reg.imports(), limits) else {
         return false;
     };
     for e in &data.exports {

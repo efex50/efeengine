@@ -33,6 +33,13 @@ pub(crate) struct Frame {
     base: u32,
 }
 
+impl Frame {
+    /// `(caller function, index of the call instruction)`.
+    pub(crate) fn call_site(&self) -> (u32, u32) {
+        (self.func, self.pc.saturating_sub(1))
+    }
+}
+
 /// A fiber's execution state.
 #[derive(Debug, Default)]
 pub(crate) struct Stack {

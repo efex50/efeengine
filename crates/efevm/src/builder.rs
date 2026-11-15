@@ -2,7 +2,7 @@
 
 use crate::error::{BuildError, LoadError};
 use crate::module::{
-    BrTable, DataSegment, Export, ExportKind, FuncLines, Function, Global, Import, Inst,
+    ApiRef, BrTable, DataSegment, Export, ExportKind, FuncLines, Function, Global, Import, Inst,
     LineEntry, MemoryType, Module, ModuleData,
 };
 use crate::op::{Op, Shape};
@@ -288,6 +288,7 @@ pub struct ModuleBuilder {
     files: Vec<String>,
     file_ids: HashMap<String, u32>,
     errors: Vec<BuildError>,
+    api: Option<ApiRef>,
 }
 
 impl ModuleBuilder {
@@ -336,6 +337,13 @@ impl ModuleBuilder {
             Some(s) => s.1 = Some(body),
             None => self.errors.push(BuildError::UndefinedFunction(func)),
         }
+    }
+
+    /// Records the API index this module is built against (section 12): the index hash and
+    /// `(namespace, version)` for each namespace it imports from. Replaces an earlier call.
+    pub fn api_ref<S: Into<String>>(&mut self, hash: u64, namespaces: impl IntoIterator<Item = (S, u32)>) {
+        let namespaces = namespaces.into_iter().map(|(n, v)| (n.into(), v)).collect();
+        self.api = Some(ApiRef { hash, namespaces });
     }
 
     pub fn add_func(&mut self, ty: FuncType, body: FunctionBuilder) -> u32 {
@@ -433,6 +441,7 @@ impl ModuleBuilder {
             globals: self.globals,
             exports: self.exports,
             data: self.data,
+            api: self.api,
             ..Default::default()
         };
         data.names.funcs = self.func_names;

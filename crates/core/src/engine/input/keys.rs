@@ -1,10 +1,31 @@
 //! Key, modifier and button types.
 
-/// A physical key: its position on the keyboard, independent of layout.
-/// Names follow US-QWERTY positions. `Unknown` means the backend could not
-/// identify the key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum KeyCode {
+macro_rules! key_codes {
+    ([$(#[$m:meta])*] $($(#[$vm:meta])* $v:ident),* $(,)?) => {
+        $(#[$m])*
+        pub enum KeyCode {
+            $($(#[$vm])* $v,)*
+        }
+
+        impl KeyCode {
+            /// Every key code, in declaration order.
+            pub const ALL: &'static [KeyCode] = &[$(KeyCode::$v),*];
+
+            /// The variant name (`"A"`, `"Key0"`, `"Space"`, `"LShift"`, ...); the name scripts use.
+            pub fn name(self) -> &'static str {
+                match self { $(KeyCode::$v => stringify!($v),)* }
+            }
+        }
+    };
+}
+
+key_codes! {
+    [
+    /// A physical key: its position on the keyboard, independent of layout.
+    /// Names follow US-QWERTY positions. `Unknown` means the backend could not
+    /// identify the key.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    ]
     A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
     Key0, Key1, Key2, Key3, Key4, Key5, Key6, Key7, Key8, Key9,
     F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
@@ -27,11 +48,20 @@ pub enum KeyCode {
     Undo, Cut, Copy, Paste, Find, Again, Select,
     Lang1, Lang2, Lang3, Lang4, Lang5,
     Fn,
-    /// The backend could not identify the key.
+    #[doc = "The backend could not identify the key."]
     Unknown,
 }
 
 impl KeyCode {
+    /// Look a key up by its variant name, ignoring case (`"space"`, `"W"`, `"LShift"`);
+    /// the digits `"0"`..`"9"` mean `Key0`..`Key9`. `None` for anything else.
+    pub fn from_name(name: &str) -> Option<KeyCode> {
+        if let [d @ b'0'..=b'9'] = name.as_bytes() {
+            return KeyCode::ALL.iter().copied().find(|k| k.name().as_bytes() == [b'K', b'e', b'y', *d]);
+        }
+        KeyCode::ALL.iter().copied().find(|k| k.name().eq_ignore_ascii_case(name))
+    }
+
     /// Function key `F<n>` for `n` in `1..=24`.
     pub fn function_key(n: u8) -> Option<KeyCode> {
         use KeyCode::*;
@@ -170,4 +200,26 @@ pub enum MouseButton {
     Back,
     Forward,
     Other(u8),
+}
+
+#[cfg(test)]
+mod key_name_tests {
+    use super::KeyCode;
+
+    #[test]
+    fn names_round_trip_and_are_unique() {
+        for &k in KeyCode::ALL {
+            assert_eq!(KeyCode::from_name(k.name()), Some(k), "{}", k.name());
+            assert_eq!(KeyCode::from_name(&k.name().to_lowercase()), Some(k));
+        }
+        let mut names: Vec<_> = KeyCode::ALL.iter().map(|k| k.name()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), KeyCode::ALL.len());
+        assert_eq!(KeyCode::from_name("space"), Some(KeyCode::Space));
+        assert_eq!(KeyCode::from_name("7"), Some(KeyCode::Key7));
+        assert_eq!(KeyCode::from_name("nonsense"), None);
+        assert_eq!(KeyCode::from_name(""), None);
+        assert_eq!(KeyCode::from_name("12"), None);
+    }
 }

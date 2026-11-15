@@ -4,14 +4,17 @@ use once_cell::sync::{Lazy, OnceCell};
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::{debug_info, engine::{config::EngineConfig, error::EngineError, events::EventRegistry, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::Resources, schedule::{Ctx, EngineCommand, EngineCommands, Schedule, Stage}, time::Time, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, renderer::GraphicsContext, window::WindowManager, world::EngineWorld};
+use crate::{debug_info, engine::{config::EngineConfig, error::EngineError, events::EventRegistry, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::Resources, schedule::{Ctx, EngineCommand, Commands, Schedule, Stage}, scripting::{ModOptions, ModuleId, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, renderer::GraphicsContext, window::WindowManager};
+use crate::engine::components::{MeshHandle, Transform, Velocity};
 use crate::{global_info, thread_pool::{init_global_pool, init_global_pool_auto}};
 pub mod window;
 pub mod messages;
 pub mod log;
 pub mod renderer;
 pub mod flags;
-pub mod world;
+pub mod commands;
+pub mod components;
+pub mod types;
 pub mod thread_pool;
 pub mod schedule;
 pub mod error;
@@ -20,6 +23,7 @@ pub mod events;
 pub mod time;
 pub mod config;
 pub mod input;
+pub mod scripting;
 
 pub static WASM_PATH:OnceCell<String> =OnceCell::new();
 #[cfg(target_family = "wasm")]
@@ -69,12 +73,19 @@ impl Default for WindowState {
 }
 
 pub struct EngineState{
-    pub world : EngineWorld,
+    /// The game world (entities and components).
+    pub world : hecs::World,
+    /// Script-visible types: built-in components are registered at engine creation. Only
+    /// `Engine::register_component` / `register_struct` add to it (and to the API index); the
+    /// registry's `register*` methods are crate-private, so a public `&mut` here cannot bypass them.
+    pub types: TypeRegistry,
     pub window: WindowState,
     pub input: InputState,
     pub gamepads: GamepadState,
     pub time: Time,
     pub resources: Resources,
+    /// The scripting runtime: host registry (the API index) and loaded modules.
+    pub(crate) scripting: Scripting,
 }
 
 pub struct Engine{
@@ -88,7 +99,7 @@ pub struct Engine{
     config: EngineConfig,
     events: EventRegistry,
     schedule: Schedule,
-    commands: EngineCommands,
+    commands: Commands,
     /// `Startup` has run.
     started: bool,
     /// `Shutdown` has run.
@@ -102,6 +113,10 @@ pub struct Engine{
     clock: f64,
     #[cfg(not(target_family = "wasm"))]
     start: std::time::Instant,
+    /// `EFE_API_EXPORT` (or `set_api_export_path`): `game_loop` writes the API index there
+    /// and returns without running frames.
+    #[cfg(not(target_family = "wasm"))]
+    api_export: Option<std::path::PathBuf>,
 }
 impl Engine {
 
@@ -121,8 +136,15 @@ impl Engine {
     ///
     /// With `cfg.headless` no thread pool, panic hook, `log` backend or SDL logger is set up.
     pub fn with_config(cfg: EngineConfig) -> Result<Engine, EngineError> {
-        let cfg = cfg.merged_with_startup();
+        let mut cfg = cfg.merged_with_startup();
         cfg.validate()?;
+        // `EFE_API_EXPORT=<path>`: write the API index instead of running; never opens a window.
+        #[cfg(not(target_family = "wasm"))]
+        let api_export = std::env::var_os("EFE_API_EXPORT").filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
+        #[cfg(not(target_family = "wasm"))]
+        if api_export.is_some() {
+            cfg.headless = true;
+        }
 
         let headless = cfg.headless;
         if !headless {
@@ -147,19 +169,25 @@ impl Engine {
             Box::new(NewDefaultLogger())
         };
 
-        let world = EngineWorld::new();
+        let mut scripting = Scripting::new();
+        scripting.set_game(&cfg.title);
 
         let state = EngineState{
-            world,
+            world: hecs::World::new(),
+            types: TypeRegistry::new(),
             window: WindowState::default(),
             input: InputState::new(),
             gamepads: GamepadState::new(),
             time: Time::new(cfg.fixed_dt),
             resources: Resources::new(),
+            scripting,
         };
         let (msg_tx, msg_rx) = flume::unbounded();
+        let mut schedule = Schedule::new();
+        // The script system runs first in `Update`; game systems added later run after it.
+        schedule.add(Stage::Update, Box::new(scripting::script_system));
 
-        Ok(Self {
+        let mut engine = Self {
             windows: w,
             status:EngineStatus::Uninitialized,
             logger,
@@ -169,8 +197,8 @@ impl Engine {
             max_fps: cfg.max_fps.and_then(sanitize_fps),
             config: cfg,
             events: EventRegistry::new(),
-            schedule: Schedule::new(),
-            commands: EngineCommands::default(),
+            schedule,
+            commands: Commands::default(),
             started: false,
             shut_down: false,
             msg_tx,
@@ -178,7 +206,13 @@ impl Engine {
             clock: 0.0,
             #[cfg(not(target_family = "wasm"))]
             start: std::time::Instant::now(),
-        })
+            #[cfg(not(target_family = "wasm"))]
+            api_export,
+        };
+        engine.register_component::<Transform>().expect("built-in components register");
+        engine.register_component::<Velocity>().expect("built-in components register");
+        engine.register_component::<MeshHandle>().expect("built-in components register");
+        Ok(engine)
     }
 
     /// The (merged and validated) configuration this engine was created with.
@@ -190,6 +224,179 @@ impl Engine {
     pub fn add_system(&mut self, stage: Stage, f: impl FnMut(&mut Ctx<'_>) + 'static) -> &mut Self {
         self.schedule.add(stage, Box::new(f));
         self
+    }
+
+    /// Register component type `T` (owner `engine`); returns its id. This is the one way to
+    /// make a component visible to scripts: it registers the type in the [`TypeRegistry`]
+    /// (byte-level access for `engine.world.*`) and its layout in the API index.
+    pub fn register_component<T: ScriptType + hecs::Component>(&mut self) -> Result<u32, TypeError> {
+        self.register_component_owned::<T>(types::ENGINE_OWNER)
+    }
+
+    /// Like [`register_component`](Self::register_component) with an owner (the game's name or
+    /// a mod name), recorded in the index.
+    pub fn register_component_owned<T: ScriptType + hecs::Component>(&mut self, owner: &str) -> Result<u32, TypeError> {
+        let id = self.state.types.register_owned::<T>(owner)?;
+        self.index_or_rollback(id)
+    }
+
+    /// Register a layout-only struct (no component; e.g. from a mod); returns its id. It is
+    /// also put in the API index, so functions can take `&Name` parameters.
+    pub fn register_struct(&mut self, desc: efevm::StructDesc) -> Result<u32, TypeError> {
+        let id = self.state.types.register_struct(desc)?;
+        self.index_or_rollback(id)
+    }
+
+    /// Index the just-registered type `id`; if the index refuses it, remove it from the
+    /// [`TypeRegistry`] again so both tables stay identical.
+    fn index_or_rollback(&mut self, id: u32) -> Result<u32, TypeError> {
+        if let Err(e) = self.index_type(id) {
+            self.state.types.unregister(id);
+            return Err(e);
+        }
+        Ok(id)
+    }
+
+    /// Put the (just registered) type `id` in the scripting registry: the same `StructDesc`.
+    fn index_type(&mut self, id: u32) -> Result<(), TypeError> {
+        let desc = self.state.types.get(id).map(|t| t.desc().clone()).ok_or(TypeError::Invalid("type vanished".into()))?;
+        self.state.scripting.register_type(desc).map_err(|e| TypeError::Invalid(e.to_string()))
+    }
+
+    pub fn types(&self) -> &TypeRegistry {
+        &self.state.types
+    }
+
+    // ---- scripting (E5) ----
+
+    /// The scripting runtime: the host registry (the API index) and the loaded modules.
+    pub fn scripting(&self) -> &Scripting {
+        &self.state.scripting
+    }
+
+    pub fn scripting_mut(&mut self) -> &mut Scripting {
+        &mut self.state.scripting
+    }
+
+    /// Define a namespace for the game's own host functions (`owner`: usually the game's name;
+    /// `engine` is reserved).
+    pub fn define_namespace(&mut self, name: &str, version: u32, owner: &str, doc: &str) -> Result<(), efevm::RegistryError> {
+        self.state.scripting.define_namespace(name, version, owner, doc)
+    }
+
+    /// Register a host function in the one registry: it becomes callable by modules loaded
+    /// afterwards and appears in the API index; its owner is its namespace's owner. The
+    /// closure gets the [`ScriptHost`](scripting::ScriptHost) (world, commands, time, input, ...).
+    pub fn register_host_fn<F>(&mut self, desc: efevm::HostFn, f: F) -> Result<(), efevm::RegistryError>
+    where
+        F: Fn(&mut efevm::Caller<'_, scripting::ScriptHost>, &efevm::Args<'_>, &mut efevm::Results<'_>) -> Result<efevm::HostOk, efevm::Trap> + Send + Sync + 'static,
+    {
+        self.state.scripting.register_host_fn(desc, f)
+    }
+
+    /// Load a game script module (all namespaces may be imported); runs its `init` at once.
+    pub fn load_module(&mut self, name: &str, bytes: &[u8]) -> Result<ModuleId, ScriptError> {
+        let id = self.state.scripting.load_module(name, bytes)?;
+        self.run_script_inits();
+        Ok(id)
+    }
+
+    /// Load a mod (only `opts.allowed` namespaces may be imported); runs its `init` at once, so
+    /// what it exports is in the index when this returns.
+    pub fn load_mod(&mut self, bytes: &[u8], opts: ModOptions) -> Result<ModuleId, ScriptError> {
+        let id = self.state.scripting.load_mod(bytes, opts)?;
+        self.run_script_inits();
+        Ok(id)
+    }
+
+    /// Load a game module from a file (named after the file stem); runs its `init` at once.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn load_module_file(&mut self, path: impl AsRef<std::path::Path>) -> Result<ModuleId, ScriptError> {
+        let id = self.state.scripting.load_module_file(path)?;
+        self.run_script_inits();
+        Ok(id)
+    }
+
+    /// Unload a module: its instance is dropped and its functions and types leave the index;
+    /// modules that still call it trap cleanly.
+    pub fn unload_module(&mut self, id: ModuleId) -> Result<(), ScriptError> {
+        let name = self.state.scripting.unload(id)?;
+        self.state.types.remove_owner(&name);
+        Ok(())
+    }
+
+    /// Hot reload `id` from `path` (see [`Scripting::watch`]).
+    #[cfg(not(target_family = "wasm"))]
+    pub fn watch_module(&mut self, id: ModuleId, path: impl AsRef<std::path::Path>) -> Result<(), ScriptError> {
+        self.state.scripting.watch(id, path)
+    }
+
+    /// Run the pending `init`s outside a frame (with the engine's world) and apply what they queued.
+    fn run_script_inits(&mut self) {
+        let events: Vec<ScriptEvent> = self.events.get_or_empty::<ScriptEvent>().iter().cloned().collect();
+        {
+            let Engine { state, commands, .. } = self;
+            let EngineState { world, types, input, time, scripting, .. } = state;
+            scripting.enter(world, types, time, input, events);
+            scripting.run_inits();
+            scripting.leave(world, commands);
+        }
+        for ev in self.state.scripting.take_events() {
+            self.events.send(ev);
+        }
+        self.apply_commands();
+        self.flush_script_logs();
+    }
+
+    /// Send the log lines scripts produced through the engine logger.
+    fn flush_script_logs(&mut self) {
+        for l in self.state.scripting.drain_logs() {
+            match l.level {
+                scripting::LogLevel::Info => self.logger.info(&l.text),
+                scripting::LogLevel::Warn => self.logger.warn(&l.text),
+                scripting::LogLevel::Error => self.logger.error(&l.text),
+            }
+        }
+    }
+
+    // ---- API index (E4/E5) ----
+
+    /// Everything scripts can call or see, as plain data: a snapshot of the host registry
+    /// (engine functions, game functions, mod exports, component and struct layouts). The
+    /// game name is the config title unless set with [`set_game_name`](Self::set_game_name).
+    pub fn api_index(&self) -> efevm::ApiIndex {
+        self.state.scripting.registry().index()
+    }
+
+    /// [`api_index`](Self::api_index) as the `.efapi` JSON text.
+    pub fn export_api_index(&self) -> String {
+        self.api_index().to_json()
+    }
+
+    /// Set the `game` name recorded in the index (default: the config title).
+    pub fn set_game_name(&mut self, name: &str) {
+        self.state.scripting.set_game(name);
+    }
+
+    /// Write [`export_api_index`](Self::export_api_index) to `path`.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn write_api_index(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.export_api_index())
+    }
+
+    /// Make `game_loop` write the API index to `path` and return without running frames (what
+    /// `EFE_API_EXPORT=<path>` does at creation). `None` turns it off.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn set_api_export_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.api_export = path;
+    }
+
+    pub fn world(&self) -> &hecs::World {
+        &self.state.world
+    }
+
+    pub fn world_mut(&mut self) -> &mut hecs::World {
+        &mut self.state.world
     }
 
     /// Register event type `T` (it is also registered on first send).
@@ -320,8 +527,9 @@ impl Engine {
         }
     }
 
-    /// Apply the control requests systems made.
+    /// Apply what systems queued: world changes (in order), then control requests.
     fn apply_commands(&mut self) {
+        self.commands.apply(&mut self.state.world, &self.state.types);
         let cmds: Vec<EngineCommand> = self.commands.drain().collect();
         for c in cmds {
             match c {
@@ -339,11 +547,12 @@ impl Engine {
     fn run_stage(&mut self, stage: Stage) {
         {
             let Engine { schedule, state, events, commands, .. } = self;
-            let EngineState { world, window, input, gamepads, time, resources } = state;
-            let mut cx = Ctx::new(world, resources, &*time, &*input, &*gamepads, &*window, commands, events);
+            let EngineState { world, types, window, input, gamepads, time, resources, scripting } = state;
+            let mut cx = Ctx::new(world, &*types, resources, &*time, &*input, &*gamepads, &*window, commands, scripting, events);
             schedule.run(stage, &mut cx);
         }
         self.apply_commands();
+        self.flush_script_logs();
     }
 
     fn run_fixed_step(&mut self) {
@@ -514,7 +723,18 @@ impl Engine {
     /// takes ownership of the game and starts the game loop until killed
     pub fn game_loop(mut self){
         #[cfg(not(target_family = "wasm"))]
-        self.sdl_loop();
+        {
+            // `EFE_API_EXPORT`: the game registered its functions between `new` and here, so
+            // this is the place to write the index; no frame runs.
+            if let Some(path) = self.api_export.take() {
+                match self.write_api_index(&path) {
+                    Ok(()) => self.logger.info(&format!("API index written to {}", path.display())),
+                    Err(e) => self.logger.error(&format!("cannot write the API index to {}: {e}", path.display())),
+                }
+                return;
+            }
+            self.sdl_loop();
+        }
         #[cfg(target_family = "wasm")]
         self.wasm_loop_start();
     }
@@ -710,6 +930,23 @@ mod tests{
 
     }
 
+
+    #[test]
+    fn failed_index_registration_is_rolled_back() {
+        use super::*;
+        use crate::engine::config::EngineConfig;
+        let mut e = Engine::with_config(EngineConfig::headless()).expect("headless engine");
+        // `Foo` is in the scripting index but not in the type registry, so indexing the new
+        // `Foo` (a different layout) is refused and the registration must not stay behind.
+        e.state.scripting.register_type(efevm::StructDesc::new("Foo", 4, 4)).unwrap();
+        let before = e.types().len();
+        assert!(e.register_struct(efevm::StructDesc::new("Foo", 8, 8)).is_err());
+        assert!(e.types().by_name("Foo").is_none());
+        assert!(e.types().get(TypeRegistry::id_of_name("Foo")).is_none());
+        assert_eq!(e.types().len(), before);
+        // the index still holds only the original layout
+        assert_eq!(e.api_index().struct_type("Foo").map(|d| d.size), Some(4));
+    }
 
     #[test]
     fn parrrralel(){
