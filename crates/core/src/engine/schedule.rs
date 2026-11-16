@@ -1,5 +1,7 @@
 //! System schedule: stages and the per-system context.
 
+use std::sync::Arc;
+
 use hecs::{DynamicBundle, Entity, World};
 
 use crate::engine::{
@@ -14,6 +16,7 @@ use crate::engine::{
 pub use crate::engine::commands::{Commands, EngineCommand, EngineCommands, ParCommands};
 pub use crate::engine::parallel::{Access, ParCtx};
 use crate::engine::parallel::{Executor, ParOutput};
+use crate::engine::order;
 
 /// When a system runs. See the frame order in `docs/design-io-and-loop.md` section 9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,8 +130,25 @@ enum Entry {
     Par { access: Access, f: ParSystem },
 }
 
-/// One batch of a stage: the entries `start..end`. An exclusive batch is a single exclusive
-/// system; a parallel batch is a run of par systems whose accesses do not conflict.
+/// One registered system: its function plus ordering metadata.
+struct Sys {
+    kind: Entry,
+    order: i32,
+    /// Global registration index (monotonic over all stages); the tie-breaker for equal orders.
+    seq: u64,
+    name: &'static str,
+    /// Plugin that was being built when the system was added.
+    owner: Option<Arc<str>>,
+}
+
+impl Sys {
+    fn is_exclusive(&self) -> bool {
+        matches!(self.kind, Entry::Exclusive(_))
+    }
+}
+
+/// One batch of a stage: the entries `start..end` (of the sorted list). An exclusive batch is a
+/// single exclusive system; a parallel batch is a run of par systems whose accesses do not conflict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BatchInfo {
     pub start: usize,
@@ -138,35 +158,111 @@ pub(crate) struct BatchInfo {
 
 #[derive(Default)]
 struct StageSystems {
-    entries: Vec<Entry>,
+    entries: Vec<Sys>,
     batches: Vec<BatchInfo>,
+    /// Entries were added or reordered since the last sort.
+    dirty: bool,
 }
 
 impl StageSystems {
-    /// Append an entry and update the batches. No look-ahead and no reordering: the batches are
-    /// a pure function of the registration list, and conflicting systems keep their order.
-    fn push(&mut self, entry: Entry) {
-        let i = self.entries.len();
-        let joins = match (&entry, self.batches.last()) {
-            (Entry::Par { access, .. }, Some(b)) if !b.exclusive => self.entries[b.start..b.end].iter().all(|m| match m {
-                Entry::Par { access: other, .. } => !access.conflicts(other),
-                Entry::Exclusive(_) => false,
-            }),
-            _ => false,
-        };
-        let exclusive = matches!(entry, Entry::Exclusive(_));
-        self.entries.push(entry);
-        if joins {
-            self.batches.last_mut().expect("joins implies a batch").end = i + 1;
-        } else {
-            self.batches.push(BatchInfo { start: i, end: i + 1, exclusive });
+    /// Sort by `(order, registration index)` and rebuild the batches: walking the sorted list,
+    /// a par system joins the current batch if it does not conflict with any member; an
+    /// exclusive system always gets a batch of its own. No look-ahead.
+    fn ensure_sorted(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        self.entries.sort_by_key(|s| (s.order, s.seq));
+        #[cfg(debug_assertions)]
+        self.diagnose();
+        self.batches.clear();
+        for i in 0..self.entries.len() {
+            let joins = match (&self.entries[i].kind, self.batches.last()) {
+                (Entry::Par { access, .. }, Some(b)) if !b.exclusive => {
+                    self.entries[b.start..b.end].iter().all(|m| match &m.kind {
+                        Entry::Par { access: other, .. } => !access.conflicts(other),
+                        Entry::Exclusive(_) => false,
+                    })
+                }
+                _ => false,
+            };
+            if joins {
+                self.batches.last_mut().expect("joins implies a batch").end = i + 1;
+            } else {
+                self.batches.push(BatchInfo { start: i, end: i + 1, exclusive: self.entries[i].is_exclusive() });
+            }
+        }
+    }
+
+    /// Debug note for systems of different plugins that share an order number and conflict:
+    /// their relative order then depends on plugin registration order.
+    #[cfg(debug_assertions)]
+    fn diagnose(&self) {
+        let mut i = 0;
+        while i < self.entries.len() {
+            let mut j = i + 1;
+            while j < self.entries.len() && self.entries[j].order == self.entries[i].order {
+                j += 1;
+            }
+            for a in i..j {
+                for b in a + 1..j {
+                    let (x, y) = (&self.entries[a], &self.entries[b]);
+                    if x.owner == y.owner {
+                        continue;
+                    }
+                    let conflict = match (&x.kind, &y.kind) {
+                        (Entry::Par { access: p, .. }, Entry::Par { access: q, .. }) => p.conflicts(q),
+                        _ => true,
+                    };
+                    if conflict {
+                        log::debug!(
+                            "systems `{}` ({}) and `{}` ({}) share order {} and conflict; they run in registration order",
+                            x.name,
+                            x.owner.as_deref().unwrap_or("<game>"),
+                            y.name,
+                            y.owner.as_deref().unwrap_or("<game>"),
+                            x.order
+                        );
+                    }
+                }
+            }
+            i = j;
         }
     }
 }
 
-/// Systems per stage, in insertion order, grouped into batches.
+/// Handle to the system that was just added; sets its order and name. Dropping it is fine.
+pub struct SystemEntry<'a> {
+    stage: &'a mut StageSystems,
+    index: usize,
+}
+
+impl<'a> SystemEntry<'a> {
+    /// Run position inside the stage: lower numbers run first, ties keep registration order
+    /// (see [`order`](crate::engine::order)). Default: [`order::USER`](crate::engine::order::USER).
+    pub fn order(self, order: i32) -> Self {
+        self.stage.entries[self.index].order = order;
+        self.stage.dirty = true;
+        self
+    }
+
+    /// The name shown in debug messages and access-check panics.
+    pub fn name(self, name: &'static str) -> Self {
+        let e = &mut self.stage.entries[self.index];
+        e.name = name;
+        if let Entry::Par { access, .. } = &mut e.kind {
+            access.set_name(name);
+        }
+        self
+    }
+}
+
+/// Systems per stage, sorted by `(order, registration index)` and grouped into batches.
 pub struct Schedule {
     stages: [StageSystems; Stage::COUNT],
+    next_seq: u64,
+    owner: Option<Arc<str>>,
 }
 
 impl Default for Schedule {
@@ -177,34 +273,82 @@ impl Default for Schedule {
 
 impl Schedule {
     pub fn new() -> Self {
-        Self { stages: std::array::from_fn(|_| StageSystems::default()) }
+        Self { stages: std::array::from_fn(|_| StageSystems::default()), next_seq: 0, owner: None }
     }
 
-    pub fn add(&mut self, stage: Stage, system: System) {
-        self.stages[stage.index()].push(Entry::Exclusive(system));
+    /// Set the plugin owner recorded on systems added from now on; returns the previous one.
+    pub(crate) fn swap_owner(&mut self, owner: Option<Arc<str>>) -> Option<Arc<str>> {
+        std::mem::replace(&mut self.owner, owner)
+    }
+
+    fn push(&mut self, stage: Stage, kind: Entry, name: &'static str) -> SystemEntry<'_> {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let st = &mut self.stages[stage.index()];
+        st.entries.push(Sys { kind, order: order::USER, seq, name, owner: self.owner.clone() });
+        st.dirty = true;
+        let index = st.entries.len() - 1;
+        SystemEntry { stage: st, index }
+    }
+
+    /// Add an exclusive system (default name `name`, order [`order::USER`]).
+    pub fn add(&mut self, stage: Stage, system: System, name: &'static str) -> SystemEntry<'_> {
+        self.push(stage, Entry::Exclusive(system), name)
     }
 
     /// Add a parallel system with its declared access.
-    pub fn add_par(&mut self, stage: Stage, mut access: Access, system: ParSystem) {
-        access.set_default_name("<par system>");
-        self.stages[stage.index()].push(Entry::Par { access, f: system });
+    pub fn add_par(&mut self, stage: Stage, mut access: Access, system: ParSystem, name: &'static str) -> SystemEntry<'_> {
+        access.set_default_name(name);
+        let name = access.name_or(name);
+        self.push(stage, Entry::Par { access, f: system }, name)
     }
 
     pub fn len(&self, stage: Stage) -> usize {
         self.stages[stage.index()].entries.len()
     }
 
-    /// The batches of `stage` (built as systems are added).
-    pub(crate) fn batches(&self, stage: Stage) -> Vec<BatchInfo> {
-        self.stages[stage.index()].batches.clone()
+    /// Indices of `stage`'s entries in execution order (without mutating).
+    fn sorted_indices(&self, stage: Stage) -> Vec<usize> {
+        let st = &self.stages[stage.index()];
+        let mut idx: Vec<usize> = (0..st.entries.len()).collect();
+        if st.dirty {
+            idx.sort_by_key(|&i| (st.entries[i].order, st.entries[i].seq));
+        }
+        idx
+    }
+
+    /// System names of `stage` in execution order.
+    pub fn system_names(&self, stage: Stage) -> Vec<&str> {
+        let st = &self.stages[stage.index()];
+        self.sorted_indices(stage).into_iter().map(|i| st.entries[i].name).collect()
+    }
+
+    /// Owning plugin (if any) of each system of `stage`, in execution order.
+    pub fn system_owners(&self, stage: Stage) -> Vec<Option<&str>> {
+        let st = &self.stages[stage.index()];
+        self.sorted_indices(stage).into_iter().map(|i| st.entries[i].owner.as_deref()).collect()
+    }
+
+    /// The batches of `stage` (sorts first if needed).
+    pub(crate) fn batches(&mut self, stage: Stage) -> Vec<BatchInfo> {
+        let st = &mut self.stages[stage.index()];
+        st.ensure_sorted();
+        st.batches.clone()
+    }
+
+    /// Number of batches of `stage`.
+    #[doc(hidden)]
+    pub fn batch_count(&mut self, stage: Stage) -> usize {
+        self.batches(stage).len()
     }
 
     pub(crate) fn run(&mut self, stage: Stage, cx: &mut Ctx<'_>, exec: &Executor) {
-        let StageSystems { entries, batches } = &mut self.stages[stage.index()];
+        self.stages[stage.index()].ensure_sorted();
+        let StageSystems { entries, batches, .. } = &mut self.stages[stage.index()];
         for b in batches.iter() {
             let members = &mut entries[b.start..b.end];
             if b.exclusive {
-                let Entry::Exclusive(f) = &mut members[0] else { unreachable!("exclusive batch holds an exclusive system") };
+                let Entry::Exclusive(f) = &mut members[0].kind else { unreachable!("exclusive batch holds an exclusive system") };
                 f(cx);
                 continue;
             }
@@ -219,7 +363,7 @@ impl Schedule {
                     .iter_mut()
                     .zip(outs.iter_mut())
                     .map(|(entry, out)| {
-                        let Entry::Par { access, f } = entry else { unreachable!("parallel batch holds par systems") };
+                        let Entry::Par { access, f } = &mut entry.kind else { unreachable!("parallel batch holds par systems") };
                         let access: &Access = access;
                         move || {
                             let pcx = ParCtx::new(world, types, time, input, gamepads, window, resources, events, access, exec);
@@ -232,7 +376,7 @@ impl Schedule {
                     tasks.iter_mut().map(|t| t as &mut (dyn FnMut() + Send)).collect();
                 exec.run(&mut refs);
             }
-            // Merge in registration order, not completion order.
+            // Merge in sorted (execution) order, not completion order.
             for out in &mut outs {
                 cx.commands.append(&mut out.commands);
                 for send in out.sends.drain(..) {
@@ -252,12 +396,12 @@ mod tests {
     struct R;
 
     fn par(s: &mut Schedule, a: Access) {
-        s.add_par(Stage::Update, a, Box::new(|_| {}));
+        s.add_par(Stage::Update, a, Box::new(|_| {}), "p");
     }
     fn excl(s: &mut Schedule) {
-        s.add(Stage::Update, Box::new(|_| {}));
+        s.add(Stage::Update, Box::new(|_| {}), "x");
     }
-    fn shape(s: &Schedule) -> Vec<(usize, usize, bool)> {
+    fn shape(s: &mut Schedule) -> Vec<(usize, usize, bool)> {
         s.batches(Stage::Update).iter().map(|b| (b.start, b.end, b.exclusive)).collect()
     }
 
@@ -267,7 +411,7 @@ mod tests {
         par(&mut s, Access::new().write::<A>());
         par(&mut s, Access::new().write::<B>());
         par(&mut s, Access::new().res_mut::<R>());
-        assert_eq!(shape(&s), vec![(0, 3, false)]);
+        assert_eq!(shape(&mut s), vec![(0, 3, false)]);
     }
 
     #[test]
@@ -275,7 +419,7 @@ mod tests {
         let mut s = Schedule::new();
         par(&mut s, Access::new().read::<A>());
         par(&mut s, Access::new().read::<A>());
-        assert_eq!(shape(&s), vec![(0, 2, false)]);
+        assert_eq!(shape(&mut s), vec![(0, 2, false)]);
     }
 
     #[test]
@@ -285,7 +429,7 @@ mod tests {
         par(&mut s, Access::new().read::<A>()); // 1 conflicts with 0
         par(&mut s, Access::new().write::<B>()); // 2 joins 1 (no look-ahead)
         par(&mut s, Access::new().read::<B>()); // 3 conflicts with 2
-        assert_eq!(shape(&s), vec![(0, 1, false), (1, 3, false), (3, 4, false)]);
+        assert_eq!(shape(&mut s), vec![(0, 1, false), (1, 3, false), (3, 4, false)]);
     }
 
     #[test]
@@ -296,7 +440,7 @@ mod tests {
         par(&mut s, Access::new().read::<B>());
         par(&mut s, Access::new().read::<A>());
         excl(&mut s);
-        assert_eq!(shape(&s), vec![(0, 1, false), (1, 2, true), (2, 4, false), (4, 5, true)]);
+        assert_eq!(shape(&mut s), vec![(0, 1, false), (1, 2, true), (2, 4, false), (4, 5, true)]);
         assert_eq!(s.len(Stage::Update), 5);
     }
 
@@ -304,7 +448,7 @@ mod tests {
     fn stages_are_independent() {
         let mut s = Schedule::new();
         par(&mut s, Access::new().write::<A>());
-        s.add_par(Stage::PostUpdate, Access::new().write::<A>(), Box::new(|_| {}));
+        s.add_par(Stage::PostUpdate, Access::new().write::<A>(), Box::new(|_| {}), "p");
         assert_eq!(s.batches(Stage::PostUpdate).len(), 1);
         assert_eq!(s.batches(Stage::Update).len(), 1);
     }

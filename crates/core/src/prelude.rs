@@ -10,10 +10,11 @@ pub use crate::{
         InputState, GamepadState, Gamepad, GamepadId, GamepadButton, GamepadAxis, WHEEL_PIXELS_PER_LINE, WHEEL_LINES_PER_PAGE,
     },
     // Modules (the `engine::input::events` module is left out: it would clash with `engine::events`).
-    engine::{window, messages, scripting, render, flags, thread_pool, commands, components, types, error, resources, time, config, schedule, events, input},
+    engine::{window, messages, scripting, render, flags, thread_pool, commands, components, types, error, resources, time, config, schedule, events, input, order, plugin},
     engine::error::EngineError,
     engine::config::{EngineConfig, Threads},
-    engine::schedule::{Stage, Ctx},
+    engine::schedule::{Stage, Ctx, SystemEntry},
+    engine::plugin::{Plugin, PluginError},
     engine::parallel::{Access, ParCtx},
     engine::commands::{Commands, EngineCommands, ParCommands},
     engine::components::{Transform, Velocity, MeshHandle, Name, Camera, TextureHandle, Sprite, Visibility, Parent, Children, GlobalTransform},

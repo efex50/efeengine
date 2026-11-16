@@ -172,8 +172,8 @@ Engine::add_system(stage, f)                         // unchanged
 Engine::add_par_system(stage, access: Access, f: impl FnMut(&ParCtx<'_>) + Send + 'static) -> &mut Self
 ```
 
-**Batch building**, done once per stage. It is cached and rebuilt when a system is added. It is a pure function of the registration list:
-- Walk the entries in registration order. `Exclusive` closes the current batch and becomes a batch on its own.
+**Batch building**, done once per stage. It is cached and rebuilt lazily (dirty flag) when a system is added or its order changes. It is a pure function of the registered systems. *Update: every system has an order number; the entries are first sorted by `(order, registration index)` (see `docs/THREADING.md`), and everything below that says "registration order" means this sorted order.*
+- Walk the entries in sorted order. `Exclusive` closes the current batch and becomes a batch on its own.
 - A `Par` entry joins the current par batch if it does not conflict with any member. Otherwise it closes the batch and starts a new one.
   (No look-ahead and no reordering, so systems that conflict always keep their registration order.)
 - Expose `pub(crate) fn batches(&self, stage) -> Vec<BatchInfo>` (or a test hook) for the unit tests.

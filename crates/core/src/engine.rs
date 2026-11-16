@@ -4,7 +4,7 @@ use once_cell::sync::{Lazy, OnceCell};
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::{debug_info, engine::{config::{EngineConfig, Threads}, error::EngineError, events::EventRegistry, parallel::Executor, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::{Res, Resources}, schedule::{Access, Ctx, EngineCommand, Commands, ParCtx, Schedule, Stage}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, window::WindowManager};
+use crate::{debug_info, engine::{config::{EngineConfig, Threads}, error::EngineError, events::EventRegistry, parallel::Executor, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::{Res, Resources}, schedule::{Access, Ctx, EngineCommand, Commands, ParCtx, Schedule, Stage, SystemEntry}, plugin::{Plugin, PluginError}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, window::WindowManager};
 use crate::engine::components::{Camera, GlobalTransform, MeshHandle, Parent, Sprite, TextureHandle, Transform, Velocity, Visibility};
 use crate::engine::render::{self as rendering, gpu::GpuContext, ClearRenderer, RenderFrame, Renderer, Textures};
 use crate::{global_info, thread_pool::{init_global_pool, init_global_pool_auto}};
@@ -19,6 +19,8 @@ pub mod components;
 pub mod types;
 pub mod thread_pool;
 pub mod schedule;
+pub mod order;
+pub mod plugin;
 pub mod parallel;
 pub mod error;
 pub mod resources;
@@ -117,6 +119,8 @@ pub struct Engine{
     config: EngineConfig,
     events: EventRegistry,
     schedule: Schedule,
+    /// Names of the added plugins, in add order.
+    plugins: Vec<String>,
     /// Runs the parallel batches of a stage.
     exec: Executor,
     commands: Commands,
@@ -210,11 +214,11 @@ impl Engine {
         let exec = Executor::new(resolve_threads(cfg.threads, headless));
         let mut schedule = Schedule::new();
         // The script system runs first in `Update`; game systems added later run after it.
-        schedule.add(Stage::Update, Box::new(scripting::script_system));
+        schedule.add(Stage::Update, Box::new(scripting::script_system), "script_system").order(order::SCRIPTS);
         // Built-in systems: motion, hierarchy, render extract.
-        schedule.add_par(Stage::FixedUpdate, transform::velocity_access(), Box::new(transform::velocity_system));
-        schedule.add_par(Stage::PostUpdate, transform::propagate_access(), Box::new(transform::propagate_transforms));
-        schedule.add(Stage::RenderExtract, Box::new(rendering::render_extract));
+        schedule.add_par(Stage::FixedUpdate, transform::velocity_access(), Box::new(transform::velocity_system), "velocity_system").order(order::PHYSICS - 1);
+        schedule.add_par(Stage::PostUpdate, transform::propagate_access(), Box::new(transform::propagate_transforms), "propagate_transforms").order(order::TRANSFORM);
+        schedule.add(Stage::RenderExtract, Box::new(rendering::render_extract), "render_extract").order(order::USER);
 
         let mut engine = Self {
             renderer: Box::new(ClearRenderer),
@@ -228,6 +232,7 @@ impl Engine {
             config: cfg,
             events: EventRegistry::new(),
             schedule,
+            plugins: Vec::new(),
             exec,
             commands: Commands::default(),
             started: false,
@@ -257,20 +262,63 @@ impl Engine {
         &self.config
     }
 
-    /// Add a system to `stage`; systems of a stage run in insertion order.
-    pub fn add_system(&mut self, stage: Stage, f: impl FnMut(&mut Ctx<'_>) + 'static) -> &mut Self {
-        self.schedule.add(stage, Box::new(f));
-        self
+    /// Add a system to `stage`. Systems of a stage run sorted by `(order, registration index)`;
+    /// the default order is [`order::USER`]. Chain `.order(n)` / `.name(..)` on the result.
+    pub fn add_system(&mut self, stage: Stage, f: impl FnMut(&mut Ctx<'_>) + 'static) -> SystemEntry<'_> {
+        let name = std::any::type_name_of_val(&f);
+        self.schedule.add(stage, Box::new(f), name)
     }
 
     /// Add a parallel system to `stage`. `access` declares the components and resources it
     /// reads and writes; systems whose accesses do not conflict run at the same time (see
     /// `docs/THREADING.md`). The result is the same for every thread count.
-    pub fn add_par_system(&mut self, stage: Stage, access: Access, f: impl FnMut(&ParCtx<'_>) + Send + 'static) -> &mut Self {
-        let mut access = access;
-        access.set_default_name(std::any::type_name_of_val(&f));
-        self.schedule.add_par(stage, access, Box::new(f));
-        self
+    pub fn add_par_system(&mut self, stage: Stage, access: Access, f: impl FnMut(&ParCtx<'_>) + Send + 'static) -> SystemEntry<'_> {
+        let name = std::any::type_name_of_val(&f);
+        self.schedule.add_par(stage, access, Box::new(f), name)
+    }
+
+    /// Add a plugin: checks that its name is new and its dependencies are added, then runs
+    /// [`Plugin::build`]. Systems added during `build` are tagged with the plugin's name.
+    /// Plugins may add plugins from `build` (their dependencies must come first).
+    pub fn add_plugin(&mut self, p: impl Plugin) -> Result<&mut Self, PluginError> {
+        let name = p.name().to_string();
+        if self.has_plugin(&name) {
+            return Err(PluginError::AlreadyAdded(name));
+        }
+        if let Some(missing) = p.dependencies().iter().find(|d| !self.has_plugin(d)) {
+            return Err(PluginError::MissingDependency { plugin: name, missing: (*missing).to_string() });
+        }
+        self.plugins.push(name.clone());
+        let prev = self.schedule.swap_owner(Some(name.as_str().into()));
+        p.build(self);
+        self.schedule.swap_owner(prev);
+        Ok(self)
+    }
+
+    /// Whether a plugin named `name` was added.
+    pub fn has_plugin(&self, name: &str) -> bool {
+        self.plugins.iter().any(|p| p == name)
+    }
+
+    /// Names of the added plugins, in add order.
+    pub fn plugins(&self) -> &[String] {
+        &self.plugins
+    }
+
+    /// System names of `stage` in execution order.
+    pub fn system_names(&self, stage: Stage) -> Vec<&str> {
+        self.schedule.system_names(stage)
+    }
+
+    /// Owning plugin of each system of `stage` (`None` = added outside any plugin), in execution order.
+    pub fn system_owners(&self, stage: Stage) -> Vec<Option<&str>> {
+        self.schedule.system_owners(stage)
+    }
+
+    /// Number of batches of `stage` (systems in one batch run at the same time).
+    #[doc(hidden)]
+    pub fn batch_count(&mut self, stage: Stage) -> usize {
+        self.schedule.batch_count(stage)
     }
 
     /// The current parallelism: the number of threads (the caller plus pool workers) that run

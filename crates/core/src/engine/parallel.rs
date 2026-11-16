@@ -280,6 +280,14 @@ impl Access {
             || intersects(&other.res_mut, &self.res)
     }
 
+    pub(crate) fn set_name(&mut self, name: &'static str) {
+        self.name = Some(name);
+    }
+
+    pub(crate) fn name_or(&self, default: &'static str) -> &'static str {
+        self.name.unwrap_or(default)
+    }
+
     pub(crate) fn set_default_name(&mut self, name: &'static str) {
         self.name.get_or_insert(name);
     }

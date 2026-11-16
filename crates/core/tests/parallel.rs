@@ -135,6 +135,11 @@ fn lcg(s: &mut u32) -> f32 {
 }
 
 fn build(threads: Threads) -> Engine {
+    build_with(threads, false)
+}
+
+/// `mixed`: give the custom Update systems explicit order numbers (not their registration order).
+fn build_with(threads: Threads, mixed: bool) -> Engine {
     let cfg = EngineConfig { fixed_dt: 1.0 / 60.0, threads, ..EngineConfig::headless() };
     let mut e = Engine::with_config(cfg).expect("headless engine");
     for r in [
@@ -172,7 +177,7 @@ fn build(threads: Threads) -> Engine {
                 h.value = h.value * 0.99 + hp.hp * 0.01;
             });
         },
-    );
+    ).order(if mixed { 30 } else { 0 });
     e.add_par_system(
         Stage::Update,
         Access::new().named("tag").write::<Tag>().read::<Transform>(),
@@ -181,7 +186,7 @@ fn build(threads: Threads) -> Engine {
                 tag.n = ((t.position.x * 10.0) as u32) ^ tag.n.rotate_left(1);
             });
         },
-    );
+    ).order(if mixed { 10 } else { 0 });
     e.add_par_system(
         Stage::Update,
         Access::new().named("health").write::<Health>().read::<Heat>().read::<Velocity>(),
@@ -190,7 +195,7 @@ fn build(threads: Threads) -> Engine {
                 hp.hp = (hp.hp + hp.regen * 0.1 - h.value * 0.001 - v.linear.length() * 0.001).clamp(0.0, 100.0);
             });
         },
-    );
+    ).order(if mixed { 20 } else { 0 });
     // par with a resource and structural changes through commands
     e.add_par_system(
         Stage::Update,
@@ -217,7 +222,7 @@ fn build(threads: Threads) -> Engine {
             ));
             stats.spawned += 1;
         },
-    );
+    ).order(if mixed { -5 } else { 0 });
     // exclusive systems
     e.add_system(Stage::Update, |ctx| {
         let frames = ctx.resources.get::<Stats>().map(|s| s.frames).unwrap_or(0);
@@ -292,7 +297,11 @@ fn hash_world(e: &Engine) -> u64 {
 
 /// Run the game; returns the world hash, the summed write conflicts and the entity count.
 fn run(threads: Threads) -> (u64, u64, usize, u64) {
-    let mut e = build(threads);
+    run_with(threads, false)
+}
+
+fn run_with(threads: Threads, mixed: bool) -> (u64, u64, usize, u64) {
+    let mut e = build_with(threads, mixed);
     let mut conflicts = 0;
     for _ in 0..FRAMES {
         e.run_frames(1, 1.0 / 60.0);
@@ -333,4 +342,15 @@ fn the_hash_changes_when_the_world_changes() {
     let t = e.world().iter().find_map(|r| r.get::<&Transform>().map(|_| r.entity())).unwrap();
     e.world_mut().get::<&mut Transform>(t).unwrap().position.x += 1.0;
     assert_ne!(hash_world(&e), a);
+}
+
+#[test]
+fn mixed_orders_are_deterministic_across_thread_counts() {
+    let (plain, ..) = run_with(Threads::Single, false);
+    let (single, ..) = run_with(Threads::Single, true);
+    assert_ne!(single, plain, "explicit orders change the result");
+    for i in 0..5 {
+        let (h, ..) = run_with(Threads::Fixed(4), true);
+        assert_eq!(h, single, "run {i}");
+    }
 }

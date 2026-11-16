@@ -59,19 +59,26 @@ and the script system are exclusive.
 
 ## How batches are built
 
-Per stage, once (rebuilt when a system is added), as a pure function of the registration list:
+Per stage, once (rebuilt lazily when a system is added or its order changes), as a pure
+function of the registered systems:
 
-* walk the systems in registration order;
+* sort the systems by `(order, registration index)`. Every system has an order number
+  (`i32`, default `order::USER` = 0; set with `engine.add_system(..).order(n)`). Equal orders
+  keep registration order; the registration index counts over all stages. See
+  `efeengine_core::order` for the named constants (`INPUT`, `EARLY`, `SCRIPTS`, `USER`,
+  `PHYSICS`, `TRANSFORM`, `LATE`);
+* walk the sorted list;
 * an exclusive system closes the current batch and forms a batch of its own;
 * a par system joins the current par batch if its `Access` does not conflict with any member;
   otherwise it closes the batch and starts a new one. There is no look-ahead and no
-  reordering, so conflicting systems always keep their registration order.
+  reordering after the sort, so conflicting systems always keep their sorted order. Par systems
+with different order numbers may still share a batch if their accesses do not conflict.
 
 Two accesses conflict when one writes what the other reads or writes (component or resource).
 Read/read never conflicts. The members of a batch run through the executor, one task each; the
 calling thread takes tasks too and never blocks on a channel. When the batch ends, every member's
 commands are appended to the stage's command list and its event sends are replayed, in
-registration order. The merged order is therefore the order a sequential run produces.
+sorted (execution) order. The merged order is therefore the order a sequential run produces.
 If tasks panic, all tasks still run and the panic of the lowest task index is re-raised, with one thread or many.
 
 ## Scripts: lanes
