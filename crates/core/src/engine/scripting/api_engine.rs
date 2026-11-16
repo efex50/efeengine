@@ -57,7 +57,7 @@ pub(crate) fn register_engine_api(r: &mut HostRegistry<ScriptHost>) -> Result<()
     // `send`/`count`/`read` of version 1 are gone).
     r.define_namespace("engine.events", 2, OWNER, "Typed script events. A module lists the events it sends or reads in its events section (an event's id is its index there); `send`, `count` and `read` take that id, and the payload is the event's registered struct. Events sent in one frame are readable during the next.")?;
     r.define_namespace("engine.script", 1, OWNER, "Per-entity scripts. The `Script` component is Rust-only, so this is how a script attaches one of its own entry functions to an entity.")?;
-    r.define_namespace("engine.random", 1, OWNER, "Pseudo-random numbers (xorshift64*), one stream shared by all scripts. Not for security. The stream starts the same every run; `seed` changes it.")?;
+    r.define_namespace("engine.random", 1, OWNER, "Pseudo-random numbers (xorshift64*), one stream per module. Not for security. The stream starts the same every run; `seed` changes it.")?;
     r.define_namespace("engine.math", 1, OWNER, "Math the instruction set lacks (it has sqrt, abs, floor and friends, but no trigonometry).")?;
     world_api(r)?;
     script_api(r)?;
@@ -75,12 +75,11 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
     const NS: &str = "engine.world";
     r.register(
         HostFn::new(NS, "spawn")
-            .doc("Reserve a new empty entity and return its handle; it is valid at once and comes alive when the frame's commands apply (add components with insert).")
+            .doc("Take a new empty entity from the calling module's pre-reserved pool and return its handle; it is valid at once and comes alive when the frame's commands apply (add components with insert). When the pool is empty (more spawns in one frame than reserved; the pool grows for the next frame) the null handle 0 is returned, which every function treats as a stale entity.")
             .result("entity", T::Entity),
         |c, _a, res| {
-            let h = c.host();
-            let e = h.commands.spawn_empty(&h.world);
-            res.set_entity(0, entity_to_bits(e))?;
+            let bits = c.host().spawn().map_or(0, entity_to_bits);
+            res.set_entity(0, bits)?;
             Ok(HostOk::Continue)
         },
     )?;
@@ -92,7 +91,7 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
         |c, a, res| {
             let bits = a.entity(0)?;
             let h = c.host();
-            match alive(&h.world, bits) {
+            match alive(h.world(), bits) {
                 Some(e) => {
                     h.commands.despawn(e);
                     status(res, OK)
@@ -109,13 +108,13 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
         |c, a, res| {
             let bits = a.entity(0)?;
             let h = c.host();
-            res.set_bool(0, alive(&h.world, bits).is_some())?;
+            res.set_bool(0, alive(h.world(), bits).is_some())?;
             Ok(HostOk::Continue)
         },
     )?;
     r.register(
         HostFn::new(NS, "get")
-            .doc("Copy component `component` (an id from component_id or the index) of `entity` to `out`, which must have room for the component's size. Status: 0 ok, 1 stale entity, 2 component missing, 3 unknown component id.")
+            .doc("Copy component `component` (an id from component_id or the index) of `entity` to `out`, which must have room for the component's size. Reads the start-of-frame value, except that a module sees its own earlier `set`s of this frame. Status: 0 ok, 1 stale entity, 2 component missing, 3 unknown component id.")
             .param("entity", T::Entity)
             .param("component", T::I32)
             .param("out", T::Ptr)
@@ -124,13 +123,11 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             let (bits, id, out) = (a.entity(0)?, a.i32(1)? as u32, a.ptr(2)?);
             let bytes = {
                 let h = c.host();
-                let Some(e) = alive(&h.world, bits) else { return status(res, STALE) };
-                let Ok(entry) = h.types.component(id) else { return status(res, UNKNOWN_ID) };
-                let mut buf = vec![0u8; entry.size() as usize];
-                if let Err(err) = entry.read(&h.world, e, &mut buf) {
-                    return status(res, status_of(&err));
+                let Some(e) = alive(h.world(), bits) else { return status(res, STALE) };
+                match h.read_component(e, id) {
+                    Ok(buf) => buf,
+                    Err(err) => return status(res, status_of(&err)),
                 }
-                buf
             };
             c.write_bytes(out, &bytes)?;
             status(res, OK)
@@ -138,7 +135,7 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
     )?;
     r.register(
         HostFn::new(NS, "set")
-            .doc("Overwrite, in place, the existing component `component` of `entity` with the bytes at `src` (the component's size). Status: 0 ok, 1 stale entity, 2 component missing, 3 unknown component id.")
+            .doc("Overwrite, in place, the existing component `component` of `entity` with the bytes at `src` (the component's size). Buffered: applied after all scripts of the frame ran, in module order (a later module wins over an earlier one); the calling module reads its own write back at once, other modules see the old value until next frame. Status: 0 ok, 1 stale entity, 2 component missing, 3 unknown component id.")
             .param("entity", T::Entity)
             .param("component", T::I32)
             .param("src", T::Ptr)
@@ -147,17 +144,15 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             let (bits, id, src) = (a.entity(0)?, a.i32(1)? as u32, a.ptr(2)?);
             let (e, size) = {
                 let h = c.host();
-                let Some(e) = alive(&h.world, bits) else { return status(res, STALE) };
-                let Ok(entry) = h.types.component(id) else { return status(res, UNKNOWN_ID) };
-                if !entry.has(&h.world, e) {
+                let Some(e) = alive(h.world(), bits) else { return status(res, STALE) };
+                let Ok(entry) = h.types().component(id) else { return status(res, UNKNOWN_ID) };
+                if !entry.has(h.world(), e) {
                     return status(res, MISSING);
                 }
                 (e, entry.size())
             };
             let bytes = c.read_bytes(GuestSlice::new(src, size as u64))?;
-            let h = c.host();
-            let Ok(entry) = h.types.component(id) else { return status(res, UNKNOWN_ID) };
-            match entry.write(&mut h.world, e, &bytes) {
+            match c.host().set_component(e, id, &bytes) {
                 Ok(()) => status(res, OK),
                 Err(err) => status(res, status_of(&err)),
             }
@@ -172,8 +167,8 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
         |c, a, res| {
             let (bits, id) = (a.entity(0)?, a.i32(1)? as u32);
             let h = c.host();
-            let has = match (alive(&h.world, bits), h.types.component(id)) {
-                (Some(e), Ok(entry)) => entry.has(&h.world, e),
+            let has = match (alive(h.world(), bits), h.types().component(id)) {
+                (Some(e), Ok(entry)) => entry.has(h.world(), e),
                 _ => false,
             };
             res.set_bool(0, has)?;
@@ -191,8 +186,8 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             let (bits, id, src) = (a.entity(0)?, a.i32(1)? as u32, a.ptr(2)?);
             let (e, size) = {
                 let h = c.host();
-                let Some(e) = alive(&h.world, bits) else { return status(res, STALE) };
-                let Ok(entry) = h.types.component(id) else { return status(res, UNKNOWN_ID) };
+                let Some(e) = alive(h.world(), bits) else { return status(res, STALE) };
+                let Ok(entry) = h.types().component(id) else { return status(res, UNKNOWN_ID) };
                 (e, entry.size())
             };
             let bytes = c.read_bytes(GuestSlice::new(src, size as u64))?;
@@ -209,8 +204,8 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
         |c, a, res| {
             let (bits, id) = (a.entity(0)?, a.i32(1)? as u32);
             let h = c.host();
-            let Some(e) = alive(&h.world, bits) else { return status(res, STALE) };
-            if h.types.component(id).is_err() {
+            let Some(e) = alive(h.world(), bits) else { return status(res, STALE) };
+            if h.types().component(id).is_err() {
                 return status(res, UNKNOWN_ID);
             }
             h.commands.remove_raw(e, id);
@@ -238,18 +233,18 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             }
             let bytes = {
                 let h = c.host();
-                let Ok(entry) = h.types.component(id) else {
+                let Ok(entry) = h.types().component(id) else {
                     res.set_i64(0, -1)?;
                     return Ok(HostOk::Continue);
                 };
                 let cap = usize::try_from(cap).unwrap_or(0);
                 let mut v: Vec<u8> = Vec::new();
-                for er in h.world.iter() {
+                for er in h.world().iter() {
                     if v.len() / 8 >= cap {
                         break;
                     }
                     let e = er.entity();
-                    if entry.has(&h.world, e) {
+                    if entry.has(h.world(), e) {
                         v.extend_from_slice(&entity_to_bits(e).to_le_bytes());
                     }
                 }
@@ -269,7 +264,7 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             .result("id", T::I32),
         |c, a, res| {
             let name = read_name(c, a.str(0)?)?;
-            let id = c.host().types.by_name(&name).filter(|t| t.is_component()).map_or(-1, |t| t.id() as i32);
+            let id = c.host().types().by_name(&name).filter(|t| t.is_component()).map_or(-1, |t| t.id() as i32);
             res.set_i32(0, id)?;
             Ok(HostOk::Continue)
         },
@@ -288,9 +283,9 @@ fn script_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
         |c, a, res| {
             let (bits, name) = (a.entity(0)?, read_name(c, a.str(1)?)?);
             let h = c.host();
-            let Some(e) = alive(&h.world, bits) else { return status(res, STALE) };
+            let Some(e) = alive(h.world(), bits) else { return status(res, STALE) };
             let Some(id) = h.current else { return status(res, 3) };
-            let ok = h.modules.get(id.0 as usize).is_some_and(|m| {
+            let ok = h.slot(id).is_some_and(|m| {
                 m.module.export_func(&name).and_then(|f| m.module.func_type(f)).is_some_and(|t| {
                     *t == efevm::FuncType::new([efevm::ValType::I64, efevm::ValType::F32, efevm::ValType::I64], [efevm::ValType::I64])
                 })
@@ -378,7 +373,7 @@ fn input_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             .result("down", T::Bool),
         |c, a, res| {
             let name = read_name(c, a.str(0)?)?;
-            let v = KeyCode::from_name(&name).is_some_and(|k| c.host().input.pressed(k));
+            let v = KeyCode::from_name(&name).is_some_and(|k| c.host().input().pressed(k));
             res.set_bool(0, v)?;
             Ok(HostOk::Continue)
         },
@@ -390,7 +385,7 @@ fn input_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             .result("pressed", T::Bool),
         |c, a, res| {
             let name = read_name(c, a.str(0)?)?;
-            let v = KeyCode::from_name(&name).is_some_and(|k| c.host().input.just_pressed(k));
+            let v = KeyCode::from_name(&name).is_some_and(|k| c.host().input().just_pressed(k));
             res.set_bool(0, v)?;
             Ok(HostOk::Continue)
         },
@@ -402,7 +397,7 @@ fn input_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             .result("released", T::Bool),
         |c, a, res| {
             let name = read_name(c, a.str(0)?)?;
-            let v = KeyCode::from_name(&name).is_some_and(|k| c.host().input.just_released(k));
+            let v = KeyCode::from_name(&name).is_some_and(|k| c.host().input().just_released(k));
             res.set_bool(0, v)?;
             Ok(HostOk::Continue)
         },
@@ -412,7 +407,7 @@ fn input_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             .doc("Mouse x position in window pixels (0 if the pointer has not been seen).")
             .result("x", T::F32),
         |c, _a, res| {
-            res.set_f32(0, c.host().input.mouse_pos().map_or(0.0, |p| p.0))?;
+            res.set_f32(0, c.host().input().mouse_pos().map_or(0.0, |p| p.0))?;
             Ok(HostOk::Continue)
         },
     )?;
@@ -421,7 +416,7 @@ fn input_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             .doc("Mouse y position in window pixels (0 if the pointer has not been seen).")
             .result("y", T::F32),
         |c, _a, res| {
-            res.set_f32(0, c.host().input.mouse_pos().map_or(0.0, |p| p.1))?;
+            res.set_f32(0, c.host().input().mouse_pos().map_or(0.0, |p| p.1))?;
             Ok(HostOk::Continue)
         },
     )?;
@@ -440,7 +435,7 @@ fn input_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
                 n @ 5..=255 => Some(MouseButton::Other(n as u8)),
                 _ => None,
             };
-            res.set_bool(0, b.is_some_and(|b| c.host().input.mouse_pressed(b)))?;
+            res.set_bool(0, b.is_some_and(|b| c.host().input().mouse_pressed(b)))?;
             Ok(HostOk::Continue)
         },
     )?;
@@ -452,28 +447,28 @@ fn time_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
     r.register(
         HostFn::new(NS, "delta").doc("Seconds since the previous frame.").result("seconds", T::F32),
         |c, _a, res| {
-            res.set_f32(0, c.host().time.delta())?;
+            res.set_f32(0, c.host().time().delta())?;
             Ok(HostOk::Continue)
         },
     )?;
     r.register(
         HostFn::new(NS, "elapsed").doc("Seconds since the engine started.").result("seconds", T::F64),
         |c, _a, res| {
-            res.set_f64(0, c.host().time.elapsed())?;
+            res.set_f64(0, c.host().time().elapsed())?;
             Ok(HostOk::Continue)
         },
     )?;
     r.register(
         HostFn::new(NS, "frame").doc("Number of frames run so far.").result("frame", T::I64),
         |c, _a, res| {
-            res.set_i64(0, c.host().time.frame() as i64)?;
+            res.set_i64(0, c.host().time().frame() as i64)?;
             Ok(HostOk::Continue)
         },
     )?;
     r.register(
         HostFn::new(NS, "fixed_delta").doc("Length of a fixed update step in seconds.").result("seconds", T::F32),
         |c, _a, res| {
-            res.set_f32(0, c.host().time.fixed_delta())?;
+            res.set_f32(0, c.host().time().fixed_delta())?;
             Ok(HostOk::Continue)
         },
     )?;
@@ -486,7 +481,7 @@ fn event_of(c: &mut Caller<'_, ScriptHost>, func: &str, ev: i32) -> Result<Event
     let h = c.host();
     let slot = h
         .current
-        .and_then(|id| h.modules.get(id.0 as usize))
+        .and_then(|id| h.slot(id))
         .ok_or_else(|| Trap::Host(format!("engine.events.{func}: no module is running")))?;
     let events = &slot.module.data().events;
     usize::try_from(ev).ok().and_then(|i| events.get(i)).cloned().ok_or_else(|| {
@@ -589,7 +584,7 @@ fn log_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
 /// The asset `path` of the package of the module that is running now.
 fn own_asset<'a>(h: &'a ScriptHost, path: &str) -> Option<&'a [u8]> {
     let id = h.current?;
-    h.modules.get(id.0 as usize)?.package.as_ref()?.assets.get(path).map(Vec::as_slice)
+    h.slot(id)?.package.as_ref()?.assets.get(path).map(Vec::as_slice)
 }
 
 fn mods_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
@@ -616,7 +611,7 @@ fn mods_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             let key = read_name(c, a.str(0)?)?;
             let default = a.f64(1)?;
             let h = c.host();
-            let meta = h.current.and_then(|id| h.modules.get(id.0 as usize)).and_then(|m| m.package.as_ref()).and_then(|p| p.manifest.meta.as_ref());
+            let meta = h.current.and_then(|id| h.slot(id)).and_then(|m| m.package.as_ref()).and_then(|p| p.manifest.meta.as_ref());
             let mut v = meta;
             for part in key.split('.') {
                 v = v.and_then(|v| v.get(part));

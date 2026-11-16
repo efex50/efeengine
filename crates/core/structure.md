@@ -32,6 +32,7 @@ crates/core
         ├── time.rs       Time: clamped delta, elapsed, frame counter, fixed-step accumulator and alpha
         ├── resources.rs  Resources: type map (one value per `'static` type)
         ├── events.rs     Events<T> (double-buffered typed queue) and EventRegistry (all `Events<T>`, type-erased)
+        ├── parallel.rs   Executor (run tasks on the caller plus pool helpers; the only `unsafe` of the scheduler), Access (declared component/resource reads and writes, `conflicts`), ParCtx (checked query/get/res/res_mut/events/send/commands, `par_for_each`), ParCommands; see `docs/THREADING.md` and `docs/PARALLEL_SPEC.md`
         ├── schedule.rs   Stage, Schedule, Ctx (what systems get; `Ctx::spawn`); re-exports the commands types
         ├── commands.rs   Commands (alias EngineCommands): control requests + queued world ops, `apply`, `append`
         ├── components.rs Transform, Velocity, MeshHandle (repr(C), Pod, ScriptType), Name (Rust-only)
@@ -66,7 +67,7 @@ crates/core
             ├── worker.js   JS bootstrap for a persistent worker (template)
             └── worker_once.js  JS bootstrap for a one-shot worker (template, unused; contains a debug setTimeout/console.log)
 ```
-Integration tests: `tests/headless.rs` (headless engine, no SDL or GPU: fixed-step counts, Startup/Shutdown, `quit`, injected key events, typed events, message queue) and `tests/world.rs` (Commands spawn/insert/remove/despawn between stages, despawn inside a query, dead/stale entities, raw ops, `append`, hecs reserved-entity behaviour, registry layouts and byte round trips, wrong sizes, registration errors). `tests/scripting.rs` (engine host functions, loading, budgets, mods) and `tests/api_index.rs` (every registered name has an index entry).
+Integration tests: `tests/headless.rs` (headless engine, no SDL or GPU: fixed-step counts, Startup/Shutdown, `quit`, injected key events, typed events, message queue) and `tests/world.rs` (Commands spawn/insert/remove/despawn between stages, despawn inside a query, dead/stale entities, raw ops, `append`, hecs reserved-entity behaviour, registry layouts and byte round trips, wrong sizes, registration errors). `tests/scripting.rs` (engine host functions, loading, budgets, mods) and `tests/api_index.rs` (every registered name has an index entry). Parallel scheduling: `tests/script_lanes.rs` (lanes, buffered `set`, merge order, spawn pools), `tests/parallel.rs` (determinism: ~2k entities, par + exclusive systems, conflicting script modules, 300 frames, `Single` vs `Fixed(4)` x20, world hash) and `tests/parallel_bench.rs` (`#[ignore]` benchmark, ms per frame for 1/2/4/N threads).
 
 ## Main concepts
 

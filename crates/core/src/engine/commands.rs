@@ -28,6 +28,8 @@ pub enum EngineCommand {
 enum WorldOp {
     /// Insert a bundle into an entity reserved by [`Commands::spawn`].
     Spawn(Entity, EntityBuilder),
+    /// Spawn a new entity when applied (queued by a parallel system, which cannot reserve ids).
+    SpawnDeferred(EntityBuilder),
     Despawn(Entity),
     Insert(Entity, EntityBuilder),
     Remove(Entity, fn(&mut World, Entity) -> bool, &'static str),
@@ -39,6 +41,7 @@ impl std::fmt::Debug for WorldOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WorldOp::Spawn(e, _) => write!(f, "Spawn({e:?})"),
+            WorldOp::SpawnDeferred(_) => write!(f, "SpawnDeferred"),
             WorldOp::Despawn(e) => write!(f, "Despawn({e:?})"),
             WorldOp::Insert(e, _) => write!(f, "Insert({e:?})"),
             WorldOp::Remove(e, _, t) => write!(f, "Remove({e:?}, {t})"),
@@ -118,6 +121,11 @@ impl Commands {
         self.spawn(world, ())
     }
 
+    /// Queue making the already reserved entity `e` (from a pre-reserved pool) alive and empty.
+    pub fn spawn_reserved(&mut self, e: Entity) {
+        self.ops.push(WorldOp::Spawn(e, EntityBuilder::new()));
+    }
+
     pub fn despawn(&mut self, e: Entity) {
         self.ops.push(WorldOp::Despawn(e));
     }
@@ -178,6 +186,9 @@ impl Commands {
                         ::log::debug!("commands: insert into dead entity {e:?} ignored");
                     }
                 }
+                WorldOp::SpawnDeferred(mut b) => {
+                    world.spawn(b.build());
+                }
                 WorldOp::Despawn(e) => {
                     if world.despawn(e).is_err() {
                         ::log::debug!("commands: despawn of dead entity {e:?} ignored");
@@ -211,5 +222,74 @@ fn log_raw(what: &str, e: Entity, r: Result<(), crate::engine::types::CompError>
         Ok(()) => {}
         Err(CompError::NoEntity | CompError::Missing(_)) => ::log::debug!("commands: {what} on {e:?} ignored: {}", r.unwrap_err()),
         Err(err) => ::log::warn!("commands: {what} on {e:?} failed: {err}"),
+    }
+}
+
+/// The command buffer of a parallel system ([`ParCtx::commands`](crate::engine::parallel::ParCtx::commands)).
+///
+/// Like [`Commands`], but `spawn` cannot reserve an entity (reservation order would depend on
+/// thread timing): it returns nothing, and the entity is created when the buffers are applied,
+/// in registration order. Everything else queues the same operations as [`Commands`].
+#[derive(Debug, Default)]
+pub struct ParCommands {
+    inner: Commands,
+}
+
+impl ParCommands {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn take(&mut self) -> Commands {
+        std::mem::take(&mut self.inner)
+    }
+
+    /// Queue spawning an entity with `bundle`. The entity exists after the stage's commands are applied.
+    pub fn spawn(&mut self, bundle: impl DynamicBundle) {
+        let mut b = EntityBuilder::new();
+        b.add_bundle(bundle);
+        self.inner.ops.push(WorldOp::SpawnDeferred(b));
+    }
+    pub fn despawn(&mut self, e: Entity) {
+        self.inner.despawn(e);
+    }
+    pub fn insert(&mut self, e: Entity, component: impl Component) {
+        self.inner.insert(e, component);
+    }
+    pub fn insert_bundle(&mut self, e: Entity, bundle: impl DynamicBundle) {
+        self.inner.insert_bundle(e, bundle);
+    }
+    pub fn remove<T: Component>(&mut self, e: Entity) {
+        self.inner.remove::<T>(e);
+    }
+    pub fn insert_raw(&mut self, e: Entity, component_id: u32, bytes: Vec<u8>) {
+        self.inner.insert_raw(e, component_id, bytes);
+    }
+    pub fn remove_raw(&mut self, e: Entity, component_id: u32) {
+        self.inner.remove_raw(e, component_id);
+    }
+    pub fn reload_mods(&mut self) {
+        self.inner.reload_mods();
+    }
+    pub fn unload_mods(&mut self) {
+        self.inner.unload_mods();
+    }
+    pub fn quit(&mut self) {
+        self.inner.quit();
+    }
+    pub fn set_title(&mut self, t: impl Into<String>) {
+        self.inner.set_title(t);
+    }
+    pub fn set_frame_rate(&mut self, fps: f32) {
+        self.inner.set_frame_rate(fps);
+    }
+    pub fn set_cursor_visible(&mut self, v: bool) {
+        self.inner.set_cursor_visible(v);
+    }
+    pub fn set_cursor_grab(&mut self, g: bool) {
+        self.inner.set_cursor_grab(g);
+    }
+    pub fn set_text_input(&mut self, on: bool) {
+        self.inner.set_text_input(on);
     }
 }

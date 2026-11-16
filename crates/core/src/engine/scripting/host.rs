@@ -1,13 +1,15 @@
 //! `ScriptHost`: the host state every script call sees (`HostRegistry<ScriptHost>`), and the
 //! table of loaded modules used for cross-module calls.
 
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
+use std::sync::Arc;
 
 use efevm::{Exit, ExportKind, Instance, Module, SpawnError, Trap};
-use hecs::World;
+use hecs::{Entity, World};
 
 use super::{ModuleId, ScriptEvent, ScriptEventError};
-use crate::engine::{commands::Commands, input::InputState, time::Time, types::TypeRegistry};
+use crate::engine::{commands::Commands, input::InputState, time::Time, types::{CompError, TypeRegistry}};
 
 /// Severity of a script log line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +29,9 @@ pub struct LogLine {
 /// At most this many log lines are kept per frame; the rest are dropped.
 pub(crate) const MAX_LOG_LINES: usize = 1000;
 /// At most this many script events can be sent per frame (all events together).
+/// Pool of reserved spawn entities per module: initial and bounds (docs/PARALLEL_SPEC.md 7.5).
+pub(crate) const MIN_POOL: usize = 64;
+pub(crate) const MAX_POOL: usize = 65536;
 pub(crate) const MAX_EVENTS: usize = 4096;
 
 /// File watch of a hot-reloaded module (native only).
@@ -59,6 +64,12 @@ pub(crate) struct ModuleSlot {
     /// Import namespace prefixes this module may use; `None` = all (game modules).
     pub allowed: Option<Vec<String>>,
     pub pending_init: bool,
+    /// State of `engine.random` of this module (xorshift64*, never 0).
+    pub rng: u64,
+    /// Entities reserved for `engine.world.spawn` this frame.
+    pub spawn_pool: VecDeque<Entity>,
+    /// How many entities to reserve for the next frame.
+    pub pool_size: usize,
     /// Doc of the namespace the mod's provides live in (only used with section 13).
     pub doc: String,
     /// What a loaded `.efmod` package adds (manifest, grant, assets); `None` for game modules
@@ -74,6 +85,8 @@ pub(crate) enum RunError {
     NoModule,
     Unloaded(String),
     Busy(String),
+    /// The module belongs to another lane (cannot happen: lanes are closed under imports).
+    OtherLane(String),
     OutOfBudget,
     Yielded,
     Spawn(SpawnError),
@@ -87,12 +100,26 @@ impl fmt::Display for RunError {
             RunError::NoModule => f.write_str("no such module"),
             RunError::Unloaded(n) => write!(f, "module {n} unloaded"),
             RunError::Busy(n) => write!(f, "module {n} is already running (re-entrant call)"),
+            RunError::OtherLane(n) => write!(f, "module {n} runs in another lane"),
             RunError::OutOfBudget => f.write_str("out of budget"),
             RunError::Yielded => f.write_str("function yielded"),
             RunError::Spawn(e) => write!(f, "cannot call: {e}"),
             RunError::Trap(t) => f.write_str(t),
         }
     }
+}
+
+/// The start state of the `engine.random` stream of module `name`: a mix of the engine's seed
+/// and the name (FNV-1a), so every module has its own stream and the result does not depend on
+/// which thread runs it.
+pub(crate) fn seed_for(name: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    let s = h ^ 0x2545_F491_4F6C_DD1D;
+    if s == 0 { 0x9E37_79B9_7F4A_7C15 } else { s }
 }
 
 /// Name of function `func` (module index space) from the names section or the exports.
@@ -115,74 +142,143 @@ fn format_trap(module: &Module, trap: &Trap, trace: &[(u32, u32)]) -> String {
     s
 }
 
-/// The state host functions see while scripts run.
-///
-/// The engine moves the world in (`std::mem::take`) before the script system runs and back
-/// afterwards, so host functions have plain `&mut World` access without any unsafe code.
-/// World changes that must be deferred go through `commands`, which the script system
-/// appends to the stage's commands.
-pub struct ScriptHost {
-    pub(crate) world: World,
-    pub(crate) types: TypeRegistry,
-    pub(crate) commands: Commands,
-    pub(crate) time: Time,
-    pub(crate) input: InputState,
+/// The read-only snapshot of the engine every lane sees during the script phase (shared as an
+/// `Arc<FrameView>`). The world is moved in (`mem::take`) before the phase and back afterwards,
+/// so the scripting side needs no unsafe code.
+pub(crate) struct FrameView {
+    pub world: World,
+    pub types: Arc<TypeRegistry>,
+    pub time: Time,
+    pub input: InputState,
     /// Script events readable this frame.
-    pub(crate) events_in: Vec<ScriptEvent>,
-    /// Script events sent this frame (readable next frame).
+    pub events_in: Vec<ScriptEvent>,
+    /// Registered events and their payload sizes (qualified name).
+    pub event_sizes: BTreeMap<String, usize>,
+    /// Name of every module slot, by id (for error messages about modules outside a lane).
+    pub module_names: Vec<String>,
+    /// `(module id, entity)` of every `Script`, sorted by module (stable, so entity order stays).
+    pub jobs: Vec<(u32, Entity)>,
+}
+
+/// The state host functions see while a lane of scripts runs (the `H` of the VM).
+///
+/// Every lane has its own value: the world is the frozen snapshot ([`FrameView`]); `set` is
+/// buffered (with read-your-own-writes) and applied at the merge, structural changes go through
+/// `commands`, spawns come from a pre-reserved pool per module. Nothing here is shared between
+/// lanes, so lanes can run on different threads without any ordering dependence.
+pub struct ScriptHost {
+    pub(crate) frame: Arc<FrameView>,
+    /// The slots of this lane's modules, by module id; `None` for modules of other lanes.
+    pub(crate) modules: Vec<Option<ModuleSlot>>,
+    /// Buffered `engine.world.set` calls, in call order.
+    pub(crate) writes: Vec<(Entity, u32, Vec<u8>)>,
+    /// Latest entry of `writes` per `(entity, component)`, for read-your-own-writes.
+    pub(crate) write_index: HashMap<(Entity, u32), usize>,
+    pub(crate) commands: Commands,
+    /// New `Script.state` values, applied at the merge.
+    pub(crate) script_state: Vec<(Entity, i64)>,
+    /// Script events sent this frame (readable next frame), capped per lane.
     pub(crate) events_out: Vec<ScriptEvent>,
-    /// Sends refused by the per-frame cap since the last `leave`.
+    /// Sends refused by the cap in this lane.
     pub(crate) dropped_events: usize,
-    /// Registered events and their payload sizes (qualified name), refreshed when scripts run.
-    pub(crate) event_sizes: std::collections::BTreeMap<String, usize>,
     pub(crate) logs: Vec<LogLine>,
-    pub(crate) modules: Vec<ModuleSlot>,
+    /// `(key, text)` warnings that are logged once per key (deduplicated at the merge).
+    pub(crate) warns: Vec<(String, String)>,
+    /// Spawns refused because the module's pool was empty, per module.
+    pub(crate) overflow: BTreeMap<ModuleId, u64>,
     pub(crate) current: Option<ModuleId>,
-    /// State of `engine.random` (xorshift64*).
-    pub(crate) rng: u64,
 }
 
 impl ScriptHost {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn lane(frame: Arc<FrameView>, modules: Vec<Option<ModuleSlot>>) -> Self {
         ScriptHost {
-            world: World::new(),
-            types: TypeRegistry::new(),
+            frame,
+            modules,
+            writes: Vec::new(),
+            write_index: HashMap::new(),
             commands: Commands::new(),
-            time: Time::new(1.0 / 60.0),
-            input: InputState::new(),
-            events_in: Vec::new(),
+            script_state: Vec::new(),
             events_out: Vec::new(),
             dropped_events: 0,
-            event_sizes: Default::default(),
             logs: Vec::new(),
-            modules: Vec::new(),
+            warns: Vec::new(),
+            overflow: BTreeMap::new(),
             current: None,
-            rng: 0x2545_F491_4F6C_DD1D,
         }
     }
 
-    /// The next pseudo-random 64 bits (xorshift64*; never 0 internally).
+    /// The slot of module `id` if it belongs to this lane.
+    pub(crate) fn slot(&self, id: ModuleId) -> Option<&ModuleSlot> {
+        self.modules.get(id.0 as usize).and_then(Option::as_ref)
+    }
+
+    /// The slot of module `id`, or the reason it is not available.
+    pub(crate) fn slot_checked(&self, id: ModuleId) -> Result<&ModuleSlot, RunError> {
+        match self.modules.get(id.0 as usize) {
+            None => Err(RunError::NoModule),
+            Some(None) => Err(RunError::OtherLane(self.frame.module_names.get(id.0 as usize).cloned().unwrap_or_default())),
+            Some(Some(s)) => Ok(s),
+        }
+    }
+
+    /// The next pseudo-random 64 bits of the current module's stream (xorshift64*; never 0).
     pub(crate) fn next_random(&mut self) -> u64 {
-        let mut x = self.rng;
+        let Some(slot) = self.current.and_then(|id| self.modules.get_mut(id.0 as usize)).and_then(Option::as_mut) else {
+            return 0;
+        };
+        let mut x = slot.rng;
         x ^= x >> 12;
         x ^= x << 25;
         x ^= x >> 27;
-        self.rng = x;
+        slot.rng = x;
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
-    /// Reseed `engine.random`. Seed 0 is mapped to a fixed non-zero value.
+    /// Reseed the current module's `engine.random` stream. Seed 0 is mapped to a fixed non-zero value.
     pub(crate) fn seed_random(&mut self, seed: u64) {
-        self.rng = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
+        if let Some(slot) = self.current.and_then(|id| self.modules.get_mut(id.0 as usize)).and_then(Option::as_mut) {
+            slot.rng = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
+        }
     }
 
-    /// The world (only while scripts run; empty otherwise).
+    /// The world snapshot (the state at the start of the script phase; empty outside it).
     pub fn world(&self) -> &World {
-        &self.world
+        &self.frame.world
     }
 
-    pub fn world_mut(&mut self) -> &mut World {
-        &mut self.world
+    /// Overwrite, in place, the existing component `id` of `e` with `bytes`. Buffered: the
+    /// write is applied when the lanes merge, but this lane reads it back at once (reading your
+    /// own writes); other lanes see the start-of-phase value. The checks run against the
+    /// snapshot (structure is frozen during the phase, so they still hold at the merge).
+    pub fn set_component(&mut self, e: Entity, id: u32, bytes: &[u8]) -> Result<(), CompError> {
+        let frame = self.frame.clone();
+        if !frame.world.contains(e) {
+            return Err(CompError::NoEntity);
+        }
+        let entry = frame.types.component(id)?;
+        if !entry.has(&frame.world, e) {
+            return Err(CompError::Missing(entry.name().to_string()));
+        }
+        if bytes.len() != entry.size() as usize {
+            return Err(CompError::WrongSize { name: entry.name().to_string(), expected: entry.size(), got: bytes.len() });
+        }
+        self.write_index.insert((e, id), self.writes.len());
+        self.writes.push((e, id, bytes.to_vec()));
+        Ok(())
+    }
+
+    /// The bytes of component `id` of `e`: this lane's latest buffered write, else the snapshot.
+    pub(crate) fn read_component(&self, e: Entity, id: u32) -> Result<Vec<u8>, CompError> {
+        let entry = self.frame.types.component(id)?;
+        if !self.frame.world.contains(e) {
+            return Err(CompError::NoEntity);
+        }
+        if let Some(&i) = self.write_index.get(&(e, id)) {
+            return Ok(self.writes[i].2.clone());
+        }
+        let mut buf = vec![0u8; entry.size() as usize];
+        entry.read(&self.frame.world, e, &mut buf)?;
+        Ok(buf)
     }
 
     /// Deferred world changes; applied after the stage, in order.
@@ -190,35 +286,53 @@ impl ScriptHost {
         &mut self.commands
     }
 
-    /// World and commands together (`commands.spawn(world, ..)` needs both).
-    pub fn world_and_commands(&mut self) -> (&mut World, &mut Commands) {
-        (&mut self.world, &mut self.commands)
+    /// Take an entity from the current module's pre-reserved spawn pool and queue making it
+    /// alive (empty). `None` when the pool is empty (counted as an overflow, warned once per
+    /// frame and module) or no module is running.
+    pub fn spawn(&mut self) -> Option<Entity> {
+        let id = self.current?;
+        let e = self.modules.get_mut(id.0 as usize).and_then(Option::as_mut).and_then(|s| s.spawn_pool.pop_front());
+        match e {
+            Some(e) => {
+                self.commands.spawn_reserved(e);
+                Some(e)
+            }
+            None => {
+                let n = self.overflow.entry(id).or_insert(0);
+                *n += 1;
+                if *n == 1 {
+                    let name = self.module_name(id).unwrap_or("?").to_string();
+                    self.log(LogLevel::Warn, format!("[{name}] spawn pool is empty; engine.world.spawn returns the null handle (the pool grows for the next frame)"));
+                }
+                None
+            }
+        }
     }
 
     pub fn types(&self) -> &TypeRegistry {
-        &self.types
+        &self.frame.types
     }
 
     /// A copy of the engine's time for this frame.
     pub fn time(&self) -> &Time {
-        &self.time
+        &self.frame.time
     }
 
     /// A copy of the engine's input state for this frame.
     pub fn input(&self) -> &InputState {
-        &self.input
+        &self.frame.input
     }
 
     /// Script events readable this frame.
     pub fn events(&self) -> &[ScriptEvent] {
-        &self.events_in
+        &self.frame.events_in
     }
 
     /// The payloads of the script events `event` (`namespace.name`) readable this frame, in
     /// send order. Entries whose length differs from the registered payload size are skipped.
     pub fn events_named<'a>(&'a self, event: &'a str) -> impl Iterator<Item = &'a [u8]> + 'a {
-        let size = self.event_sizes.get(event).copied();
-        self.events_in.iter().filter(move |e| e.event == event && Some(e.payload.len()) == size).map(|e| e.payload.as_slice())
+        let size = self.frame.event_sizes.get(event).copied();
+        self.frame.events_in.iter().filter(move |e| e.event == event && Some(e.payload.len()) == size).map(|e| e.payload.as_slice())
     }
 
     /// Send the script event `event` (`namespace.name`, registered) with `payload` (exactly the
@@ -226,9 +340,9 @@ impl ScriptHost {
     /// frame by scripts and Rust systems. An unregistered event or a payload of the wrong size
     /// is refused. Counts against the 4096 events per frame cap like a script's send: beyond
     /// it the event is dropped (and counted, `Scripting::dropped_events_last_frame`), which is
-    /// not an error.
+    /// not an error. The cap is applied when the lanes merge, in lane order.
     pub fn send_event(&mut self, event: &str, payload: &[u8]) -> Result<(), ScriptEventError> {
-        match self.event_sizes.get(event) {
+        match self.frame.event_sizes.get(event) {
             None => return Err(ScriptEventError::Unknown { event: event.to_string() }),
             Some(&n) if n != payload.len() => {
                 return Err(ScriptEventError::Payload { event: event.to_string(), expected: n, got: payload.len() });
@@ -255,7 +369,7 @@ impl ScriptHost {
 
     /// Name of module `id`.
     pub fn module_name(&self, id: ModuleId) -> Option<&str> {
-        self.modules.get(id.0 as usize).map(|m| m.name.as_str())
+        self.frame.module_names.get(id.0 as usize).map(String::as_str)
     }
 
     /// Log a line (emitted through the engine logger after the stage).
@@ -263,6 +377,11 @@ impl ScriptHost {
         if self.logs.len() < MAX_LOG_LINES {
             self.logs.push(LogLine { level, text: text.into() });
         }
+    }
+
+    /// A warning logged once per `key` (ever), however many lanes ask.
+    pub(crate) fn warn_once(&mut self, key: String, text: String) {
+        self.warns.push((key, text));
     }
 
     /// Call export `export` of module `id` with raw argument bits, from the module's
@@ -296,7 +415,8 @@ impl ScriptHost {
         copies: &[CopyIn],
     ) -> Result<(Vec<u64>, Vec<Vec<u8>>), RunError> {
         let idx = id.0 as usize;
-        let slot = self.modules.get_mut(idx).ok_or(RunError::NoModule)?;
+        self.slot_checked(id)?;
+        let slot = self.modules[idx].as_mut().expect("checked above");
         if !slot.loaded {
             return Err(RunError::Unloaded(slot.name.clone()));
         }
@@ -339,7 +459,7 @@ impl ScriptHost {
                 }
             }
         }
-        let slot = &mut self.modules[idx];
+        let slot = self.modules[idx].as_mut().expect("slot stays in the lane");
         slot.remaining = slot.remaining.saturating_sub(spent);
         if matches!(result, Err(RunError::OutOfBudget)) {
             slot.remaining = 0;

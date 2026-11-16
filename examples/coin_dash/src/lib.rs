@@ -190,9 +190,11 @@ fn spawn_enemies(world: &mut World, enemy: TextureHandle) {
 // ---- systems ----
 
 /// WASD / arrows set the player's `Velocity` (the engine's velocity system moves it).
-fn player_input(ctx: &mut Ctx<'_>) {
-    let Some(game) = ctx.resources.get::<Game>() else { return };
+/// A par system: reads `Game`, writes the player's `Transform`, `Velocity` and `Sprite`.
+fn player_input(ctx: &ParCtx<'_>) {
+    let Some(game) = ctx.try_res::<Game>() else { return };
     let (player, autoplay) = (game.player, game.autoplay);
+    drop(game);
     let input = ctx.input;
     let held = |a: KeyCode, b: KeyCode| input.pressed(a) || input.pressed(b);
     let mut dir = Vec2::new(
@@ -201,16 +203,16 @@ fn player_input(ctx: &mut Ctx<'_>) {
     );
     if autoplay {
         // a bot: walk to the nearest coin
-        let from = ctx.world.get::<&Transform>(player).map(|t| t.position).unwrap_or(START);
+        let from = ctx.get::<&Transform>(player).map(|t| t.position).unwrap_or(START);
         let nearest = ctx
-            .world
             .query::<(&Transform, &Coin)>()
             .iter()
             .map(|(t, _)| t.position)
             .min_by(|a, b| a.distance_squared(from).total_cmp(&b.distance_squared(from)));
         dir = nearest.map_or(Vec2::ZERO, |c| c - from);
     }
-    let Ok((t, v, s)) = ctx.world.query_one_mut::<(&mut Transform, &mut Velocity, &mut Sprite)>(player) else { return };
+    let mut q = ctx.query_one::<(&mut Transform, &mut Velocity, &mut Sprite)>(player);
+    let Ok((t, v, s)) = q.get() else { return };
     v.linear = dir.normalize_or_zero() * PLAYER_SPEED;
     t.position = t.position.clamp(-HALF + Vec2::splat(8.0), HALF - Vec2::splat(8.0));
     if dir.x != 0.0 {
@@ -218,9 +220,10 @@ fn player_input(ctx: &mut Ctx<'_>) {
     }
 }
 
-/// Enemies turn around at the ends of their lane.
-fn patrol(ctx: &mut Ctx<'_>) {
-    for (t, v, p, s) in ctx.world.query_mut::<(&Transform, &mut Velocity, &mut Patrol, &mut Sprite)>() {
+/// Enemies turn around at the ends of their lane. Reads `Transform`; writes `Velocity`,
+/// `Patrol` and `Sprite`. Each enemy is independent, so it runs with `par_for_each`.
+fn patrol(ctx: &ParCtx<'_>) {
+    ctx.par_for_each::<(&Transform, &mut Velocity, &mut Patrol, &mut Sprite), _>(64, |(t, v, p, s)| {
         let along = (t.position - p.origin).dot(p.axis);
         if along > p.range {
             p.dir = -1.0;
@@ -231,38 +234,38 @@ fn patrol(ctx: &mut Ctx<'_>) {
         if p.axis.x != 0.0 {
             s.flip = if p.dir < 0.0 { Sprite::FLIP_X } else { 0 };
         }
-    }
+    });
 }
 
-/// Coins spin (UV frames of the sheet, 8 frames per second) and bob.
-fn animate_coins(ctx: &mut Ctx<'_>) {
+/// Coins spin (UV frames of the sheet, 8 frames per second) and bob. Writes `Transform` and
+/// `Sprite`, reads `Coin`.
+fn animate_coins(ctx: &ParCtx<'_>) {
     let t = ctx.time.elapsed() as f32;
-    for (tr, s, c) in ctx.world.query_mut::<(&mut Transform, &mut Sprite, &Coin)>() {
+    ctx.par_for_each::<(&mut Transform, &mut Sprite, &Coin), _>(64, move |(tr, s, c)| {
         let frame = ((t * 8.0 + c.phase * 4.0) as usize) % 4;
         (s.uv_min, s.uv_max) = frame_uv(frame, 4);
         tr.position.y = c.base_y + (t * 3.0 + c.phase * 6.0).sin() * 2.0;
-    }
+    });
 }
 
-/// Circle checks: player vs coins and vs enemies.
-fn collisions(ctx: &mut Ctx<'_>) {
-    let Some(game) = ctx.resources.get_mut::<Game>() else { return };
+/// Circle checks: player vs coins and vs enemies. Despawns and spawns go through
+/// `ctx.commands()`; writes `Game`, the player's `Transform` and `Velocity`.
+fn collisions(ctx: &ParCtx<'_>) {
+    let Some(mut game) = ctx.try_res_mut::<Game>() else { return };
     game.invulnerable = (game.invulnerable - ctx.time.delta()).max(0.0);
     let player = game.player;
-    let Ok(pos) = ctx.world.get::<&Transform>(player).map(|t| t.position) else { return };
+    let Ok(pos) = ctx.get::<&Transform>(player).map(|t| t.position) else { return };
 
     // coins
     let taken: Vec<Entity> = ctx
-        .world
         .query::<(Entity, &Transform, &Coin)>()
         .iter()
         .filter(|(_, t, _)| t.position.distance(pos) < PLAYER_R + COIN_R)
         .map(|(e, _, _)| e)
         .collect();
     let mut new_coins = Vec::new();
-    let game = ctx.resources.get_mut::<Game>().expect("Game");
     for e in taken {
-        ctx.commands.despawn(e);
+        ctx.commands().despawn(e);
         game.score += 1;
         game.coins_left -= 1;
         global_info(&format!("[coin_dash] score {}", game.score));
@@ -271,23 +274,21 @@ fn collisions(ctx: &mut Ctx<'_>) {
         game.round += 1;
         global_info(&format!("[coin_dash] round {}", game.round));
         for _ in 0..coins_in_round(game.round) {
-            let p = random_spot(game);
+            let p = random_spot(&mut game);
             new_coins.push((p, game.random()));
         }
         game.coins_left = new_coins.len() as u32;
     }
     let coins_tex = game.assets.coins;
     for (p, phase) in new_coins {
-        ctx.spawn(coin_bundle(coins_tex, p, phase));
+        ctx.commands().spawn(coin_bundle(coins_tex, p, phase));
     }
 
     // enemies
-    let game = ctx.resources.get_mut::<Game>().expect("Game");
     if game.invulnerable > 0.0 {
         return;
     }
     let hit = ctx
-        .world
         .query::<(&Transform, &Patrol)>()
         .iter()
         .any(|(t, _)| t.position.distance(pos) < PLAYER_R + ENEMY_R);
@@ -295,7 +296,7 @@ fn collisions(ctx: &mut Ctx<'_>) {
         game.score = 0;
         game.invulnerable = 1.0;
         global_info("[coin_dash] hit by enemy, score reset");
-        if let Ok((t, v)) = ctx.world.query_one_mut::<(&mut Transform, &mut Velocity)>(player) {
+        if let Ok((t, v)) = ctx.query_one::<(&mut Transform, &mut Velocity)>(player).get() {
             t.position = START;
             v.linear = Vec2::ZERO;
         }
@@ -381,10 +382,40 @@ pub fn setup(engine: &mut Engine) {
     engine.insert_resource(game);
 
     // Systems of a stage run in the order they are added.
-    engine.add_system(Stage::Update, player_input);
-    engine.add_system(Stage::Update, patrol);
-    engine.add_system(Stage::Update, animate_coins);
-    engine.add_system(Stage::Update, collisions);
+    // The movement and collision systems are par systems with exact `Access`; the camera and
+    // the status line need the window / the log, so they stay exclusive.
+    engine.add_par_system(
+        Stage::Update,
+        Access::new()
+            .named("player_input")
+            .res::<Game>()
+            .read::<Coin>()
+            .write::<Transform>()
+            .write::<Velocity>()
+            .write::<Sprite>(),
+        player_input,
+    );
+    engine.add_par_system(
+        Stage::Update,
+        Access::new().named("patrol").read::<Transform>().write::<Velocity>().write::<Patrol>().write::<Sprite>(),
+        patrol,
+    );
+    engine.add_par_system(
+        Stage::Update,
+        Access::new().named("animate_coins").write::<Transform>().write::<Sprite>().read::<Coin>(),
+        animate_coins,
+    );
+    engine.add_par_system(
+        Stage::Update,
+        Access::new()
+            .named("collisions")
+            .res_mut::<Game>()
+            .write::<Transform>()
+            .write::<Velocity>()
+            .read::<Coin>()
+            .read::<Patrol>(),
+        collisions,
+    );
     engine.add_system(Stage::Update, follow_camera);
     engine.add_system(Stage::Update, status);
 }

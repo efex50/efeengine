@@ -75,7 +75,7 @@ impl ThreadPoolTrait for ThreadPool{
 
     fn change_worker_amount(&self,new_size:usize) {
         let new_size = new_size.max(1);
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = crate::thread_pool::lock_nb(&self.workers);
         Self::prune(&mut workers);
         let cur = self.target.load(Ordering::SeqCst);
         let Some(url) = self.url.as_deref() else {
@@ -114,7 +114,7 @@ impl ThreadPoolTrait for ThreadPool{
 
     fn new_dedicated_worker(&self) -> super::WorkerHandle {
         let (tx,rx) = flume::unbounded::<Jobs>();
-        let mut ex = self.dedicated_workers.lock().unwrap();
+        let mut ex = crate::thread_pool::lock_nb(&self.dedicated_workers);
         match gen_url(WorkerType::Standart) {
             Some(url) => {
                 // the new workers has id +31000

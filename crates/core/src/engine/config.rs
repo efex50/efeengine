@@ -65,6 +65,20 @@ pub fn wasm_js_path() -> Option<&'static str> {
         .or_else(|| crate::engine::WASM_PATH.get().map(String::as_str))
 }
 
+/// How many threads run the parallel scheduler (see `docs/PARALLEL_SPEC.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Threads {
+    /// Pool size from the core count (`worker_count`), or `EFE_THREADS`. Headless: `Single`.
+    /// wasm without crossOriginIsolated: `Single`.
+    #[default]
+    Auto,
+    /// `n` participants in total (the calling thread plus `n - 1` pool workers).
+    /// `Fixed(1)` is the same as `Single`.
+    Fixed(usize),
+    /// Everything runs on the calling thread; the pool is never touched.
+    Single,
+}
+
 /// Engine configuration passed to `Engine::with_config`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineConfig {
@@ -78,8 +92,8 @@ pub struct EngineConfig {
     pub fixed_dt: f64,
     /// Frame-rate cap for the native loop; `None` = uncapped. `Message::SetFrameRate` changes it.
     pub max_fps: Option<f32>,
-    /// Worker thread count; `None` = the startup config's value, else automatic.
-    pub threads: Option<usize>,
+    /// Parallelism of the scheduler; `Auto` takes the startup config's value, else automatic.
+    pub threads: Threads,
     /// Id of the `<canvas>` (web); `None` = the startup config's value, else `"canvas"`.
     pub canvas_id: Option<String>,
     /// No window, no graphics, no global message queue: for tests and tools.
@@ -96,7 +110,7 @@ impl Default for EngineConfig {
             vsync: true,
             fixed_dt: 1.0 / 60.0,
             max_fps: Some(60.0),
-            threads: None,
+            threads: Threads::Auto,
             canvas_id: None,
             headless: false,
             script_cache: Default::default(),
@@ -118,8 +132,10 @@ impl EngineConfig {
     /// Fill `threads` and `canvas_id` from the startup config (set from JS) where they are `None`.
     pub fn merged_with_startup(mut self) -> Self {
         let startup = startup_config();
-        if self.threads.is_none() {
-            self.threads = startup.threads;
+        if self.threads == Threads::Auto {
+            if let Some(n) = startup.threads {
+                self.threads = Threads::Fixed(n);
+            }
         }
         if self.canvas_id.is_none() {
             self.canvas_id = startup.canvas_id.clone();
@@ -136,7 +152,7 @@ impl EngineConfig {
         if !self.headless && (self.size.0 == 0 || self.size.1 == 0) {
             return Err(EngineError::Config(format!("window size must be non-zero, got {:?}", self.size)));
         }
-        if self.threads == Some(0) {
+        if self.threads == Threads::Fixed(0) {
             return Err(EngineError::Config("threads must be >= 1".to_string()));
         }
         Ok(())
@@ -191,7 +207,7 @@ mod tests {
     #[test]
     fn validate_rejects_zero_threads() {
         let mut c = EngineConfig::default();
-        c.threads = Some(0);
+        c.threads = Threads::Fixed(0);
         assert!(c.validate().is_err());
     }
 

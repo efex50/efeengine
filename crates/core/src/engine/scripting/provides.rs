@@ -35,7 +35,7 @@ fn align8(v: u64) -> u64 {
 }
 
 fn info(host: &ScriptHost, id: ModuleId, namespace: &str, name: &str) -> Result<Info, Trap> {
-    let slot = host.modules.get(id.0 as usize).ok_or_else(|| Trap::Host(format!("module {namespace} does not exist")))?;
+    let slot = host.slot_checked(id).map_err(|e| Trap::Host(format!("module {namespace}: {e}")))?;
     if !slot.loaded {
         return Err(Trap::Host(format!("module {} unloaded", slot.name)));
     }

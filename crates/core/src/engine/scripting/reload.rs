@@ -68,8 +68,8 @@ impl Scripting {
     /// or use an event of it), or declare it in their manifest.
     fn direct_dependents(&self, idx: usize) -> Vec<usize> {
         let mut v = self.dependents_of(idx);
-        let name = &self.host.modules[idx].name;
-        for (j, m) in self.host.modules.iter().enumerate() {
+        let name = &self.modules[idx].name;
+        for (j, m) in self.modules.iter().enumerate() {
             if j != idx && m.loaded && !v.contains(&j) && m.package.as_ref().is_some_and(|p| p.manifest.dependencies.iter().any(|d| d.id == *name)) {
                 v.push(j);
             }
@@ -106,9 +106,9 @@ impl Scripting {
         let mut all: Vec<usize> = self.dependents_closure(idx).into_iter().collect();
         all.push(idx);
         all.sort_unstable_by(|a, b| b.cmp(a));
-        let games: Vec<String> = all.iter().filter(|&&i| self.host.modules[i].package.is_none()).map(|&i| self.host.modules[i].name.clone()).collect();
+        let games: Vec<String> = all.iter().filter(|&&i| self.modules[i].package.is_none()).map(|&i| self.modules[i].name.clone()).collect();
         if !games.is_empty() {
-            return Err(ScriptError::Needed { module: self.host.modules[idx].name.clone(), by: games }.into());
+            return Err(ScriptError::Needed { module: self.modules[idx].name.clone(), by: games }.into());
         }
         let mut out = Vec::new();
         for i in all {
@@ -122,20 +122,20 @@ impl Scripting {
     /// reported in `failed`.
     pub(crate) fn unload_mods(&mut self, res: &mut Resources, types: &mut TypeRegistry) -> UnloadReport {
         let mut report = UnloadReport::default();
-        for idx in (0..self.host.modules.len()).rev() {
-            let slot = &self.host.modules[idx];
+        for idx in (0..self.modules.len()).rev() {
+            let slot = &self.modules[idx];
             if !slot.loaded || slot.package.is_none() {
                 continue;
             }
             let by = self.direct_dependents(idx);
             if !by.is_empty() {
-                let e = ScriptError::Needed { module: slot.name.clone(), by: by.iter().map(|&j| self.host.modules[j].name.clone()).collect() };
+                let e = ScriptError::Needed { module: slot.name.clone(), by: by.iter().map(|&j| self.modules[j].name.clone()).collect() };
                 report.failed.push((slot.name.clone(), e.into()));
                 continue;
             }
             match self.unload_swap(idx, res, types) {
                 Ok(name) => report.unloaded.push(name),
-                Err(e) => report.failed.push((self.host.modules[idx].name.clone(), e.into())),
+                Err(e) => report.failed.push((self.modules[idx].name.clone(), e.into())),
             }
         }
         report
@@ -167,12 +167,12 @@ impl Scripting {
             affected.insert(t.idx);
             affected.extend(self.dependents_closure(t.idx));
         }
-        if let Some(&i) = affected.iter().find(|&&i| self.host.modules[i].package.is_none()) {
-            let target = targets.first().map(|t| self.host.modules[t.idx].name.clone()).unwrap_or_default();
-            let name = self.host.modules[i].name.clone();
+        if let Some(&i) = affected.iter().find(|&&i| self.modules[i].package.is_none()) {
+            let target = targets.first().map(|t| self.modules[t.idx].name.clone()).unwrap_or_default();
+            let name = self.modules[i].name.clone();
             return Err((format!("`{name}` is a game module that depends on `{target}` and cannot be reloaded with it"), true));
         }
-        let names: BTreeMap<usize, String> = affected.iter().map(|&i| (i, self.host.modules[i].name.clone())).collect();
+        let names: BTreeMap<usize, String> = affected.iter().map(|&i| (i, self.modules[i].name.clone())).collect();
         let affected_names: BTreeSet<&String> = names.values().collect();
 
         // Targets that need nothing that is being replaced are built now: a broken new
@@ -196,7 +196,7 @@ impl Scripting {
         let mut saved: Vec<Saved> = Vec::new();
         for &i in &affected {
             let id = ModuleId(i as u32);
-            let built = self.host.modules[i].package.as_ref().map(|p| p.rebuilt()).expect("checked: a package");
+            let built = self.modules[i].package.as_ref().map(|p| p.rebuilt()).expect("checked: a package");
             let origin = self.origins.iter().position(|o| o.id == id).map(|p| self.origins.remove(p));
             saved.push(Saved { idx: i, name: names[&i].clone(), built, origin });
         }
@@ -396,7 +396,7 @@ impl Scripting {
                 continue;
             };
             let module = ModuleId(idx as u32);
-            if self.host.modules[idx].package.as_ref().is_some_and(|p| p.hash == c.hash) {
+            if self.modules[idx].package.as_ref().is_some_and(|p| p.hash == c.hash) {
                 report.skipped.push((c.label, module));
             } else if reload {
                 changed.push(c);
@@ -409,7 +409,7 @@ impl Scripting {
         let mut removed: Vec<(usize, String)> = Vec::new();
         if reload {
             for o in &self.origins {
-                let id = &self.host.modules[o.id.0 as usize].name;
+                let id = &self.modules[o.id.0 as usize].name;
                 let relisted = changed.iter().chain(&fresh).any(|c| c.manifest.id == *id);
                 if self.is_loaded(o.id) && !relisted && listed.get(o.source).is_some_and(|l| !l.contains(&o.label)) {
                     removed.push((o.id.0 as usize, o.label.clone()));
@@ -421,7 +421,7 @@ impl Scripting {
         // One resolve over the candidates and the mods that stay as they are.
         let n_changed = changed.len();
         let all: Vec<Cand> = changed.into_iter().chain(fresh).collect();
-        let leaving: BTreeSet<String> = removed.iter().map(|(i, _)| self.host.modules[*i].name.clone()).collect();
+        let leaving: BTreeSet<String> = removed.iter().map(|(i, _)| self.modules[*i].name.clone()).collect();
         let loaded = self.loaded_packages();
         let loaded_refs: Vec<(&str, &efemod::Version)> = loaded
             .iter()
@@ -538,7 +538,7 @@ impl Scripting {
             let (b, _) = build(self)?;
             return Ok(Reloaded::Loaded(self.load_package_item(b, res)?));
         };
-        if self.host.modules[idx].package.as_ref().is_some_and(|p| p.hash == hash) {
+        if self.modules[idx].package.as_ref().is_some_and(|p| p.hash == hash) {
             return Ok(Reloaded::Unchanged(ModuleId(idx as u32)));
         }
         let target = Target { idx, label: label.to_string(), deps: manifest.dependencies.iter().map(|d| d.id.clone()).collect(), source: None, build };

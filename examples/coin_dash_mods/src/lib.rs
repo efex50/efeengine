@@ -232,16 +232,16 @@ impl AssetHandler for PngTextures {
 
 /// The engine does not know which entities a mod spawned, so entities that show a texture freed
 /// by an unloaded mod are despawned here.
-pub fn sweep_orphans(ctx: &mut Ctx<'_>) {
-    let Some(freed) = ctx.resources.get_mut::<Freed>() else { return };
+pub fn sweep_orphans(ctx: &ParCtx<'_>) {
+    let Some(mut freed) = ctx.try_res_mut::<Freed>() else { return };
     if freed.0.is_empty() {
         return;
     }
     let ids: Vec<u32> = std::mem::take(&mut freed.0);
     let orphans: Vec<Entity> =
-        ctx.world.query::<(Entity, &Sprite)>().iter().filter(|(_, s)| ids.contains(&s.texture.id)).map(|(e, _)| e).collect();
+        ctx.query::<(Entity, &Sprite)>().iter().filter(|(_, s)| ids.contains(&s.texture.id)).map(|(e, _)| e).collect();
     for e in &orphans {
-        ctx.commands.despawn(*e);
+        ctx.commands().despawn(*e);
     }
     global_info(&format!("[{GAME}] despawned {} entities that showed freed textures", orphans.len()));
 }
@@ -283,7 +283,11 @@ pub fn setup(engine: &mut Engine) -> Game {
         Camera { zoom: CAMERA_ZOOM, clear_color: [0.02, 0.03, 0.05, 1.0], ..Camera::orthographic_2d() },
         Transform::default(),
     ));
-    engine.add_system(Stage::Update, sweep_orphans);
+    engine.add_par_system(
+        Stage::Update,
+        Access::new().named("sweep_orphans").res_mut::<Freed>().read::<Sprite>(),
+        sweep_orphans,
+    );
     game
 }
 

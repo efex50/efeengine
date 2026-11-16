@@ -115,8 +115,9 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
     });
 
     // ---- sprites ----
+    {
     let textures = cx.resources.get::<Textures>();
-    let tex_size = |h: TextureHandle| -> Option<(u32, u32)> { textures.and_then(|t| t.size(h)) };
+    let tex_size = |h: TextureHandle| -> Option<(u32, u32)> { textures.as_ref().and_then(|t| t.size(h)) };
     for (e, s, g, t, v) in cx
         .world
         .query::<(Entity, &Sprite, Option<&GlobalTransform>, Option<&Transform>, Option<&Visibility>)>()
@@ -146,6 +147,7 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
             layer: s.layer,
             flip: s.flip,
         });
+    }
     }
     frame.sprites.sort_by_key(|s| (s.layer, s.entity.id()));
 

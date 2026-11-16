@@ -211,7 +211,7 @@ impl Scripting {
             return Err(ScriptError::InvalidName(name.to_string()));
         }
         let taken = name == super::api_engine::OWNER
-            || self.host.modules.iter().any(|m| m.loaded && m.name == name)
+            || self.modules.iter().any(|m| m.loaded && m.name == name)
             || self
                 .registry
                 .namespaces()
@@ -227,7 +227,7 @@ impl Scripting {
         let doc = doc.unwrap_or_else(|| default_doc(name));
         // The id the slot will get: trampolines capture it. The slot is pushed only after the
         // registration succeeded, so a failed load consumes no id and keeps nothing.
-        let id = ModuleId(self.host.modules.len() as u32);
+        let id = ModuleId(self.modules.len() as u32);
         let owned_before = self.owns_anything(name);
         if let Some(iface) = &module.data().interface {
             self.register_interface(id, name, version, &doc, iface)?;
@@ -244,7 +244,7 @@ impl Scripting {
                 }
             }
         }
-        self.host.modules.push(ModuleSlot {
+        self.modules.push(ModuleSlot {
             name: name.to_string(),
             module,
             instance: Some(instance),
@@ -255,6 +255,9 @@ impl Scripting {
             remaining: budget,
             allowed,
             pending_init: true,
+            rng: super::host::seed_for(name),
+            spawn_pool: Default::default(),
+            pool_size: super::host::MIN_POOL,
             doc,
             package: None,
             #[cfg(not(target_family = "wasm"))]
@@ -403,9 +406,8 @@ impl Scripting {
     /// Indices of the loaded modules (other than `idx`) that depend on module `idx`: they
     /// import from a namespace the module owns, or copy a struct it owns.
     pub(crate) fn dependents_of(&self, idx: usize) -> Vec<usize> {
-        let Some(owner) = self.host.modules.get(idx).map(|m| m.name.as_str()) else { return Vec::new() };
-        self.host
-            .modules
+        let Some(owner) = self.modules.get(idx).map(|m| m.name.as_str()) else { return Vec::new() };
+        self.modules
             .iter()
             .enumerate()
             .filter(|(j, m)| *j != idx && m.loaded && self.depends_on(m, owner))
@@ -421,7 +423,7 @@ impl Scripting {
     }
 
     fn names_of(&self, idxs: &[usize]) -> Vec<String> {
-        idxs.iter().map(|&j| self.host.modules[j].name.clone()).collect()
+        idxs.iter().map(|&j| self.modules[j].name.clone()).collect()
     }
 
     /// Unload module `id`: its instance is dropped and everything it registered
@@ -431,7 +433,7 @@ impl Scripting {
     /// is the public path (it also drops component types owned by the module).
     pub(crate) fn unload(&mut self, id: ModuleId) -> Result<String, ScriptError> {
         let idx = id.0 as usize;
-        let slot = self.host.modules.get(idx).filter(|m| m.loaded).ok_or(ScriptError::NoSuchModule(id))?;
+        let slot = self.modules.get(idx).filter(|m| m.loaded).ok_or(ScriptError::NoSuchModule(id))?;
         let by = self.dependents_of(idx);
         if !by.is_empty() {
             return Err(ScriptError::Needed { module: slot.name.clone(), by: self.names_of(&by) });
@@ -444,7 +446,7 @@ impl Scripting {
     /// names. If one removal fails, the ones before it stay unloaded.
     pub(crate) fn unload_cascade(&mut self, id: ModuleId) -> Result<Vec<(ModuleId, String)>, ScriptError> {
         let root = id.0 as usize;
-        self.host.modules.get(root).filter(|m| m.loaded).ok_or(ScriptError::NoSuchModule(id))?;
+        self.modules.get(root).filter(|m| m.loaded).ok_or(ScriptError::NoSuchModule(id))?;
         let mut set = vec![root];
         let mut i = 0;
         while i < set.len() {
@@ -465,9 +467,9 @@ impl Scripting {
     }
 
     pub(crate) fn unload_now(&mut self, idx: usize) -> Result<String, ScriptError> {
-        let name = self.host.modules[idx].name.clone();
+        let name = self.modules[idx].name.clone();
         self.registry.unregister_owner(&name)?;
-        let slot = &mut self.host.modules[idx];
+        let slot = &mut self.modules[idx];
         slot.loaded = false;
         slot.instance = None;
         slot.package = None;
@@ -494,14 +496,14 @@ impl Scripting {
     /// its structs.
     pub(crate) fn reload_module(&mut self, idx: usize, module: Module, version: u32) -> Result<(), ScriptError> {
         let (name, allowed, old_module, old_version, doc) = {
-            let s = &self.host.modules[idx];
+            let s = &self.modules[idx];
             (s.name.clone(), s.allowed.clone(), s.module.clone(), s.version, s.doc.clone())
         };
         let (old_if, new_if) = (old_module.data().interface.as_ref(), module.data().interface.as_ref());
         if new_if.is_some() && allowed.is_none() {
             return Err(ScriptError::NotAMod(name));
         }
-        let memory_pages = self.host.modules[idx].memory_pages;
+        let memory_pages = self.modules[idx].memory_pages;
         let (mut instance, relink) = self.link(&name, &module, allowed.as_deref(), memory_pages, version)?;
         if old_if.is_some() || new_if.is_some() {
             let refuse = |reasons: Vec<String>| ScriptError::ReloadRefused { module: name.clone(), reasons };
@@ -515,7 +517,7 @@ impl Scripting {
                 ));
             }
             for &d in &deps {
-                let dm = &self.host.modules[d];
+                let dm = &self.modules[d];
                 let dd = dm.module.data();
                 for imp in dd.imports.iter().filter(|i| i.namespace == name) {
                     let want = dd.types.get(imp.type_idx as usize);
@@ -603,7 +605,7 @@ impl Scripting {
                 }
             }
         }
-        let slot = &mut self.host.modules[idx];
+        let slot = &mut self.modules[idx];
         slot.module = module;
         slot.instance = Some(instance);
         slot.version = version;
@@ -641,7 +643,7 @@ impl Scripting {
         let mtime = std::fs::metadata(&path)
             .and_then(|m| m.modified())
             .map_err(|e| ScriptError::Io(format!("{}: {e}", path.display())))?;
-        let slot = self.host.modules.get_mut(id.0 as usize).filter(|m| m.loaded).ok_or(ScriptError::NoSuchModule(id))?;
+        let slot = self.modules.get_mut(id.0 as usize).filter(|m| m.loaded).ok_or(ScriptError::NoSuchModule(id))?;
         slot.watch = Some(super::host::Watch { package: false, source: false, path, mtime: Some(mtime) });
         Ok(())
     }
@@ -656,15 +658,15 @@ impl Scripting {
     pub fn watch_source(&mut self, id: ModuleId, path: impl AsRef<Path>) -> Result<(), ScriptError> {
         let path = path.as_ref().to_path_buf();
         let mtime = newest_efa_mtime(&path).ok_or_else(|| ScriptError::Io(format!("{}: not readable", path.display())))?;
-        let slot = self.host.modules.get_mut(id.0 as usize).filter(|m| m.loaded).ok_or(ScriptError::NoSuchModule(id))?;
+        let slot = self.modules.get_mut(id.0 as usize).filter(|m| m.loaded).ok_or(ScriptError::NoSuchModule(id))?;
         slot.watch = Some(super::host::Watch { package: false, source: true, path, mtime: Some(mtime) });
         Ok(())
     }
 
     /// Check the watched files.
     fn check_watches(&mut self, reloaded: &mut Vec<ModuleId>, res: &mut Resources) {
-        for idx in 0..self.host.modules.len() {
-            let Some(w) = self.host.modules[idx].watch.as_ref().filter(|_| self.host.modules[idx].loaded) else { continue };
+        for idx in 0..self.modules.len() {
+            let Some(w) = self.modules[idx].watch.as_ref().filter(|_| self.modules[idx].loaded) else { continue };
             let path = w.path.clone();
             let seen = w.mtime;
             let is_source = w.source;
@@ -677,10 +679,10 @@ impl Scripting {
             if Some(m) == seen {
                 continue;
             }
-            if let Some(w) = self.host.modules[idx].watch.as_mut() {
+            if let Some(w) = self.modules[idx].watch.as_mut() {
                 w.mtime = Some(m);
             }
-            let name = self.host.modules[idx].name.clone();
+            let name = self.modules[idx].name.clone();
             let ok = if is_source {
                 match self.reload_source(idx, &path) {
                     Ok(()) => {
@@ -692,7 +694,7 @@ impl Scripting {
                         false
                     }
                 }
-            } else if self.host.modules[idx].watch.as_ref().is_some_and(|w| w.package) {
+            } else if self.modules[idx].watch.as_ref().is_some_and(|w| w.package) {
                 let r = self.reload_package(idx, &path, res);
                 self.log_package_reload(&name, &path, r)
             } else {
@@ -723,7 +725,7 @@ impl Scripting {
             .cache
             .compile(&game, &root, &files, &index, &efa::asm::AsmOptions::default())
             .map_err(|d| ScriptError::Io(format!("{display}: {d}")))?;
-        let version = self.host.modules[idx].version;
+        let version = self.modules[idx].version;
         self.reload_module(idx, module, version)
     }
 
@@ -735,7 +737,7 @@ impl Scripting {
     fn reload(&mut self, idx: usize, path: &Path) -> Result<(), ScriptError> {
         let bytes = std::fs::read(path).map_err(|e| ScriptError::Io(format!("{}: {e}", path.display())))?;
         let module = self.cache.decode(&bytes).map_err(ScriptError::Load)?;
-        let version = self.host.modules[idx].version;
+        let version = self.modules[idx].version;
         self.reload_module(idx, module, version)
     }
 }

@@ -141,6 +141,9 @@ Goal: games run their own code each frame, with time, input and resources availa
   - Send Kill to dedicated workers on drop.
   - Don't panic when `set_wasmjs_path` was never called.
   - Keep wgpu, SDL and DOM objects off the pool.
+- [x] 2.8 **[S] Hybrid parallel scheduling.** _Done: `engine/parallel.rs` (`Executor`, `Access`, `ParCtx`), `Engine::add_par_system`, `Threads` / `Engine::set_threads` / `Message::SetThreads`, par `velocity_system` and `propagate_transforms`, script lanes with buffered writes, spawn pools and `ScriptStats`; resources, events and host closures are `Send + Sync`. A frame with `Threads::Single` and `Threads::Fixed(n)` gives a byte-identical world (`tests/parallel.rs`); benchmark in `tests/parallel_bench.rs`; coin_dash movement and collisions are par systems._
+  - Structure goes through `Commands`, Rust data through declared `Access`, scripts through per-lane buffers merged in a fixed order.
+  - Docs: `docs/THREADING.md` (user guide), `docs/PARALLEL_SPEC.md` (contract and deviations).
 
 ## Phase 3: World with hecs
 

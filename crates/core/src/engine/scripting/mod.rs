@@ -23,6 +23,7 @@ mod system;
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
+use std::sync::Arc;
 
 use efevm::{
     Caller, HostFn, HostOk, HostRegistry, LinkError, LoadError as VmLoadError, EventDesc, RegistryError, Results, StructDesc, Args, Trap,
@@ -37,6 +38,20 @@ pub use load::{AssetHandler, LoadError, LoadInput, Loaded, ModBody, ModItem, Mod
 pub use mods::ModOptions;
 pub use packages::{DefaultPolicy, Grant, LoadReport, ModError, ModPolicy, ModRequest, PackageInfo, Reloaded, UnloadReport};
 pub use system::Script;
+pub(crate) use host::ModuleSlot;
+
+// Send audit (docs/PARALLEL_SPEC.md 7.1): scripts run on worker threads, so these must stay
+// thread-safe. A `Rc`, `RefCell` or `Cell` added to any of them fails to compile here.
+const _: fn() = || {
+    fn send<T: Send>() {}
+    fn sync<T: Sync>() {}
+    send::<efevm::Instance<ScriptHost>>();
+    send::<efevm::Module>();
+    sync::<efevm::Module>();
+    sync::<efevm::HostRegistry<ScriptHost>>();
+    sync::<efevm::Imports<ScriptHost>>();
+    send::<ScriptHost>();
+};
 pub(crate) use system::script_system;
 
 use crate::engine::{input::InputState, time::Time, types::TypeRegistry};
@@ -181,11 +196,37 @@ pub struct ModuleInfo {
 
 const HISTORY: usize = 256;
 
+/// What the most recent run of scripts did (see [`Scripting::stats`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScriptStats {
+    /// `(entity, component)` pairs written by more than one lane (the later lane won).
+    pub write_conflicts: u64,
+    /// `engine.world.spawn` calls refused because a module's pool was empty.
+    pub spawn_overflows: u64,
+    /// Number of lanes that ran.
+    pub lanes: usize,
+    /// Script events dropped over the per-frame cap.
+    pub dropped_events: usize,
+}
+
 /// The scripting runtime of an engine: the host registry (the API index), the host state and
 /// the loaded modules.
 pub struct Scripting {
     pub(crate) registry: HostRegistry<ScriptHost>,
-    pub(crate) host: ScriptHost,
+    /// Every module slot, by module id. During the script phase the slots of a lane live in the
+    /// lane's [`ScriptHost`] and come back at the merge.
+    pub(crate) modules: Vec<host::ModuleSlot>,
+    /// Log lines of the current frame, not yet emitted.
+    logs: Vec<LogLine>,
+    /// Script events sent in the current frame (after the merge), not yet sent to the engine.
+    events_out: Vec<ScriptEvent>,
+    /// Commands of the merged lanes of the current frame, appended to the stage by `leave`.
+    pending: crate::engine::commands::Commands,
+    /// The snapshot between `enter` and `leave`.
+    frame: Option<host::FrameView>,
+    /// `TypeRegistry` copy shared with the snapshot, refreshed when the registry changes.
+    types: Arc<TypeRegistry>,
+    stats: ScriptStats,
     history: VecDeque<LogLine>,
     pub(crate) policy: Box<dyn ModPolicy>,
     pub(crate) warned: HashSet<String>,
@@ -195,8 +236,6 @@ pub struct Scripting {
     pub(crate) committed: Vec<(ModuleId, usize)>,
     pub(crate) sources: Vec<Box<dyn ModSource>>,
     pub(crate) origins: Vec<packages::Origin>,
-    /// Script events dropped (over the per-frame cap) in the most recent run of scripts.
-    dropped_last: usize,
     pub(crate) next_watch_check: f64,
 }
 
@@ -206,7 +245,13 @@ impl Scripting {
         api_engine::register_engine_api(&mut registry).expect("the engine API registers");
         Scripting {
             registry,
-            host: ScriptHost::new(),
+            modules: Vec::new(),
+            logs: Vec::new(),
+            events_out: Vec::new(),
+            pending: crate::engine::commands::Commands::new(),
+            frame: None,
+            types: Arc::new(TypeRegistry::new()),
+            stats: ScriptStats::default(),
             history: VecDeque::new(),
             policy: Box::new(DefaultPolicy),
             warned: HashSet::new(),
@@ -215,7 +260,6 @@ impl Scripting {
             committed: Vec::new(),
             sources: Vec::new(),
             origins: Vec::new(),
-            dropped_last: 0,
             next_watch_check: 0.0,
         }
     }
@@ -288,7 +332,13 @@ impl Scripting {
     /// the most recent run of scripts (one frame, or one `init` pass outside a frame). The count
     /// is logged once per such run as a warning.
     pub fn dropped_events_last_frame(&self) -> usize {
-        self.dropped_last
+        self.stats.dropped_events
+    }
+
+    /// What the most recent run of scripts (one frame, or one `init` pass outside a frame) did:
+    /// write conflicts, spawn pool overflows, lanes and dropped events.
+    pub fn stats(&self) -> ScriptStats {
+        self.stats
     }
 
     /// Put a struct or component layout in the index (called by `Engine::register_*`).
@@ -302,8 +352,7 @@ impl Scripting {
 
     /// Summaries of every module slot, loaded or not, in id order.
     pub fn modules(&self) -> Vec<ModuleInfo> {
-        self.host
-            .modules
+        self.modules
             .iter()
             .enumerate()
             .map(|(i, m)| ModuleInfo { id: ModuleId(i as u32), name: m.name.clone(), loaded: m.loaded, version: m.version, budget: m.budget })
@@ -312,16 +361,16 @@ impl Scripting {
 
     /// The id of the loaded module called `name`.
     pub fn module_id(&self, name: &str) -> Option<ModuleId> {
-        self.host.modules.iter().position(|m| m.loaded && m.name == name).map(|i| ModuleId(i as u32))
+        self.modules.iter().position(|m| m.loaded && m.name == name).map(|i| ModuleId(i as u32))
     }
 
     pub fn is_loaded(&self, id: ModuleId) -> bool {
-        self.host.modules.get(id.0 as usize).is_some_and(|m| m.loaded)
+        self.modules.get(id.0 as usize).is_some_and(|m| m.loaded)
     }
 
     /// Change a module's per-frame budget (VM units).
     pub fn set_budget(&mut self, id: ModuleId, units: u64) -> Result<(), ScriptError> {
-        let m = self.host.modules.get_mut(id.0 as usize).ok_or(ScriptError::NoSuchModule(id))?;
+        let m = self.modules.get_mut(id.0 as usize).ok_or(ScriptError::NoSuchModule(id))?;
         m.budget = units;
         Ok(())
     }
@@ -333,7 +382,7 @@ impl Scripting {
 
     /// Pending log lines: moves them to the history and returns them.
     pub(crate) fn drain_logs(&mut self) -> Vec<LogLine> {
-        let out = std::mem::take(&mut self.host.logs);
+        let out = std::mem::take(&mut self.logs);
         for l in &out {
             if self.history.len() == HISTORY {
                 self.history.pop_front();
@@ -344,11 +393,13 @@ impl Scripting {
     }
 
     pub(crate) fn take_events(&mut self) -> Vec<ScriptEvent> {
-        std::mem::take(&mut self.host.events_out)
+        std::mem::take(&mut self.events_out)
     }
 
     pub(crate) fn log(&mut self, level: LogLevel, text: impl Into<String>) {
-        self.host.log(level, text);
+        if self.logs.len() < host::MAX_LOG_LINES {
+            self.logs.push(LogLine { level, text: text.into() });
+        }
     }
 
     pub(crate) fn warn_once(&mut self, key: String, text: String) {
@@ -357,9 +408,9 @@ impl Scripting {
         }
     }
 
-    /// Move the world and this frame's data into the host.
+    /// Move the world and this frame's data into the snapshot the lanes will share.
     pub(crate) fn enter(&mut self, world: &mut World, types: &TypeRegistry, time: &Time, input: &InputState, events: Vec<ScriptEvent>) {
-        self.host.event_sizes = self
+        let event_sizes = self
             .registry
             .events()
             .map(|e| {
@@ -367,29 +418,36 @@ impl Scripting {
                 (e.qualified(), size)
             })
             .collect();
-        self.host.world = std::mem::take(world);
-        if self.host.types.generation() != types.generation() {
-            self.host.types = types.clone();
+        if self.types.generation() != types.generation() {
+            self.types = Arc::new(types.clone());
         }
-        self.host.time.clone_from(time);
-        self.host.input.clone_from(input);
-        self.host.events_in = events;
+        self.frame = Some(host::FrameView {
+            world: std::mem::take(world),
+            types: self.types.clone(),
+            time: time.clone(),
+            input: input.clone(),
+            events_in: events,
+            event_sizes,
+            module_names: Vec::new(),
+            jobs: Vec::new(),
+        });
     }
 
-    /// Move the world back and append the host's commands to `commands`.
+    /// Move the world back and append the merged lanes' commands to `commands`.
     pub(crate) fn leave(&mut self, world: &mut World, commands: &mut crate::engine::commands::Commands) {
-        *world = std::mem::take(&mut self.host.world);
-        commands.append(&mut self.host.commands);
-        self.host.events_in.clear();
-        self.dropped_last = std::mem::take(&mut self.host.dropped_events);
-        if self.dropped_last > 0 {
-            self.log(LogLevel::Warn, format!("{} script events dropped this frame (cap {})", self.dropped_last, host::MAX_EVENTS));
+        if let Some(f) = self.frame.take() {
+            *world = f.world;
+        }
+        commands.append(&mut self.pending);
+        if self.stats.dropped_events > 0 {
+            let n = self.stats.dropped_events;
+            self.log(LogLevel::Warn, format!("{n} script events dropped this frame (cap {})", host::MAX_EVENTS));
         }
     }
 
     /// Whether the script system has anything to do.
     pub(crate) fn is_active(&self) -> bool {
-        self.host.modules.iter().any(|m| m.loaded)
+        self.modules.iter().any(|m| m.loaded)
     }
 }
 

@@ -91,7 +91,7 @@ impl<'a, T> IntoIterator for &'a Events<T> {
     }
 }
 
-impl<T: 'static> Events<T> {
+impl<T: Send + Sync + 'static> Events<T> {
     /// A `'static` empty queue, returned by readers when no events of type `T` exist.
     pub fn empty() -> &'static Events<T> {
         // inline const promotion; the value is never dropped
@@ -99,13 +99,13 @@ impl<T: 'static> Events<T> {
     }
 }
 
-trait AnyEvents {
+trait AnyEvents: Send + Sync {
     fn update(&mut self);
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-impl<T: 'static> AnyEvents for Events<T> {
+impl<T: Send + Sync + 'static> AnyEvents for Events<T> {
     fn update(&mut self) {
         Events::update(self);
     }
@@ -134,19 +134,19 @@ impl EventRegistry {
     }
 
     /// Register event type `T` (no-op if already registered).
-    pub fn register<T: 'static>(&mut self) {
+    pub fn register<T: Send + Sync + 'static>(&mut self) {
         self.map
             .entry(TypeId::of::<T>())
             .or_insert_with(|| Box::new(Events::<T>::new()));
     }
 
     /// Returns `true` if event type `T` is registered.
-    pub fn is_registered<T: 'static>(&self) -> bool {
+    pub fn is_registered<T: Send + Sync + 'static>(&self) -> bool {
         self.map.contains_key(&TypeId::of::<T>())
     }
 
     /// Returns a reference to the event queue for type `T`, or `None` if not registered.
-    pub fn get<T: 'static>(&self) -> Option<&Events<T>> {
+    pub fn get<T: Send + Sync + 'static>(&self) -> Option<&Events<T>> {
         self.map
             .get(&TypeId::of::<T>())
             .and_then(|boxed| boxed.as_any().downcast_ref::<Events<T>>())
@@ -154,12 +154,12 @@ impl EventRegistry {
 
     /// Returns a reference to the event queue for type `T`, or [`Events::<T>::empty()`] when
     /// `T` was never registered.
-    pub fn get_or_empty<T: 'static>(&self) -> &Events<T> {
+    pub fn get_or_empty<T: Send + Sync + 'static>(&self) -> &Events<T> {
         self.get::<T>().unwrap_or_else(|| Events::<T>::empty())
     }
 
     /// Returns a mutable reference to the event queue for type `T`, registering `T` on first use.
-    pub fn get_mut<T: 'static>(&mut self) -> &mut Events<T> {
+    pub fn get_mut<T: Send + Sync + 'static>(&mut self) -> &mut Events<T> {
         let boxed = self
             .map
             .entry(TypeId::of::<T>())
@@ -171,7 +171,7 @@ impl EventRegistry {
     }
 
     /// Sends an event of type `T`, registering `T` on first send.
-    pub fn send<T: 'static>(&mut self, ev: T) {
+    pub fn send<T: Send + Sync + 'static>(&mut self, ev: T) {
         self.get_mut::<T>().send(ev);
     }
 

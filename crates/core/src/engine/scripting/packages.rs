@@ -293,7 +293,7 @@ impl Scripting {
 
     /// The package behind module `id`: `None` for game modules, bare mods and unloaded ones.
     pub fn package(&self, id: ModuleId) -> Option<&PackageInfo> {
-        self.host.modules.get(id.0 as usize).filter(|m| m.loaded).and_then(|m| m.package.as_ref())
+        self.modules.get(id.0 as usize).filter(|m| m.loaded).and_then(|m| m.package.as_ref())
     }
 
     /// An asset of the package behind module `id` (path without `assets/`).
@@ -303,8 +303,7 @@ impl Scripting {
 
     /// `(id, version)` of every loaded package.
     pub(crate) fn loaded_packages(&self) -> Vec<(String, Version)> {
-        self.host
-            .modules
+        self.modules
             .iter()
             .filter(|m| m.loaded)
             .filter_map(|m| m.package.as_ref().map(|p| (m.name.clone(), p.manifest.version.clone())))
@@ -322,7 +321,7 @@ impl Scripting {
 
     /// The id must not equal or prefix any registered namespace, nor be reserved.
     fn check_id_clash(&self, id: &str) -> Result<(), ModError> {
-        if self.host.modules.iter().any(|m| m.loaded && m.name == id) {
+        if self.modules.iter().any(|m| m.loaded && m.name == id) {
             return Err(ScriptError::NameTaken(id.to_string()).into());
         }
         if matches!(id, "engine" | "std" | "efe") {
@@ -438,7 +437,7 @@ impl Scripting {
 
     /// The loaded mod (a package, not a game module) with manifest id `id`.
     pub(crate) fn loaded_mod_idx(&self, id: &str) -> Option<usize> {
-        self.host.modules.iter().position(|m| m.loaded && m.name == id && m.package.is_some())
+        self.modules.iter().position(|m| m.loaded && m.name == id && m.package.is_some())
     }
 
     /// `AlreadyLoaded` when a mod with this id is loaded.
@@ -446,7 +445,7 @@ impl Scripting {
         match self.loaded_mod_idx(id) {
             None => Ok(()),
             Some(idx) => {
-                let same = self.host.modules[idx].package.as_ref().is_some_and(|p| p.hash == hash);
+                let same = self.modules[idx].package.as_ref().is_some_and(|p| p.hash == hash);
                 Err(ModError::AlreadyLoaded { id: id.to_string(), module: ModuleId(idx as u32), same_contents: same })
             }
         }
@@ -494,7 +493,7 @@ impl Scripting {
         };
         let id = self.load_mod_decoded(module, opts)?;
         let assets = self.commit_assets(id, &manifest, assets, routes, res);
-        self.host.modules[id.0 as usize].package = Some(PackageInfo { manifest, grant, assets, hash, source: label, retained });
+        self.modules[id.0 as usize].package = Some(PackageInfo { manifest, grant, assets, hash, source: label, retained });
         Ok(id)
     }
 
@@ -506,7 +505,7 @@ impl Scripting {
     pub(crate) fn reload_package_parsed(&mut self, idx: usize, b: Built, res: &mut Resources) -> Result<(), ModError> {
         let Built { pkg, label, hash } = b;
         let Package { manifest, module, module_bytes, assets, ignored } = pkg;
-        let name = self.host.modules[idx].name.clone();
+        let name = self.modules[idx].name.clone();
         if manifest.id != name {
             return Err(PackageError::Manifest(format!("id: the package is now `{}`, it was loaded as `{name}`", manifest.id)).into());
         }
@@ -514,7 +513,7 @@ impl Scripting {
         self.check_deps(&manifest)?;
         // Loaded dependents must accept the new version.
         for d in self.dependents_of(idx) {
-            let Some(p) = self.host.modules[d].package.as_ref() else { continue };
+            let Some(p) = self.modules[d].package.as_ref() else { continue };
             if let Some(dep) = p.manifest.dependencies.iter().find(|x| x.id == name)
                 && !dep.req.matches(&manifest.version)
             {
@@ -530,7 +529,7 @@ impl Scripting {
         let retained = Self::retain(&manifest, &module, module_bytes, &assets, &routes, ignored);
         let doc = manifest.namespace_doc();
         let version = manifest.api_version;
-        let slot = &mut self.host.modules[idx];
+        let slot = &mut self.modules[idx];
         let old = (
             std::mem::replace(&mut slot.allowed, Some(allowed)),
             std::mem::replace(&mut slot.budget, grant.budget),
@@ -539,16 +538,16 @@ impl Scripting {
         );
         match self.reload_module(idx, module, version) {
             Ok(()) => {
-                let slot = &mut self.host.modules[idx];
+                let slot = &mut self.modules[idx];
                 slot.remaining = slot.budget;
                 let id = ModuleId(idx as u32);
                 self.release_assets(id, res);
                 let assets = self.commit_assets(id, &manifest, assets, routes, res);
-                self.host.modules[idx].package = Some(PackageInfo { manifest, grant, assets, hash, source: label, retained });
+                self.modules[idx].package = Some(PackageInfo { manifest, grant, assets, hash, source: label, retained });
                 Ok(())
             }
             Err(e) => {
-                let slot = &mut self.host.modules[idx];
+                let slot = &mut self.modules[idx];
                 (slot.allowed, slot.budget, slot.memory_pages, slot.doc) = old;
                 Err(e.into())
             }
@@ -561,7 +560,7 @@ impl Scripting {
     fn folder_index(&self, m: &Manifest) -> Result<efevm::api::ApiIndex, ModError> {
         use efevm::api::ApiIndex;
         let full = self.registry.index();
-        let owners: BTreeSet<&str> = self.host.modules.iter().filter(|x| x.loaded).map(|x| x.name.as_str()).collect();
+        let owners: BTreeSet<&str> = self.modules.iter().filter(|x| x.loaded).map(|x| x.name.as_str()).collect();
         let mut game = ApiIndex { game: full.game.clone(), ..ApiIndex::default() };
         game.namespaces = full.namespaces.iter().filter(|n| !owners.contains(n.owner.as_str())).cloned().collect();
         let keep: BTreeSet<&str> = game.namespaces.iter().map(|n| n.name.as_str()).collect();
@@ -571,7 +570,7 @@ impl Scripting {
         let deps: Vec<ApiIndex> = m
             .dependencies
             .iter()
-            .filter_map(|d| self.host.modules.iter().find(|x| x.loaded && x.name == d.id))
+            .filter_map(|d| self.modules.iter().find(|x| x.loaded && x.name == d.id))
             .map(|x| efa::mod_folder::mod_index(&x.module, &x.name, x.version, &x.doc))
             .collect();
         let mut parts: Vec<&ApiIndex> = vec![&game];
@@ -702,7 +701,7 @@ impl Scripting {
             for (id, label) in targets {
                 let Some(pos) = items.iter().position(|i| i.label == label) else { continue };
                 let item = items.swap_remove(pos);
-                let name = self.host.modules[id.0 as usize].name.clone();
+                let name = self.modules[id.0 as usize].name.clone();
                 match self.reload_body(id.0 as usize, &label, item.body, res) {
                     Ok(kept) => {
                         if let Some(o) = self.origins.iter_mut().find(|o| o.id == id) {
@@ -724,9 +723,9 @@ impl Scripting {
     /// in load order) and reload it when its module bytes changed.
     #[cfg(feature = "efa")]
     fn rebuild_dependents(&mut self, root: ModuleId, reloaded: &mut Vec<ModuleId>, res: &mut Resources) {
-        let mut changed_ids = vec![self.host.modules[root.0 as usize].name.clone()];
-        for idx in 0..self.host.modules.len() {
-            let slot = &self.host.modules[idx];
+        let mut changed_ids = vec![self.modules[root.0 as usize].name.clone()];
+        for idx in 0..self.modules.len() {
+            let slot = &self.modules[idx];
             let Some(p) = slot.package.as_ref().filter(|_| slot.loaded) else { continue };
             if !p.manifest.dependencies.iter().any(|d| changed_ids.contains(&d.id)) {
                 continue;
@@ -740,7 +739,7 @@ impl Scripting {
             self.origins[oi].folder = Some((files, assets));
             match built {
                 Ok(b) => {
-                    if b.pkg.module.encode() == self.host.modules[idx].module.encode() {
+                    if b.pkg.module.encode() == self.modules[idx].module.encode() {
                         continue;
                     }
                     let r = self.reload_package_parsed(idx, b, res);
@@ -785,7 +784,7 @@ impl Scripting {
             };
         }
         self.watch(id, path)?;
-        if let Some(w) = self.host.modules[id.0 as usize].watch.as_mut() {
+        if let Some(w) = self.modules[id.0 as usize].watch.as_mut() {
             w.package = true;
         }
         Ok(())

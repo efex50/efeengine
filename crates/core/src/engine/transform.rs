@@ -8,28 +8,43 @@ use hecs::Entity;
 
 use crate::engine::components::{Children, GlobalTransform, Parent, Transform, Velocity};
 use crate::engine::render::RenderWarnings;
-use crate::engine::schedule::Ctx;
+use crate::engine::schedule::{Access, ParCtx};
 
-/// `FixedUpdate`: `position += linear * dt`, `rotation += angular * dt` with the fixed delta.
-pub fn velocity_system(cx: &mut Ctx<'_>) {
-    let dt = cx.time.fixed_delta();
-    for (t, v) in cx.world.query_mut::<(&mut Transform, &Velocity)>() {
-        t.position += v.linear * dt;
-        t.rotation += v.angular * dt;
-    }
+/// What [`velocity_system`] declares.
+pub(crate) fn velocity_access() -> Access {
+    Access::new().named("velocity").read::<Velocity>().write::<Transform>()
 }
 
-/// `PostUpdate`: compute every `GlobalTransform` from `Transform` and the `Parent` chain
+/// `FixedUpdate` (parallel): `position += linear * dt`, `rotation += angular * dt` with the fixed delta.
+pub fn velocity_system(cx: &ParCtx<'_>) {
+    let dt = cx.time.fixed_delta();
+    cx.par_for_each::<(&mut Transform, &Velocity), _>(1024, move |(t, v)| {
+        t.position += v.linear * dt;
+        t.rotation += v.angular * dt;
+    });
+}
+
+/// What [`propagate_transforms`] declares.
+pub(crate) fn propagate_access() -> Access {
+    Access::new()
+        .named("propagate_transforms")
+        .read::<Transform>()
+        .read::<Parent>()
+        .write::<GlobalTransform>()
+        .write::<Children>()
+        .res_mut::<RenderWarnings>()
+}
+
+/// `PostUpdate` (parallel): compute every `GlobalTransform` from `Transform` and the `Parent` chain
 /// (`global = parent_global * local`), inserting `GlobalTransform` where it is missing, and
 /// rebuild `Children`.
 ///
 /// A parent counts only if the entity is alive and has a `Transform`; otherwise the child is a
 /// root. A cycle is broken by making the entity the walk meets first (lowest id order) a root;
 /// it is logged once (`RenderWarnings::hierarchy_cycle`).
-pub fn propagate_transforms(cx: &mut Ctx<'_>) {
+pub fn propagate_transforms(cx: &ParCtx<'_>) {
     // nodes: every entity with a Transform, sorted by id for a deterministic result
     let mut nodes: Vec<(Entity, Affine2, Option<Entity>)> = cx
-        .world
         .query::<(Entity, &Transform, Option<&Parent>)>()
         .iter()
         .map(|(e, t, p)| (e, t.affine(), p.and_then(|p| p.entity())))
@@ -81,51 +96,51 @@ pub fn propagate_transforms(cx: &mut Ctx<'_>) {
             state[i] = 2;
         }
     }
-    if cycle && !cx.resources.get::<RenderWarnings>().is_some_and(|w| w.hierarchy_cycle) {
-        cx.resources.get_or_insert_with(RenderWarnings::default).hierarchy_cycle = true;
-        crate::global_warn("a Parent cycle was found; it was broken by treating one entity of it as a root");
-    }
-
-    // write GlobalTransform: update in place, insert where missing
-    let mut missing: Vec<(Entity, GlobalTransform)> = Vec::new();
-    for (i, (e, _, _)) in nodes.iter().enumerate() {
-        let g = GlobalTransform::from_affine(global[i]);
-        match cx.world.query_one_mut::<&mut GlobalTransform>(*e) {
-            Ok(slot) => *slot = g,
-            Err(_) => missing.push((*e, g)),
+    if cycle {
+        let mut warn = cx.res_mut::<RenderWarnings>();
+        if !warn.hierarchy_cycle {
+            warn.hierarchy_cycle = true;
+            crate::global_warn("a Parent cycle was found; it was broken by treating one entity of it as a root");
         }
     }
-    for (e, g) in missing {
-        let _ = cx.world.insert_one(e, g);
+
+    // write GlobalTransform: update in place, insert (through commands) where missing
+    for (i, (e, _, _)) in nodes.iter().enumerate() {
+        let g = GlobalTransform::from_affine(global[i]);
+        match cx.query_one::<&mut GlobalTransform>(*e).get() {
+            Ok(slot) => *slot = g,
+            Err(_) => cx.commands().insert(*e, g),
+        }
     }
 
     // rebuild Children (children are visited in id order, so each list is sorted)
-    let mut kids: HashMap<Entity, Vec<Entity>> = HashMap::new();
+    let mut kids: Vec<Vec<Entity>> = vec![Vec::new(); nodes.len()];
     for (i, p) in parent.iter().enumerate() {
         if let Some(p) = p {
-            kids.entry(nodes[*p].0).or_default().push(nodes[i].0);
+            kids[*p].push(nodes[i].0);
         }
     }
     let stale: Vec<Entity> = cx
-        .world
         .query::<(Entity, &Children)>()
         .iter()
-        .filter(|(e, _)| !kids.contains_key(e))
+        .filter(|(e, _)| index.get(e).is_none_or(|&i| kids[i].is_empty()))
         .map(|(e, _)| e)
         .collect();
     for e in stale {
-        let _ = cx.world.remove_one::<Children>(e);
+        cx.commands().remove::<Children>(e);
     }
-    for (p, list) in kids {
-        match cx.world.query_one_mut::<&mut Children>(p) {
+    for (i, list) in kids.into_iter().enumerate() {
+        if list.is_empty() {
+            continue;
+        }
+        let p = nodes[i].0;
+        match cx.query_one::<&mut Children>(p).get() {
             Ok(c) => {
                 if c.0 != list {
                     c.0 = list;
                 }
             }
-            Err(_) => {
-                let _ = cx.world.insert_one(p, Children(list));
-            }
+            Err(_) => cx.commands().insert(p, Children(list)),
         }
     }
 }

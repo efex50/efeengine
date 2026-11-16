@@ -25,7 +25,9 @@ raw-window-handle = "0.6.2"
 serde = { version = "1.0.228", features = ["derive"] }
 wgpu = "27.0.1"
 efeengine-macros = { path = "./macros" }
-flume = { version = "0.12.0", default-features = false }
+# `spin`: flume's internal channel lock is a spin lock. The std Mutex waits with Atomics.wait on wasm,
+# which throws on the browser main thread when a worker holds the lock during `send`.
+flume = { version = "0.12.0", default-features = false, features = ["spin"] }
 oneshot = "0.1.11"
 # ECS for the game world (ROADMAP Phase 3)
 hecs = "0.11.0"

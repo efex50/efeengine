@@ -153,6 +153,20 @@ impl KillGate {
     }
 }
 
+/// Lock a std `Mutex` without ever waiting in the OS: spin on `try_lock`. A contended std `Mutex`
+/// waits with `Atomics.wait` on wasm, which throws on the browser main thread. Use this for locks
+/// the main thread can take while another thread holds them (held only for very short sections).
+/// A poisoned lock is recovered.
+pub(crate) fn lock_nb<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    loop {
+        match m.try_lock() {
+            Ok(g) => return g,
+            Err(std::sync::TryLockError::Poisoned(e)) => return e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => std::hint::spin_loop(),
+        }
+    }
+}
+
 pub trait ThreadPoolTrait{
     fn new(cores:usize) -> Self;
     fn execute<F>(&self, f: F) where F: FnOnce() + Send + 'static;
@@ -216,6 +230,10 @@ pub fn global_pool_size() -> usize{
         },
     }
 }
+
+/// Tests that assert the exact global pool size hold this; `Executor::new` takes it while it grows the pool.
+#[cfg(test)]
+pub(crate) static POOL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct JobHandle<T>{
     rx:oneshot::Receiver<T>
@@ -336,8 +354,10 @@ mod tests {
 
     #[test]
     fn global_size_api() {
-        // Uses the global pool: keep this the only test touching it.
+        // Uses the global pool; `Executor::new` (which may grow it) takes the same lock in tests.
+        let _g = POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         init_global_pool(2);
+        set_global_pool_size(2); // the pool may already exist (and be larger) from other tests
         assert_eq!(global_pool_size(), 2);
         set_global_pool_size(0);
         assert_eq!(global_pool_size(), 1);

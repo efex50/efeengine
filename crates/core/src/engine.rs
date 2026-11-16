@@ -4,7 +4,7 @@ use once_cell::sync::{Lazy, OnceCell};
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::{debug_info, engine::{config::EngineConfig, error::EngineError, events::EventRegistry, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::Resources, schedule::{Ctx, EngineCommand, Commands, Schedule, Stage}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, window::WindowManager};
+use crate::{debug_info, engine::{config::{EngineConfig, Threads}, error::EngineError, events::EventRegistry, parallel::Executor, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::{Res, Resources}, schedule::{Access, Ctx, EngineCommand, Commands, ParCtx, Schedule, Stage}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, window::WindowManager};
 use crate::engine::components::{Camera, GlobalTransform, MeshHandle, Parent, Sprite, TextureHandle, Transform, Velocity, Visibility};
 use crate::engine::render::{self as rendering, gpu::GpuContext, ClearRenderer, RenderFrame, Renderer, Textures};
 use crate::{global_info, thread_pool::{init_global_pool, init_global_pool_auto}};
@@ -19,6 +19,7 @@ pub mod components;
 pub mod types;
 pub mod thread_pool;
 pub mod schedule;
+pub mod parallel;
 pub mod error;
 pub mod resources;
 pub mod events;
@@ -74,6 +75,17 @@ impl Default for WindowState {
     }
 }
 
+/// How many participants the scheduler uses for `threads`. `Auto` is the pool size (from the
+/// core count or `EFE_THREADS`), and `Single` headless.
+fn resolve_threads(threads: Threads, headless: bool) -> usize {
+    match threads {
+        Threads::Single => 1,
+        Threads::Fixed(n) => n.max(1),
+        Threads::Auto if headless => 1,
+        Threads::Auto => crate::thread_pool::global_pool_size().max(1),
+    }
+}
+
 pub struct EngineState{
     /// The game world (entities and components).
     pub world : hecs::World,
@@ -105,6 +117,8 @@ pub struct Engine{
     config: EngineConfig,
     events: EventRegistry,
     schedule: Schedule,
+    /// Runs the parallel batches of a stage.
+    exec: Executor,
     commands: Commands,
     /// `Startup` has run.
     started: bool,
@@ -158,8 +172,8 @@ impl Engine {
 
             // init thread pool
             match cfg.threads {
-                Some(n) => init_global_pool(n),
-                None => init_global_pool_auto(),
+                Threads::Fixed(n) => init_global_pool(n),
+                Threads::Auto | Threads::Single => init_global_pool_auto(),
             }
 
             #[cfg(target_family = "wasm")]
@@ -193,12 +207,13 @@ impl Engine {
         state.resources.insert(RenderFrame::default());
         state.resources.insert(rendering::RenderWarnings::default());
         let (msg_tx, msg_rx) = flume::unbounded();
+        let exec = Executor::new(resolve_threads(cfg.threads, headless));
         let mut schedule = Schedule::new();
         // The script system runs first in `Update`; game systems added later run after it.
         schedule.add(Stage::Update, Box::new(scripting::script_system));
         // Built-in systems: motion, hierarchy, render extract.
-        schedule.add(Stage::FixedUpdate, Box::new(transform::velocity_system));
-        schedule.add(Stage::PostUpdate, Box::new(transform::propagate_transforms));
+        schedule.add_par(Stage::FixedUpdate, transform::velocity_access(), Box::new(transform::velocity_system));
+        schedule.add_par(Stage::PostUpdate, transform::propagate_access(), Box::new(transform::propagate_transforms));
         schedule.add(Stage::RenderExtract, Box::new(rendering::render_extract));
 
         let mut engine = Self {
@@ -213,6 +228,7 @@ impl Engine {
             config: cfg,
             events: EventRegistry::new(),
             schedule,
+            exec,
             commands: Commands::default(),
             started: false,
             shut_down: false,
@@ -245,6 +261,28 @@ impl Engine {
     pub fn add_system(&mut self, stage: Stage, f: impl FnMut(&mut Ctx<'_>) + 'static) -> &mut Self {
         self.schedule.add(stage, Box::new(f));
         self
+    }
+
+    /// Add a parallel system to `stage`. `access` declares the components and resources it
+    /// reads and writes; systems whose accesses do not conflict run at the same time (see
+    /// `docs/THREADING.md`). The result is the same for every thread count.
+    pub fn add_par_system(&mut self, stage: Stage, access: Access, f: impl FnMut(&ParCtx<'_>) + Send + 'static) -> &mut Self {
+        let mut access = access;
+        access.set_default_name(std::any::type_name_of_val(&f));
+        self.schedule.add_par(stage, access, Box::new(f));
+        self
+    }
+
+    /// The current parallelism: the number of threads (the caller plus pool workers) that run
+    /// a parallel batch.
+    pub fn threads(&self) -> usize {
+        self.exec.threads()
+    }
+
+    /// Change the parallelism at runtime. The global pool grows if needed (never shrinks).
+    pub fn set_threads(&mut self, threads: Threads) {
+        self.config.threads = threads;
+        self.exec = Executor::new(resolve_threads(threads, self.config.headless));
     }
 
     /// Register component type `T` (owner `engine`); returns its id. This is the one way to
@@ -595,14 +633,19 @@ impl Engine {
         self.state.scripting.watch(id, path)
     }
 
+    /// What the most recent run of scripts did (write conflicts, spawn overflows, lanes, dropped events).
+    pub fn script_stats(&self) -> scripting::ScriptStats {
+        self.state.scripting.stats()
+    }
+
     /// Run the pending `init`s outside a frame (with the engine's world) and apply what they queued.
     fn run_script_inits(&mut self) {
         let events: Vec<ScriptEvent> = self.events.get_or_empty::<ScriptEvent>().iter().cloned().collect();
         {
-            let Engine { state, commands, .. } = self;
+            let Engine { state, commands, exec, .. } = self;
             let EngineState { world, types, input, time, scripting, .. } = state;
             scripting.enter(world, types, time, input, events);
-            scripting.run_inits();
+            scripting.run_inits(exec);
             scripting.leave(world, commands);
         }
         for ev in self.state.scripting.take_events() {
@@ -684,12 +727,12 @@ impl Engine {
     }
 
     /// Register event type `T` (it is also registered on first send).
-    pub fn add_event<T: 'static>(&mut self) -> &mut Self {
+    pub fn add_event<T: Send + Sync + 'static>(&mut self) -> &mut Self {
         self.events.register::<T>();
         self
     }
 
-    pub fn insert_resource<T: 'static>(&mut self, value: T) -> &mut Self {
+    pub fn insert_resource<T: Send + Sync + 'static>(&mut self, value: T) -> &mut Self {
         self.state.resources.insert(value);
         self
     }
@@ -703,7 +746,7 @@ impl Engine {
     }
 
     /// The texture store. Changes made here reach the renderer through `RenderFrame::textures`.
-    pub fn textures(&self) -> &Textures {
+    pub fn textures(&self) -> Res<'_, Textures> {
         self.state.resources.get::<Textures>().expect("Textures resource")
     }
 
@@ -712,7 +755,7 @@ impl Engine {
     }
 
     /// The last built [`RenderFrame`] (rebuilt every frame in `Stage::RenderExtract`).
-    pub fn render_frame(&self) -> &RenderFrame {
+    pub fn render_frame(&self) -> Res<'_, RenderFrame> {
         self.state.resources.get::<RenderFrame>().expect("RenderFrame resource")
     }
 
@@ -806,9 +849,9 @@ impl Engine {
                 self.set_frame_rate(*f);
             },
             Message::SetThreads(n) => {
-                crate::thread_pool::set_global_pool_size(*n);
+                self.set_threads(Threads::Fixed((*n).max(1)));
                 let size = crate::thread_pool::global_pool_size();
-                self.logger.info(&format!("thread pool size: {size}"));
+                self.logger.info(&format!("threads: {}, pool size: {size}", self.threads()));
             },
             Message::ChangeTitle(tit) => {
                 self.windows.set_title(tit.to_string());
@@ -867,10 +910,10 @@ impl Engine {
     /// Run every system of `stage` once, then apply the commands they queued.
     fn run_stage(&mut self, stage: Stage) {
         {
-            let Engine { schedule, state, events, commands, .. } = self;
+            let Engine { schedule, state, events, commands, exec, .. } = self;
             let EngineState { world, types, window, input, gamepads, time, resources, scripting } = state;
-            let mut cx = Ctx::new(world, &*types, resources, &*time, &*input, &*gamepads, &*window, commands, scripting, events);
-            schedule.run(stage, &mut cx);
+            let mut cx = Ctx::new(world, &*types, resources, &*time, &*input, &*gamepads, &*window, commands, scripting, events, exec);
+            schedule.run(stage, &mut cx, exec);
         }
         self.apply_commands();
         self.flush_script_logs();
@@ -912,14 +955,18 @@ impl Engine {
     fn render_frame_to_surface(&mut self) {
         let Engine { renderer, gpu, state, logger, .. } = self;
         let Some(gpu) = gpu else { return };
-        let Some(frame) = state.resources.get::<RenderFrame>() else { return };
+        if !state.resources.contains::<RenderFrame>() {
+            return;
+        }
         let mut drawn = false;
         let size = (gpu.config.width, gpu.config.height);
         if size.0 > 0 && size.1 > 0 {
             match gpu.surface.get_current_texture() {
                 Ok(output) => {
                     let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                    renderer.render(&gpu.gpu(), &view, frame);
+                    let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
+                    renderer.render(&gpu.gpu(), &view, &frame);
+                    drop(frame);
                     drawn = true;
                     let suboptimal = output.suboptimal;
                     output.present();
