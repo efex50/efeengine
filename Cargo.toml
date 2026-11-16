@@ -12,10 +12,12 @@ members = [
     "crates/efevm",
     "crates/efa",
     "crates/efemod",
+    "crates/efecs",
+    "crates/efecs/macros",
     "examples/*",
     "xtask",
 ]
-exclude = ["crates/efa/fuzz"]
+exclude = ["crates/efa/fuzz", "crates/efecs/tests/no-std-test-crates"]
 
 [profile.optimize]
 inherits = "release"

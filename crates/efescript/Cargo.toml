@@ -3,6 +3,7 @@ name = "efescript"
 version = "0.2.0"
 default-run = "efescript"
 edition = "2021"
+license = "MIT"
 
 
 
