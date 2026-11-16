@@ -1,0 +1,11 @@
+[mod]
+id = "inventory"
+version = "1.0.0"
+name = "Inventory"
+description = "Gives items; announces each gift with the inventory.given event."
+game = "script_demo"
+
+# engine.log is the import in src/items.efa (not the root file): a grant covers the whole
+# package. engine.events is for the send of the mod's own event.
+[permissions]
+namespaces = ["engine.log", "engine.events"]

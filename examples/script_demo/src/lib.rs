@@ -10,9 +10,14 @@
 //!   script is a warning and the game runs without it.
 //! * [`spawn_world`] spawns a few entities; those get a `Script` when the module is loaded.
 //!
+//! `mods/` holds two real mod folders (`inventory`, `shop`: `mod.toml`, `src/*.efa`, assets). They
+//! are not part of the game binary: `cargo xtask mods script_demo` packs them into `.efmod`
+//! files against the game's API index (and each other's), and `tests/packages_e2e.rs` packs,
+//! loads and runs them headless under a game policy.
+//!
 //! The end-to-end test (`tests/e2e.rs`) calls the same `setup` and `spawn_world`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use efeengine_core::efevm::{ApiType, HostFn, HostOk};
@@ -22,9 +27,14 @@ pub const GAME: &str = "script_demo";
 
 /// The game's score; `game.score_add` adds to it.
 #[derive(Clone, Default)]
-pub struct Score(Arc<AtomicI64>);
+pub struct Score(Arc<AtomicI64>, Arc<Mutex<Vec<i64>>>);
 
 impl Score {
+    /// The values scripts passed to `game.report`, in call order.
+    pub fn reports(&self) -> Vec<i64> {
+        self.1.lock().unwrap().clone()
+    }
+
     pub fn get(&self) -> i64 {
         self.0.load(Ordering::Relaxed)
     }
@@ -59,6 +69,16 @@ pub fn setup(engine: &mut Engine) -> Score {
             },
         )
         .expect("register game.score_add");
+    let r = score.1.clone();
+    engine
+        .register_host_fn(
+            HostFn::new("game", "report").doc("Record `v` (read back with `Score::reports`).").param("v", ApiType::I64),
+            move |_c, a, _r| {
+                r.lock().unwrap().push(a.i64(0)?);
+                Ok(HostOk::Continue)
+            },
+        )
+        .expect("register game.report");
     score
 }
 
@@ -98,7 +118,10 @@ pub fn load_scripts(engine: &mut Engine) -> Modules {
             return Modules::default();
         }
         match engine.load_module_file(&path) {
-            Ok(id) => return Modules { mover: Some(id) },
+            Ok(id) => {
+                global_info(&format!("[script_demo] loaded {}", path.display()));
+                return Modules { mover: Some(id) };
+            }
             Err(e) => global_warn(&format!("cannot load {}: {e}", path.display())),
         }
     }
@@ -107,13 +130,39 @@ pub fn load_scripts(engine: &mut Engine) -> Modules {
     Modules::default()
 }
 
+/// Once a second, log the score and where the entities are (only the game binary adds this;
+/// the tests check the numbers directly).
+#[allow(dead_code)] // called from `main`, which `#[main]` leaves out of the native lib target
+fn log_progress(engine: &mut Engine, score: Score) {
+    let mut next = 1.0;
+    engine.add_system(Stage::PostUpdate, move |ctx| {
+        if ctx.time.elapsed() < next {
+            return;
+        }
+        next += 1.0;
+        let xs: Vec<String> =
+            ctx.world.query_mut::<&Transform>().into_iter().map(|t| format!("{:.0}", t.position.x)).collect();
+        global_info(&format!(
+            "[script_demo] t={:.0}s frame {} score {} x=[{}]",
+            ctx.time.elapsed(),
+            ctx.time.frame(),
+            score.get(),
+            xs.join(", ")
+        ));
+    });
+}
+
 #[main]
 fn main() {
     match Engine::new(GAME) {
         Ok(mut engine) => {
-            setup(&mut engine);
+            let score = setup(&mut engine);
+            global_info("[script_demo] registered game.score_add and game.report");
             let modules = load_scripts(&mut engine);
             spawn_world(&mut engine, &modules);
+            let scripted = if modules.mover.is_some() { 3 } else { 0 };
+            global_info(&format!("[script_demo] spawned 3 entities, {scripted} with the mover script"));
+            log_progress(&mut engine, score);
             engine.game_loop();
         }
         Err(e) => eprintln!("engine init failed: {e}"),

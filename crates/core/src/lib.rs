@@ -14,6 +14,7 @@ pub use hecs;
 pub use glam;
 /// The VM crate; its `StructDesc` / `FieldDesc` / `Prim` describe script-visible layouts.
 pub use efevm;
+pub use efemod;
 
 
 

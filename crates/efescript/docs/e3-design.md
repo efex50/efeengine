@@ -216,6 +216,9 @@ A call to an import is shown by its index name and parameter names
   `watch(module, path)`: when the `.efvm` file's modification time changes, the new module
   is linked and swapped in (the old one keeps running if that fails), its mod exports are
   re-registered, and the states of its `Script`s are reset to 0.
+  *Note (E8):* `engine.mods.export` was removed without a shim. A mod now declares the
+  functions it offers as `provide` items in its section 13 `interface`, and the engine
+  registers them when the mod loads (see `e8-design.md` D6).
 - **Index export.** `Engine::api_index()` / `Engine::export_api_index() -> String` (JSON)
   include everything registered so far, mods included. With the environment variable
   `EFE_API_EXPORT=<path>` the engine runs headless and `game_loop()` writes the index to

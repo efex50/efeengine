@@ -60,6 +60,18 @@ pub enum Item {
     Table(TableDecl),
     Data(DataDecl),
     Func(FuncDecl),
+    /// `use "path.efa" [as alias]` (efa-syntax 16.1).
+    Use(UseDecl),
+    /// `provide NAME(params) -> (results) [= FUNC], "doc"` (16.6).
+    Provide(ProvideDecl),
+    /// `[pub|export] struct NAME [, "doc"] { fields }` (16.7).
+    Struct(StructDecl),
+    /// `scratch N` (16.8).
+    Scratch(ScratchDecl),
+    /// `import event NS.NAME [( [&S] )]` (17.1).
+    EventImport(EventImportDecl),
+    /// `provide event NAME ( [&S] ), "doc"` (17.2).
+    ProvideEvent(ProvideEventDecl),
 }
 
 impl Item {
@@ -72,6 +84,12 @@ impl Item {
             Item::Table(x) => x.span,
             Item::Data(x) => x.span,
             Item::Func(x) => x.span,
+            Item::Use(x) => x.span,
+            Item::Provide(x) => x.span,
+            Item::Struct(x) => x.span,
+            Item::Scratch(x) => x.span,
+            Item::EventImport(x) => x.span,
+            Item::ProvideEvent(x) => x.span,
         }
     }
 }
@@ -154,6 +172,8 @@ pub struct MemoryDecl {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConstDecl {
     pub span: Span,
+    /// `pub const`: visible to other files (efa-syntax 16.2).
+    pub public: bool,
     pub name: Ident,
     pub value: Operand,
 }
@@ -163,6 +183,8 @@ pub struct ConstDecl {
 pub struct GlobalDecl {
     pub span: Span,
     pub exported: bool,
+    /// `pub global`: visible to other files (an export is visible too).
+    pub public: bool,
     pub mutable: bool,
     pub name: Ident,
     pub ty: TypeRef,
@@ -222,6 +244,8 @@ impl DataKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DataDecl {
     pub span: Span,
+    /// `pub NAME db ...`: visible to other files.
+    pub public: bool,
     pub name: Ident,
     pub kind: DataKind,
     pub kind_span: Span,
@@ -234,6 +258,8 @@ pub struct FuncDecl {
     /// The header line (from `export` or `fn` to the opening brace).
     pub span: Span,
     pub exported: bool,
+    /// `pub fn`: visible to other files (an export is visible too).
+    pub public: bool,
     pub name: Ident,
     pub params: Vec<Param>,
     pub results: Vec<TypeRef>,
@@ -340,4 +366,124 @@ pub struct Signature {
     pub span: Span,
     pub params: Vec<TypeRef>,
     pub results: Vec<TypeRef>,
+}
+
+/// `use "path.efa" [as alias]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UseDecl {
+    pub span: Span,
+    /// The path exactly as written (unescaped bytes of the string literal).
+    pub path: Vec<u8>,
+    pub path_span: Span,
+    pub alias: Option<Ident>,
+}
+
+/// The type of a provide parameter or result as written: a type word (`i32`, `str`, ...,
+/// checked by the lowering) or `&NAME` (a struct of the file, `A.S` or an index struct).
+#[derive(Clone, Debug, PartialEq)]
+pub enum AType {
+    Word(Ident),
+    /// `&NAME`; the span covers the `&` and the name.
+    Ref(Ident, Span),
+}
+
+impl AType {
+    pub fn span(&self) -> Span {
+        match self {
+            AType::Word(i) => i.span,
+            AType::Ref(_, s) => *s,
+        }
+    }
+}
+
+/// `name: atype` of a provide.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AParam {
+    pub name: Ident,
+    pub ty: AType,
+}
+
+/// `provide NAME(params) [-> (results)] [= FUNC], "doc"`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProvideDecl {
+    pub span: Span,
+    pub name: Ident,
+    pub params: Vec<AParam>,
+    pub results: Vec<AParam>,
+    /// `= FUNC` (a function of this file or `A.f`); `None` means the function `name`.
+    pub target: Option<Ident>,
+    pub doc: Vec<u8>,
+    pub doc_span: Span,
+}
+
+/// One field of a struct: `NAME: PRIM [ "[" N "]" ] [, "doc"]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldDecl {
+    pub span: Span,
+    pub name: Ident,
+    /// The primitive type word (`u8 ... entity`), checked by the lowering.
+    pub prim: Ident,
+    /// `[N]`: an integer or a `const`.
+    pub count: Option<Operand>,
+    pub doc: Option<Vec<u8>>,
+}
+
+/// `[pub | export] struct NAME [, "doc"] { fields }`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructDecl {
+    /// The header line.
+    pub span: Span,
+    pub public: bool,
+    pub exported: bool,
+    pub name: Ident,
+    pub doc: Option<Vec<u8>>,
+    pub fields: Vec<FieldDecl>,
+    /// The closing brace.
+    pub end: Span,
+}
+
+/// `scratch N`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScratchDecl {
+    pub span: Span,
+    pub size: Operand,
+}
+
+/// The payload part of an `import event`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EventForm {
+    /// `import event ns.name`: the payload comes from the API index (`--api`).
+    FromIndex,
+    /// `import event ns.name()`: no payload.
+    NoPayload,
+    /// `import event ns.name(&S)`; the span covers the `&` and the name.
+    Struct(Ident, Span),
+}
+
+/// `import event NS.NAME [( [&S] )]` (efa-syntax 17.1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EventImportDecl {
+    /// Whole statement.
+    pub span: Span,
+    /// The dotted name exactly as written, e.g. `game.score_changed`.
+    pub qualified: Ident,
+    pub form: EventForm,
+}
+
+impl EventImportDecl {
+    /// Splits the qualified name at its LAST dot. `None` without a dot.
+    pub fn split(&self) -> Option<(&str, &str)> {
+        self.qualified.name.rsplit_once('.')
+    }
+}
+
+/// `provide event NAME ( [&S] ), "doc"` (efa-syntax 17.2).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProvideEventDecl {
+    pub span: Span,
+    pub name: Ident,
+    /// `&S`: the payload struct (name, span of `&S`); `None` for `()`.
+    pub payload: Option<(Ident, Span)>,
+    pub doc: Vec<u8>,
+    pub doc_span: Span,
 }

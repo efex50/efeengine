@@ -35,6 +35,8 @@ pub enum TokenKind {
     Colon,
     Equals,
     Arrow,
+    /// `&`: only valid before a struct name in a provide type (efa-syntax 16.9).
+    Amp,
     Newline,
     Eof,
 }
@@ -152,6 +154,7 @@ impl<'a> Lexer<'a> {
                 ',' => self.single(TokenKind::Comma),
                 ':' => self.single(TokenKind::Colon),
                 '=' => self.single(TokenKind::Equals),
+                '&' => self.single(TokenKind::Amp),
                 '-' => self.minus(),
                 '0'..='9' => self.number(false),
                 '"' => self.string(),

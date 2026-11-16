@@ -34,9 +34,13 @@ thiserror = "2"
 glam = { version = "0.34.3", features = ["bytemuck"] }
 # script-visible layouts (StructDesc, Prim) and fnv1a32 component ids
 efevm = { path = "../efevm" }
+# mod packages (.efmod): reader only, no `write` feature (no compressor on the engine path)
+efemod = { path = "../efemod" }
 
 [dev-dependencies]
 serde_json = "1.0.145"
+# tests build packages
+efemod = { path = "../efemod", features = ["write"] }
 
 
 [features]

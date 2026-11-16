@@ -391,16 +391,23 @@ impl<H: 'static> Debugger<H> {
         };
         let loc = self.lookup_line(func, inst);
         if let Some((file, cur_line, _)) = loc {
-            let src = self.sources.get(&file).or_else(|| {
+            // Another file of a multi-file program is read from disk when it was not added.
+            let found: Option<String> = self.sources.get(&file).cloned().or_else(|| {
+                std::fs::metadata(&file)
+                    .ok()
+                    .filter(|m| m.is_file() && m.len() <= 16 * 1024 * 1024)
+                    .and_then(|_| std::fs::read_to_string(&file).ok())
+            }).or_else(|| {
+                let tail = |long: &str, short: &str| long.strip_suffix(short).is_some_and(|h| h.ends_with('/'));
                 self.sources.iter().find_map(|(k, v)| {
-                    if k.ends_with(&file) || file.ends_with(k) {
-                        Some(v)
+                    if tail(k, &file) || tail(&file, k) {
+                        Some(v.clone())
                     } else {
                         None
                     }
                 })
             });
-            if let Some(src) = src {
+            if let Some(src) = found.as_deref() {
                 let lines: Vec<&str> = src.lines().collect();
                 if !lines.is_empty() {
                     let cur = cur_line as usize;
@@ -563,11 +570,16 @@ impl<H: 'static> Debugger<H> {
         line: u32,
     ) -> Option<(u32, u32, String)> {
         let lines = &self.module.data().lines;
+        // The file list holds every file of a multi-file program: an exact name wins, then a
+        // name that is the tail of a recorded path (or the other way round) at a `/` boundary.
         let file_idx = file_opt.and_then(|file_name| {
+            let tail = |long: &str, short: &str| long.strip_suffix(short).is_some_and(|h| h.ends_with('/'));
             lines
                 .files
                 .iter()
-                .position(|f| f == file_name || f.ends_with(file_name) || file_name.ends_with(f))
+                .position(|f| f == file_name)
+                .or_else(|| lines.files.iter().position(|f| tail(f, file_name)))
+                .or_else(|| lines.files.iter().position(|f| tail(file_name, f)))
         });
 
         if file_opt.is_some() && file_idx.is_none() {

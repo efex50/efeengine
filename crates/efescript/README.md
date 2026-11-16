@@ -22,6 +22,9 @@ efescript dis   <file.efvm|file.efa> [-o out.efa]
 efescript bundle <file.efa|file.efvm> -o <out> [--runner PATH]
 efescript api   <file.efapi>
 efescript api-export [-o FILE.efapi]
+efescript api-export <file.efmod|file.efvm> [--id ID] [-o FILE.efapi]
+efescript pack  <DIR> [--api F]... [-o out.efmod]
+efescript inspect <file.efmod|file.efvm>
 efescript lsp   [--api FILE.efapi]          (language server on stdin/stdout)
 efescript debug <file.efa|file.efvm> [--api FILE.efapi] [--fs-root DIR]
 efescript <file.efa> [--budget N]           (shorthand for run)
@@ -35,6 +38,10 @@ efescript <file.efa> [--budget N]           (shorthand for run)
 - `bundle` writes a standalone executable (see below).
 - `api` prints the namespaces, types and functions of an index file. `api-export` writes the
   index of the CLI's std host (default: stdout).
+- `pack DIR` builds the mod in `DIR` (`mod.toml`, `src/main.efa`, `assets/`) into a `.efmod`
+  package (default name `<id>-<version>.efmod` in the current directory). `inspect` prints a
+  package or a bare module; `api-export FILE` writes the index of a `.efmod`, or of a bare
+  `.efvm` with `--id`. Every `--api` value may be a `.efapi` file or a `.efmod`.
 - `lsp` and `debug` are described below.
 
 Exit codes:

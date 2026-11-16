@@ -4,7 +4,7 @@
 //! numbers are kept as text until a field asks for a `u32`.
 
 use crate::api::index::{ApiError, ApiIndex};
-use crate::api::types::{ApiType, FieldDesc, HostFn, NamespaceInfo, Param, Prim, StructDesc, fnv1a64};
+use crate::api::types::{ApiType, EventDesc, FieldDesc, HostFn, NamespaceInfo, Param, Prim, StructDesc, fnv1a64};
 use std::fmt::Write as _;
 
 /// Maximum nesting of arrays and objects the reader accepts (an index needs 4).
@@ -49,9 +49,11 @@ pub(crate) fn write(ix: &ApiIndex, hash: Option<u64>) -> String {
     ty.sort_by(|a, b| a.name.cmp(&b.name));
     let mut fs: Vec<&HostFn> = ix.functions.iter().collect();
     fs.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+    let mut ev: Vec<&EventDesc> = ix.events.iter().collect();
+    ev.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
 
     let mut o = String::new();
-    o.push_str("{\n  \"format\": \"efapi\",\n  \"version\": 1,\n");
+    o.push_str("{\n  \"format\": \"efapi\",\n  \"version\": 2,\n");
     if let Some(h) = hash {
         let _ = writeln!(o, "  \"game\": {},", q(&ix.game));
         let _ = writeln!(o, "  \"hash\": \"fnv1a64:{h:016x}\",");
@@ -123,7 +125,22 @@ pub(crate) fn write(ix: &ApiIndex, hash: Option<u64>) -> String {
         let _ = writeln!(o, "      \"signature\": {}", q(&f.func_type().to_string()));
         o.push_str("    }");
     }
-    o.push_str(if fs.is_empty() { "]\n" } else { "\n  ]\n" });
+    o.push_str(if fs.is_empty() { "],\n" } else { "\n  ],\n" });
+
+    o.push_str("  \"events\": [");
+    for (i, e) in ev.iter().enumerate() {
+        o.push_str(if i == 0 { "\n" } else { ",\n" });
+        let payload = e.payload.as_deref().map_or_else(|| "null".to_string(), q);
+        let _ = write!(
+            o,
+            "    {{ \"namespace\": {}, \"name\": {}, \"owner\": {}, \"payload\": {payload}, \"doc\": {} }}",
+            q(&e.namespace),
+            q(&e.name),
+            q(&e.owner),
+            q(&e.doc)
+        );
+    }
+    o.push_str(if ev.is_empty() { "]\n" } else { "\n  ]\n" });
     o.push_str("}\n");
     o
 }
@@ -132,16 +149,84 @@ pub(crate) fn write(ix: &ApiIndex, hash: Option<u64>) -> String {
 // Reader: JSON values
 // ---------------------------------------------------------------------------------------------
 
+/// A parsed JSON value, as produced by [`parse`].
+///
+/// Accepts exactly RFC 8259 JSON: no comments, no trailing commas, no single quotes, no
+/// `NaN`/`Infinity`. Nesting of arrays and objects is limited to [`MAX_DEPTH`] (64). Object
+/// keys are kept in file order and duplicate keys are rejected. Every error is an
+/// [`ApiError::Syntax`] with the byte `offset` and a `message`.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Value {
+pub enum Value {
+    /// `null`.
     Null,
+    /// `true` or `false`.
     Bool(bool),
-    /// The number as written (validated JSON number syntax).
+    /// The number as written (validated JSON number syntax, e.g. `"-0.5e+3"`).
     Num(String),
+    /// A string with escapes already decoded.
     Str(String),
+    /// An array.
     Arr(Vec<Value>),
-    /// Keys in order; duplicate keys are rejected by the parser.
+    /// An object: keys in order; duplicate keys are rejected by the parser.
     Obj(Vec<(String, Value)>),
+}
+
+impl Value {
+    /// The string, if this is a [`Value::Str`].
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The value as a `u64`, if this is a number written as an unsigned integer (no `-`, no
+    /// fraction, no exponent) that fits in `u64`. Floats such as `1.0` give `None`.
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::Num(n) if n.bytes().all(|c| c.is_ascii_digit()) => n.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// The value as an `i64`, if this is a number written as an integer (an optional leading
+    /// `-`, no fraction, no exponent) that fits in `i64`. Floats such as `1.0` give `None`.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::Num(n) if n.bytes().all(|c| c.is_ascii_digit() || c == b'-') => n.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// The flag, if this is a [`Value::Bool`].
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// The elements, if this is a [`Value::Arr`].
+    pub fn as_array(&self) -> Option<&[Value]> {
+        match self {
+            Value::Arr(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// The `(key, value)` pairs in file order, if this is a [`Value::Obj`].
+    pub fn entries(&self) -> Option<&[(String, Value)]> {
+        match self {
+            Value::Obj(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    /// The value stored under `key`, if this is a [`Value::Obj`] that has that key.
+    /// Keys are unique (the parser rejects duplicates), so the result is unambiguous.
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.entries()?.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
 }
 
 struct Parser<'a> {
@@ -379,8 +464,11 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Parses one JSON value (surrounding whitespace allowed, nothing else).
-pub(crate) fn parse(text: &str) -> Result<Value, ApiError> {
+/// Parses one JSON value. Surrounding whitespace (space, tab, CR, LF) is allowed, anything
+/// else after the value is an error. The grammar and limits are those of [`Value`]: nesting
+/// deeper than [`MAX_DEPTH`] (64), duplicate object keys, and malformed text are rejected with
+/// [`ApiError::Syntax`] (`offset` is the byte position of the problem). Never panics.
+pub fn parse(text: &str) -> Result<Value, ApiError> {
     let mut p = Parser { s: text, b: text.as_bytes(), pos: 0, depth: 0 };
     let v = p.value()?;
     p.ws();
@@ -496,7 +584,7 @@ pub(crate) fn read(text: &str) -> Result<ApiIndex, ApiError> {
         _ => return Err(ApiError::Format("(not a string)".into())),
     }
     match top.get("version")? {
-        Value::Num(n) if n == "1" => {}
+        Value::Num(n) if n == "2" => {}
         Value::Num(n) => return Err(ApiError::Version(n.clone())),
         _ => return schema("version", "expected a number"),
     }
@@ -557,6 +645,19 @@ pub(crate) fn read(text: &str) -> Result<ApiIndex, ApiError> {
         sigs.push((h.qualified(), f.str("signature")?, h.func_type().to_string()));
         ix.functions.push(h);
     }
+    for e in top.each("events")? {
+        let payload = match e.get("payload")? {
+            Value::Null => None,
+            _ => Some(e.str("payload")?),
+        };
+        ix.events.push(EventDesc {
+            namespace: e.str("namespace")?,
+            name: e.str("name")?,
+            payload,
+            doc: e.str("doc")?,
+            owner: e.str("owner")?,
+        });
+    }
     ix.sort();
     ix.validate()?;
     for (function, file, computed) in sigs {
@@ -612,6 +713,16 @@ mod tests {
             ],
             types: vec![e, t],
             functions: vec![two, get, set],
+            events: vec![
+                EventDesc {
+                    namespace: "engine.world".into(),
+                    name: "moved".into(),
+                    payload: Some("Transform".into()),
+                    doc: "An entity moved.".into(),
+                    owner: "engine".into(),
+                },
+                EventDesc::new("engine.time", "tick").doc("A frame began."),
+            ],
         }
     }
 
@@ -640,15 +751,17 @@ mod tests {
       ]
     }"#;
         assert!(j.contains(want_ty), "{j}");
-        assert!(j.starts_with("{\n  \"format\": \"efapi\",\n  \"version\": 1,\n  \"game\": \"script_demo\",\n  \"hash\": \"fnv1a64:"));
+        assert!(j.starts_with("{\n  \"format\": \"efapi\",\n  \"version\": 2,\n  \"game\": \"script_demo\",\n  \"hash\": \"fnv1a64:"));
         assert!(j.contains("\n    { \"name\": \"engine.world\", \"version\": 1, \"owner\": \"engine\", \"doc\": \"Entities and components.\" }\n  ],\n"));
         assert!(j.contains("\"fields\": []\n"));
         assert!(j.contains("\"params\": [],\n      \"results\": [ { \"name\": \"a\", \"type\": \"f32\" }, { \"name\": \"b\", \"type\": \"bool\" } ],"));
         assert!(j.contains("\"signature\": \"(i64, i64, i64)\"\n"));
         assert!(j.contains("\\\"quoted\\\"\\n\\u0001\u{1F600}"));
-        assert!(j.ends_with("  ]\n}\n"));
+        let want_ev = "  \"events\": [\n    { \"namespace\": \"engine.time\", \"name\": \"tick\", \"owner\": \"\", \"payload\": null, \"doc\": \"A frame began.\" },\n    { \"namespace\": \"engine.world\", \"name\": \"moved\", \"owner\": \"engine\", \"payload\": \"Transform\", \"doc\": \"An entity moved.\" }\n  ]\n}\n";
+        assert!(j.ends_with(want_ev), "{j}");
+        assert!(j.contains("\"signature\": \"(i64, i64, i64)\"\n    }\n  ],\n  \"events\""));
         let empty = ApiIndex::default().to_json();
-        assert!(empty.ends_with("  \"namespaces\": [],\n  \"types\": [],\n  \"functions\": []\n}\n"), "{empty}");
+        assert!(empty.ends_with("  \"namespaces\": [],\n  \"types\": [],\n  \"functions\": [],\n  \"events\": []\n}\n"), "{empty}");
     }
 
     #[test]
@@ -669,6 +782,12 @@ mod tests {
         let mut d = x.clone();
         d.functions[0].doc.push('!');
         assert_ne!(d.hash(), x.hash());
+        let mut d = x.clone();
+        assert_eq!(d.events[1].name, "moved");
+        d.events[1].payload = None;
+        assert_ne!(d.hash(), x.hash());
+        assert_eq!(x.event("engine.world", "moved").unwrap().payload.as_deref(), Some("Transform"));
+        assert!(x.event("engine.world", "nope").is_none());
         assert_eq!(ApiIndex::from_json(&ApiIndex::default().to_json()), Ok(ApiIndex::default()));
         assert_eq!(x.function("engine.world", "get").unwrap().name, "get");
         assert_eq!(x.qualified_names(), ["engine.time.both", "engine.world.get", "engine.world.set"]);
@@ -681,7 +800,15 @@ mod tests {
         let j = sample().to_json();
         let edit = |from: &str, to: &str| ApiIndex::from_json(&j.replacen(from, to, 1));
         assert!(matches!(edit("\"efapi\"", "\"efapo\""), Err(ApiError::Format(_))));
-        assert!(matches!(edit("\"version\": 1", "\"version\": 2"), Err(ApiError::Version(_))));
+        assert!(matches!(edit("\"version\": 2", "\"version\": 1"), Err(ApiError::Version(_))));
+        assert!(matches!(edit("\"version\": 2", "\"version\": 3"), Err(ApiError::Version(_))));
+        assert!(matches!(edit("\"payload\": \"Transform\"", "\"payload\": \"Nope\""), Err(ApiError::Invalid(_))));
+        assert!(matches!(edit("\"payload\": null", "\"payload\": 1"), Err(ApiError::Schema { .. })));
+        assert!(matches!(edit("\"name\": \"tick\"", "\"name\": \"both\""), Err(ApiError::Invalid(_))));
+        assert!(matches!(edit("\"An entity moved.\"", "\"An entity jumped.\""), Err(ApiError::Hash { .. })));
+        // `events` is a required key in version 2.
+        let no_events = j.replacen(",\n  \"events\": [", ",\n  \"evts\": [", 1);
+        assert!(matches!(ApiIndex::from_json(&no_events), Err(ApiError::Schema { .. })));
         assert!(matches!(edit("Radians.", "Degrees."), Err(ApiError::Hash { .. })));
         assert!(matches!(edit("-> i32\"", "-> i64\""), Err(ApiError::Signature { .. })));
         assert!(matches!(edit("\"fnv1a64:", "\"fnv1a32:"), Err(ApiError::Schema { .. })));
@@ -696,12 +823,12 @@ mod tests {
         // Reformatted but equal content passes via the canonical hash.
         let compact: String = j.replace("\n", "").replace("  ", "");
         assert_eq!(ApiIndex::from_json(&compact), ApiIndex::from_json(&j));
-        // A newer v1 writer adding a key: the raw body hash covers it.
+        // A newer v2 writer adding a key: the raw body hash covers it.
         let mut ext = sample();
         ext.sort();
         let body = write(&ext, None).replacen("  \"namespaces\"", "  \"extra\": {\"a\": [1, 2.5e-3, true, null]},\n  \"namespaces\"", 1);
         let h = fnv1a64(body.as_bytes());
-        let file = body.replacen("  \"version\": 1,\n", &format!("  \"version\": 1,\n  \"game\": \"g\",\n  \"hash\": \"fnv1a64:{h:016x}\",\n"), 1);
+        let file = body.replacen("  \"version\": 2,\n", &format!("  \"version\": 2,\n  \"game\": \"g\",\n  \"hash\": \"fnv1a64:{h:016x}\",\n"), 1);
         assert!(ApiIndex::from_json(&file).is_ok(), "{:?}", ApiIndex::from_json(&file));
     }
 
@@ -766,5 +893,33 @@ mod tests {
             let s = String::from_utf8_lossy(&m);
             let _ = ApiIndex::from_json(&s);
         }
+    }
+
+    #[test]
+    fn value_accessors() {
+        let v = parse(r#"{"name": "efemod", "n": 42, "neg": -7, "f": 1.5, "on": true, "list": [1, "x"]}"#).unwrap();
+        assert_eq!(v.get("name").and_then(Value::as_str), Some("efemod"));
+        assert_eq!(v.get("n").and_then(Value::as_u64), Some(42));
+        assert_eq!(v.get("neg").and_then(Value::as_i64), Some(-7));
+        assert_eq!(v.get("neg").and_then(Value::as_u64), None);
+        assert_eq!(v.get("f").and_then(Value::as_u64), None);
+        assert_eq!(v.get("f").and_then(Value::as_i64), None);
+        assert_eq!(v.get("on").and_then(Value::as_bool), Some(true));
+        assert_eq!(v.get("list").and_then(Value::as_array).map(<[Value]>::len), Some(2));
+        assert_eq!(v.get("missing"), None);
+        assert_eq!(v.get("name").and_then(Value::as_u64), None);
+        assert_eq!(v.entries().map(<[(String, Value)]>::len), Some(6));
+        assert_eq!(v.entries().unwrap()[0].0, "name");
+        assert_eq!(v.as_array(), None);
+        assert_eq!(parse("[1]").unwrap().get("x"), None);
+    }
+
+    #[test]
+    fn parse_rejects_duplicates_and_deep_nesting() {
+        match parse(r#"{"a": 1, "a": 2}"#) {
+            Err(ApiError::Syntax { message, .. }) => assert!(message.contains("duplicate"), "{message}"),
+            other => panic!("expected a syntax error, got {other:?}"),
+        }
+        assert!(parse(&"[".repeat(MAX_DEPTH + 1)).is_err());
     }
 }

@@ -221,7 +221,7 @@ fn api_section_rejections() {
     assert_eq!(dec(&sec(&[0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0xFF, 1])), DecodeError::BadUtf8);
     assert_eq!(dec(&sec(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 9])), DecodeError::SectionSizeMismatch(12));
     assert_eq!(dec(&sec(&[0, 0, 0, 0, 0, 0, 0, 0, 1, 1, b'a', 0x80, 0x80, 0x80, 0x80, 0x10])), DecodeError::LebTooLong);
-    for id in 13..=127u8 {
+    for id in 15..=127u8 {
         let mut b = b"EFVM\x01\x00".to_vec();
         b.extend_from_slice(&[id, 0]);
         assert_eq!(dec(&b), DecodeError::UnknownSection(id));

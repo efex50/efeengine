@@ -6,24 +6,29 @@
 //!
 //! - `host.rs`: [`ScriptHost`], the state host functions see, and the module table.
 //! - `api_engine.rs`: the `engine.*` host functions.
-//! - `mods.rs`: loading, unloading, mod exports and hot reload.
+//! - `mods.rs`: loading, unloading, declared provides (section 13), dependents and hot reload.
+//! - `packages.rs`: `.efmod` packages: policy and grant, load sequence, assets, reload.
+//! - `provides.rs`: the trampoline of a provide and the copy ABI across mods.
 //! - `system.rs`: the [`Script`] component and the script system.
 
 mod api_engine;
 mod host;
 mod mods;
+mod packages;
+mod provides;
 mod system;
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 
 use efevm::{
-    Caller, HostFn, HostOk, HostRegistry, LinkError, LoadError, RegistryError, Results, StructDesc, Args, Trap,
+    Caller, HostFn, HostOk, HostRegistry, LinkError, LoadError, EventDesc, RegistryError, Results, StructDesc, Args, Trap,
 };
 use hecs::World;
 
 pub use host::{LogLevel, LogLine, ScriptHost};
 pub use mods::ModOptions;
+pub use packages::{DefaultPolicy, Grant, LoadReport, ModError, ModPolicy, ModRequest, PackageInfo};
 pub use system::Script;
 pub(crate) use system::script_system;
 
@@ -32,18 +37,51 @@ use crate::engine::{input::InputState, time::Time, types::TypeRegistry};
 /// Default per-module, per-frame budget in VM units.
 pub const DEFAULT_BUDGET: u64 = 1_000_000;
 
+/// Default most memory pages (64 KiB each) of a module (`efevm::Limits::default()`).
+pub const DEFAULT_MEMORY_PAGES: u32 = 1024;
+
 /// Handle of a loaded module. Ids are never reused: after unload the id stays valid and
 /// every call into it fails cleanly ("module X unloaded").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(pub u32);
 
-/// A named event with a byte payload, sent by scripts (`engine.events.send`) or Rust
-/// (`Ctx::send`). Delivered like every `Events<T>`: readable during the next frame.
+/// A script event in flight: the registered event it is (`namespace.name`) and its payload
+/// bytes, exactly the size of the event's registered payload struct (empty for an event
+/// without payload). Sent by scripts (`engine.events.send`, which checks it by construction)
+/// or by Rust through [`Ctx::send_script_event`](crate::engine::schedule::Ctx::send_script_event) /
+/// [`Engine::send_script_event`](crate::Engine::send_script_event) /
+/// [`ScriptHost::send_event`], which refuse an unregistered event or a payload of the wrong
+/// size with a [`ScriptEventError`]. Delivered like every `Events<T>`: readable during the
+/// next frame. Build one by hand only if you keep the invariant; readers skip entries whose
+/// payload length differs from the registered size.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScriptEvent {
-    pub name: String,
-    pub data: Vec<u8>,
+    /// Qualified name, `namespace.name`, of a registered event.
+    pub event: String,
+    pub payload: Vec<u8>,
 }
+
+/// Why a Rust-side send of a script event was refused (the event is not queued).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScriptEventError {
+    /// No event `event` (`namespace.name`) is registered.
+    Unknown { event: String },
+    /// The payload has `got` bytes, the registered payload struct has `expected`.
+    Payload { event: String, expected: usize, got: usize },
+}
+
+impl fmt::Display for ScriptEventError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScriptEventError::Unknown { event } => write!(f, "script event `{event}` is not registered"),
+            ScriptEventError::Payload { event, expected, got } => {
+                write!(f, "script event `{event}` carries {expected} payload bytes, {got} were given")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ScriptEventError {}
 
 /// Why loading, unloading or reloading a module failed.
 #[derive(Debug)]
@@ -51,13 +89,25 @@ pub enum ScriptError {
     Load(LoadError),
     /// Every problem `Imports::check_module` found.
     Link { module: String, errors: Vec<LinkError> },
-    /// The module imports namespaces its [`ModOptions::allowed`] list does not permit.
+    /// The module imports namespaces, or refers to events of namespaces, that its
+    /// [`ModOptions::allowed`] list does not permit (its own namespace always is).
     Disallowed { module: String, namespaces: Vec<String> },
     /// Not a valid module name (identifier).
     InvalidName(String),
     /// A loaded module, or a namespace of another owner, already has this name.
     NameTaken(String),
     NoSuchModule(ModuleId),
+    /// A game module (`load_module`) has a section 13 interface: only mods provide.
+    NotAMod(String),
+    /// A struct the module's interface copies from elsewhere is not in the registry with the
+    /// same layout. `expected` describes the registered layout (or says it is not registered),
+    /// `found` the module's copy.
+    StructMismatch { name: String, expected: String, found: String },
+    /// Unload refused: loaded modules still depend on `module` (they import from its
+    /// namespaces, refer to its events in section 14 or copy its structs).
+    Needed { module: String, by: Vec<String> },
+    /// Hot reload refused, the old version keeps running.
+    ReloadRefused { module: String, reasons: Vec<String> },
     Registry(RegistryError),
     Io(String),
 }
@@ -75,13 +125,29 @@ impl fmt::Display for ScriptError {
             }
             ScriptError::Disallowed { module, namespaces } => write!(
                 f,
-                "module `{module}` imports namespace{} {} which it is not allowed to use",
+                "module `{module}` uses namespace{} {} (imports or events) which it is not allowed to use",
                 if namespaces.len() == 1 { "" } else { "s" },
                 namespaces.join(", ")
             ),
             ScriptError::InvalidName(n) => write!(f, "`{n}` is not a valid module name (an identifier)"),
             ScriptError::NameTaken(n) => write!(f, "the name `{n}` is already used by a loaded module or another owner's namespace"),
             ScriptError::NoSuchModule(id) => write!(f, "no module with id {}", id.0),
+            ScriptError::NotAMod(n) => write!(
+                f,
+                "module `{n}` has an interface section (it provides functions), which only mods may have: load it with load_mod"
+            ),
+            ScriptError::StructMismatch { name, expected, found } => write!(
+                f,
+                "struct `{name}` differs from the registered layout: registered ({expected}), the module has ({found})"
+            ),
+            ScriptError::Needed { module, by } => write!(f, "module `{module}` is still needed by {}", by.join(", ")),
+            ScriptError::ReloadRefused { module, reasons } => {
+                write!(f, "module `{module}` cannot be reloaded:")?;
+                for r in reasons {
+                    write!(f, "\n  {r}")?;
+                }
+                Ok(())
+            }
             ScriptError::Registry(e) => write!(f, "{e}"),
             ScriptError::Io(e) => f.write_str(e),
         }
@@ -114,7 +180,10 @@ pub struct Scripting {
     pub(crate) registry: HostRegistry<ScriptHost>,
     pub(crate) host: ScriptHost,
     history: VecDeque<LogLine>,
+    pub(crate) policy: Box<dyn ModPolicy>,
     pub(crate) warned: HashSet<String>,
+    /// Script events dropped (over the per-frame cap) in the most recent run of scripts.
+    dropped_last: usize,
     #[cfg(not(target_family = "wasm"))]
     pub(crate) next_watch_check: f64,
 }
@@ -127,7 +196,9 @@ impl Scripting {
             registry,
             host: ScriptHost::new(),
             history: VecDeque::new(),
+            policy: Box::new(DefaultPolicy),
             warned: HashSet::new(),
+            dropped_last: 0,
             #[cfg(not(target_family = "wasm"))]
             next_watch_check: 0.0,
         }
@@ -161,6 +232,47 @@ impl Scripting {
         F: Fn(&mut Caller<'_, ScriptHost>, &Args<'_>, &mut Results<'_>) -> Result<HostOk, Trap> + Send + Sync + 'static,
     {
         self.registry.register(desc, f)
+    }
+
+    /// Register a script event of the game (its namespace must be defined with
+    /// [`define_namespace`](Self::define_namespace); the owner is the namespace's owner). This is
+    /// the only way to make an event visible to scripts and what puts it in the index. Modules
+    /// refer to it in section 14 and use it with `engine.events.send/count/read`. Namespaces of
+    /// the engine are reserved (the engine registers its own events itself).
+    pub fn register_event(&mut self, desc: EventDesc) -> Result<(), RegistryError> {
+        if self.registry.namespace(&desc.namespace).is_some_and(|n| n.owner == api_engine::OWNER) {
+            return Err(RegistryError::NamespaceOwner {
+                namespace: desc.namespace.clone(),
+                owner: "(a game)".to_string(),
+                existing: "the engine (reserved)".to_string(),
+            });
+        }
+        self.registry.register_event(desc)
+    }
+
+    /// The payload size in bytes of the registered event `event` (`namespace.name`; 0 without
+    /// payload), `None` if it is not registered.
+    pub fn event_payload_size(&self, event: &str) -> Option<usize> {
+        let (ns, name) = event.rsplit_once('.')?;
+        let desc = self.registry.event(ns, name)?;
+        Some(desc.payload.as_ref().and_then(|p| self.registry.struct_type(p)).map_or(0, |t| t.size as usize))
+    }
+
+    /// Check a Rust-side send: `event` (`namespace.name`) is registered and `len` is the size of
+    /// its payload struct (0 without payload).
+    pub fn check_event(&self, event: &str, len: usize) -> Result<(), ScriptEventError> {
+        match self.event_payload_size(event) {
+            None => Err(ScriptEventError::Unknown { event: event.to_string() }),
+            Some(expected) if expected != len => Err(ScriptEventError::Payload { event: event.to_string(), expected, got: len }),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// How many script events scripts sent beyond the per-frame cap (4096) and were dropped in
+    /// the most recent run of scripts (one frame, or one `init` pass outside a frame). The count
+    /// is logged once per such run as a warning.
+    pub fn dropped_events_last_frame(&self) -> usize {
+        self.dropped_last
     }
 
     /// Put a struct or component layout in the index (called by `Engine::register_*`).
@@ -231,6 +343,14 @@ impl Scripting {
 
     /// Move the world and this frame's data into the host.
     pub(crate) fn enter(&mut self, world: &mut World, types: &TypeRegistry, time: &Time, input: &InputState, events: Vec<ScriptEvent>) {
+        self.host.event_sizes = self
+            .registry
+            .events()
+            .map(|e| {
+                let size = e.payload.as_ref().and_then(|p| self.registry.struct_type(p)).map_or(0, |t| t.size as usize);
+                (e.qualified(), size)
+            })
+            .collect();
         self.host.world = std::mem::take(world);
         if self.host.types.generation() != types.generation() {
             self.host.types = types.clone();
@@ -245,6 +365,10 @@ impl Scripting {
         *world = std::mem::take(&mut self.host.world);
         commands.append(&mut self.host.commands);
         self.host.events_in.clear();
+        self.dropped_last = std::mem::take(&mut self.host.dropped_events);
+        if self.dropped_last > 0 {
+            self.log(LogLevel::Warn, format!("{} script events dropped this frame (cap {})", self.dropped_last, host::MAX_EVENTS));
+        }
     }
 
     /// Whether the script system has anything to do.
@@ -285,5 +409,41 @@ mod tests {
         let errs: Vec<_> = e.scripting().log_lines().filter(|l| l.level == LogLevel::Error).collect();
         assert_eq!(errs.len(), 2);
         assert!(errs[0].text.contains("already running") && errs[0].text.contains("rec"), "{}", errs[0].text);
+    }
+
+    /// A reload can change the namespace version only while nothing depends on the mod
+    /// (the file-based reload keeps the version; package reloads pass the manifest's).
+    #[test]
+    fn a_version_change_is_refused_while_dependents_are_loaded() {
+        use efevm::{ApiType, Interface, Param, Provide};
+        let provider = || {
+            let mut mb = ModuleBuilder::new();
+            let mut f = FunctionBuilder::new(2);
+            f.ret(0);
+            let id = mb.add_func(FuncType::new([ValType::I64], [ValType::I64]), f);
+            mb.interface(Interface {
+                provides: vec![Provide {
+                    name: "id".into(),
+                    func: id,
+                    doc: "Identity.".into(),
+                    params: vec![Param::new("x", ApiType::I64)],
+                    results: vec![Param::new("y", ApiType::I64)],
+                }],
+                ..Default::default()
+            });
+            mb.finish().unwrap()
+        };
+        let mut e = Engine::with_config(EngineConfig::headless()).unwrap();
+        let id = e.load_mod(&provider().encode(), ModOptions::new("p")).unwrap();
+        // no dependents: the version may change
+        e.scripting_mut().reload_module(id.0 as usize, provider(), 2).unwrap();
+        assert_eq!(e.api_index().namespace("p").unwrap().version, 2);
+        let mut mb = ModuleBuilder::new();
+        mb.import("p", "id", FuncType::new([ValType::I64], [ValType::I64]));
+        e.load_mod(&mb.finish().unwrap().encode(), ModOptions::new("q").allow("p")).unwrap();
+        let err = e.scripting_mut().reload_module(id.0 as usize, provider(), 3).unwrap_err();
+        assert!(matches!(&err, ScriptError::ReloadRefused { reasons, .. } if reasons[0].contains("version changes from 2 to 3")), "{err}");
+        assert_eq!(e.api_index().namespace("p").unwrap().version, 2);
+        e.scripting_mut().reload_module(id.0 as usize, provider(), 2).unwrap();
     }
 }

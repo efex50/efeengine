@@ -1,6 +1,6 @@
 # efevm v1 specification
 
-Status: draft 4, 2026-11-15 (draft 1 plus the clarifications in "Changes from draft 1" and the changes in "Changes from draft 2" and "Changes from draft 3" at the end). This is roadmap item E1.1 (`crates/efescript/ROADMAP.md`).
+Status: draft 6, 2026-11-15 (draft 1 plus the clarifications in "Changes from draft 1" and the changes in "Changes from draft 2", "Changes from draft 3", "Changes from draft 4" and "Changes from draft 5" at the end). This is roadmap item E1.1 (`crates/efescript/ROADMAP.md`).
 `efevm` is the new core VM for efescript. It lives in its own crate (`crates/efevm`)
 next to the old VM in `crates/efescript`, which keeps working until the assembler
 moves over (E2).
@@ -57,6 +57,7 @@ A module contains, in this order of indices:
 | names (optional) | function, import and register names |
 | lines (optional) | per function: instruction index → (file id, line, column) |
 | api (optional) | the API index hash and `(namespace, version)` of every namespace the module was assembled against |
+| interface (optional) | what the module provides to other modules when loaded as a mod: functions with typed, named parameters and docs, the struct layouts they use, and the exchange (scratch) region for copied arguments (9.2) |
 
 Function index space: imports first (`0 … nimports-1`), then module functions. `call`
 targets any function index; calling an import is a host call.
@@ -185,7 +186,10 @@ pub enum Trap {
 - `global.set` only on mutable globals; data segments and memory limits consistent.
 - Every function ends in a terminator; `br_table` has a default.
 - Import resolution: every import must exist in `Imports` with an identical type, and every
-  namespace recorded in the module's `api` section must exist with the same version.
+  namespace recorded in the module's `api` section must exist with the same version; every
+  event of the `events` section must be registered with the same payload (9.3; this and the
+  import rule are link-time checks).
+- The `interface` section's rules (9.2) and the `events` section's rules (9.3).
 
 Because registers are untyped 64-bit slots and memory is bounds-checked, a verified
 module cannot break host memory safety even if it mixes types.
@@ -195,7 +199,7 @@ module cannot break host memory safety even if it mixes types.
 - Header: bytes `EFVM`, then `u16` little-endian version (`1`).
 - Then sections: `id: u8`, `size: uleb`, payload. Known ids in ascending order, each at
   most once: 1 types, 2 imports, 3 functions, 4 table, 5 memory, 6 globals, 7 exports,
-  8 data, 9 code, 10 names, 11 lines, 12 api. Unknown ids ≥ 128 are skipped (custom sections).
+  8 data, 9 code, 10 names, 11 lines, 12 api, 13 interface, 14 events. Unknown ids ≥ 128 are skipped (custom sections).
 - Integers are LEB128 (`uleb` unsigned, `sleb` signed). Strings are `uleb` length + UTF-8.
   Floats are fixed little-endian IEEE bytes.
 - Code section: for each function, `uleb` instruction count, then instructions.
@@ -228,14 +232,16 @@ bits must equal the sign bit). Zero-padded encodings within the maximum length a
 | 10 | names | `vec(fname)` then `vec(rname)`; fname = `uleb` function index, `string`; rname = `uleb` function index, `uleb` register, `string` |
 | 11 | lines | `vec(string)` file names, then `vec(flines)`; flines = `uleb` function index, `vec(entry)`; entry = `uleb` instruction index, `uleb` file id, `uleb` line, `uleb` column |
 | 12 | api | 8 bytes index hash (`u64` little-endian), then `vec(ns)`; ns = `string` namespace, `uleb` version |
+| 13 | interface | see 9.2 |
+| 14 | events | see 9.3 |
 
 - A missing section means "empty" (memory: `min_pages` 0, no max). A functions section without a
   code section (or the other way round with a non-zero count) is rejected.
 - The encoder writes a section only when it is non-empty (memory: when `min_pages != 0` or a max
-  is set; api: whenever the module has one, even with no namespaces), so encoding is
+  is set; api and interface: whenever the module has one, even when empty; events: when non-empty), so encoding is
   deterministic: `decode(encode(m)) == m`.
 - The section `size` must equal exactly the bytes its payload uses. Custom sections (id ≥ 128) may
-  appear anywhere and are skipped; ids 0 and 13–127 are rejected.
+  appear anywhere and are skipped; ids 0 and 15–127 are rejected.
 - The verifier rejects an api section whose namespace names are not identifiers joined by dots
   or appear twice (`VerifyError::ApiNamespace`).
 - Register operands are `uleb` values ≤ 65535 (larger is a decode error). Function indices in
@@ -248,6 +254,116 @@ bits must equal the sign bit). Zero-padded encodings within the maximum length a
 In memory, instructions are decoded once into a fixed-size form (for example
 `struct Inst { op: Op, a: u32, b: u32, c: u32 }` with 64-bit constants and `br_table`
 targets in side tables). That form is an implementation detail, not part of this spec.
+
+### 9.2 Section 13 `interface`
+
+Design: `crates/efescript/docs/e8-design.md` sections 5–7; packages: `MOD_PACKAGE.md`. The
+binary format version stays `1`: the section is additive, and a module without it means
+exactly what it meant before.
+
+The section lists what a module provides when it is loaded as a mod: each **provide** maps a
+name in the mod's namespace to one of the module's own functions, with the typed and named
+signature and the doc that go into the API index. The engine registers one host function per
+provide (the trampoline) when the mod loads, so declared exports go through the registry like
+every other callable function.
+
+```
+interface = scratch, vec(struct), vec(provide), vec(pevent)
+scratch   = flag byte; if 1: uleb u64 offset, uleb size
+struct    = string name, string owner, cflag byte; if 1: u32 component id (4 bytes LE),
+            string doc, uleb size, uleb align, vec(field)
+field     = string name, prim byte, uleb count, uleb offset, string doc
+provide   = string name, uleb function index, string doc, vec(param) params, vec(param) results
+param     = string name, apitype
+apitype   = byte: 0 i32, 1 i64, 2 f32, 3 f64, 4 bool, 5 entity, 6 str, 7 bytes,
+            8 struct (followed by string struct name)
+prim      = byte: 0 u8, 1 i8, 2 u16, 3 i16, 4 u32, 5 i32, 6 u64, 7 i64, 8 f32, 9 f64, 10 bool, 11 entity
+pevent    = string name, pflag byte; if 1: string payload struct name, string doc
+```
+
+- `ptr` has no encoding: a raw address means nothing in another module's memory, so it can
+  be neither a parameter nor a result of a provide. The verifier rejects it in an in-memory
+  `Interface` (rule 5); the encoder, which cannot fail, writes it as byte `0xFF`, which the
+  decoder rejects with `BadApiType(255)`.
+- `owner` empty means the struct is defined by this module (it is registered under the mod's
+  name when the mod loads). A non-empty owner (`engine`, a game name, a dependency's id) means
+  a **copy** of a struct defined elsewhere, recorded by the assembler from the index it built
+  against; at load the registry must hold a struct of that name with the same size, alignment
+  and fields (names, types, counts, offsets; docs and owner are not compared), otherwise the
+  load fails by name. Copies make the mod's own index self-contained.
+- In memory: `ModuleData.interface: Option<Interface>` with `Interface { scratch:
+  Option<(u64, u32)>, structs: Vec<StructDesc>, provides: Vec<Provide>, events:
+  Vec<ProvidedEvent> }` (`Default`; construct it with `..Default::default()`), `Provide { name,
+  func, doc, params: Vec<Param>, results: Vec<Param> }`, `ProvidedEvent { name, payload:
+  Option<String>, doc }`, reusing `StructDesc` and `Param` of `efevm::api`. A provided event is
+  an event of the mod's own namespace (`<id>.name`) that the engine registers when the mod
+  loads; it is what other modules then reference in their section 14. The encoder writes the section whenever `interface` is `Some`, even when empty.
+- Decode errors: `BadApiType(u8)`, `BadPrim(u8)`; bad flag bytes are `BadFlag`. Vectors of
+  this section are never pre-allocated from their counts.
+
+Verifier rules (each a `VerifyError::Interface { what, reason }` naming the provide or struct):
+
+1. Counts: at most 1024 provides, 256 structs, 1024 events, 64 parameters and 16 results per
+   provide, 256 fields per struct (the decoder also never pre-allocates by these counts).
+2. Provide names are identifiers and unique. Parameter and result names are identifiers and
+   unique within their provide (parameters and results together). `doc` is not blank.
+3. The function index refers to a function defined by the module (not an import).
+4. The lowered signature (`ApiType::lower` of the parameters, then of the results) equals the
+   function's type exactly.
+5. Results are scalar (`i32 i64 f32 f64 bool entity`); `str`, `bytes` and `struct` are
+   parameters only; `ptr` is neither.
+6. Every `struct` parameter names a struct listed in this section.
+7. Structs: `StructDesc::validate` holds, names are unique, an own struct (empty owner) has no
+   component id, component ids are unique, and owner strings are empty or namespaces
+   (`is_namespace`).
+8. If any provide has a `str`, `bytes` or `struct` parameter, `scratch` must be present with
+   `size >= 1`. A present scratch has `offset % 8 == 0`, `size <= 1_048_576`, lies inside
+   `min_pages * 65536`, and overlaps no data segment (empty ranges overlap nothing).
+9. Provided events (`what` = ``event `name` ``): names are identifiers, unique among the events
+   and different from every provide name (a function and an event never share a full name);
+   `doc` is not blank; a payload names a struct listed in this section (own or copied).
+
+Provides are independent of section 7: a provided function need not be a module export, and
+provide names do not collide with export names. The calling ABI across mods (copying `str`,
+`bytes` and structs through the scratch region) is the embedder's: e8-design section 7.
+
+Helpers (`efevm::api::interface`, pure data): `Interface::host_fns(namespace) -> Vec<HostFn>`
+(one description per provide, `owner` empty for the registry to fill),
+`Interface::event_descs(namespace) -> Vec<EventDesc>` (one per provided event, `owner` empty)
+and `Interface::index(id, version, doc) -> ApiIndex` (the mod's own index: namespace `id` owned
+by `id`, the provides as functions owned by `id`, the provided events as events owned by `id`,
+own structs owned by `id`, copied structs with their recorded owner, `game` = `id`, sorted),
+plus `provide(name)`, `event(name)`, `struct_desc(name)`, `needs_scratch()`, `own_structs()`,
+`copied_structs()`, `Provide::{func_type, needs_scratch, host_fn}` and
+`ProvidedEvent::event_desc`.
+
+### 9.3 Section 14 `events`
+
+Design: `crates/efescript/docs/e8-design.md` "E8.13 Typed script events"; index side and the
+engine ABI: `API_INDEX.md` "Events". The section lists every script event the module sends or
+reads. **An event's id inside the module is its index in this list**; the engine's
+`engine.events.send(ev, payload)`, `count(ev)` and `read(ev, index, out)` take that id.
+
+```
+events   = vec(eventref)
+eventref = string namespace, string name, pflag byte; if 1: string payload struct name, uleb size
+```
+
+- In memory: `ModuleData.events: Vec<EventRef>` with `EventRef { namespace, name, payload:
+  Option<(String, u32)> }` (struct name and size in bytes, as in the index the module was built
+  against). `ModuleBuilder::event_ref(namespace, name, payload) -> u32` adds one and returns the
+  id (an identical entry is reused). The encoder writes the section only when the list is
+  non-empty. Vectors are never pre-allocated from their counts; a bad flag is `BadFlag`.
+- Verifier rules (`VerifyError::Events { what, reason }`, `what` = ``event 3 `game.x` `` or
+  `events`): at most 1024 entries; namespaces are namespace names (`is_namespace`), event names
+  and payload struct names are identifiers; `(namespace, name)` is unique.
+- Link time (`Imports::check_module`, so also `Instance::new`): every entry must be a registered
+  event (`LinkError::UnknownEvent`) whose payload struct name and size equal the entry's
+  (`LinkError::EventPayload`, both payloads as text). The errors come after the import errors
+  and before `ApiHash`. The assembler also records each event's namespace in section 12.
+- Permissions: the namespaces of the entries (`ModuleData::event_namespaces()`) are checked by
+  the embedder against the module's namespace allow-list with the same prefix rule as imports,
+  before the module is instantiated.
 
 ## 10. Tests required for E1
 
@@ -382,3 +498,35 @@ is still valid and means the same.
    instruction), `fiber_registers` (the current frame) and `fiber_backtrace` (innermost first,
    callers at their `call` instruction). `resume` with budget 1 executes exactly one instruction
    (if no budget debt is owed).
+
+## Changes from draft 4
+
+Draft 5 implements section 13 `interface` (efescript roadmap E8, task T1). The binary format
+version stays `1`.
+
+1. **Section 13** (9, 9.1, 9.2): `ModuleData.interface: Option<Interface>` with `Interface` and
+   `Provide` (`efevm::module`), encoded whenever it is `Some`. Only ids 0 and 14–127 are
+   rejected now. New `DecodeError::{BadApiType, BadPrim}`.
+2. **Verifier** (8, 9.2): rules 1–8 as `VerifyError::Interface { what, reason }`. Rule 5 also
+   rejects `ptr`, rule 7 also requires unique component ids (so `Interface::index` always
+   validates), and rule 8 treats empty ranges as overlapping nothing.
+3. **Builder**: `ModuleBuilder::interface(Interface)`.
+4. **API data**: `Interface::host_fns` and `Interface::index` (9.2).
+
+## Changes from draft 5
+
+Draft 6 adds typed script events (efescript roadmap E8.13). The binary format version stays
+`1`; section 13 changed incompatibly and no compatibility is kept (the project has no released
+users).
+
+1. **Section 14 `events`** (9, 9.1, 9.3): `ModuleData.events: Vec<EventRef>`, the event id is the
+   index. Only ids 0 and 15–127 are rejected now. `ModuleData::event_namespaces()`.
+2. **Section 13** gains `vec(pevent)` after the provides: `Interface.events: Vec<ProvidedEvent>`,
+   verifier rule 9 and an events count in rule 1; `Interface::event_descs` and `Interface::index`
+   include them.
+3. **Verifier**: `VerifyError::Events { what, reason }` for section 14.
+4. **Linking**: `LinkError::{UnknownEvent { namespace, name }, EventPayload { namespace, name,
+   module, host }}`; `Imports` carries the registered events (`Imports::event`, `events`).
+5. **Builder**: `ModuleBuilder::event_ref(namespace, name, payload) -> u32`.
+6. **API**: `EventDesc`, `HostRegistry::{register_event, replace_event, event, events}`, new
+   `RegistryError` variants, `ApiIndex.events` and `.efapi` format version 2 (API_INDEX.md).

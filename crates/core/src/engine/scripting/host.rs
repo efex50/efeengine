@@ -6,7 +6,7 @@ use std::fmt;
 use efevm::{Exit, ExportKind, Instance, Module, SpawnError, Trap};
 use hecs::World;
 
-use super::{ModuleId, ScriptEvent};
+use super::{ModuleId, ScriptEvent, ScriptEventError};
 use crate::engine::{commands::Commands, input::InputState, time::Time, types::TypeRegistry};
 
 /// Severity of a script log line.
@@ -26,12 +26,14 @@ pub struct LogLine {
 
 /// At most this many log lines are kept per frame; the rest are dropped.
 pub(crate) const MAX_LOG_LINES: usize = 1000;
-/// At most this many script events can be sent per frame.
+/// At most this many script events can be sent per frame (all events together).
 pub(crate) const MAX_EVENTS: usize = 4096;
 
 /// File watch of a hot-reloaded module (native only).
 #[cfg(not(target_family = "wasm"))]
 pub(crate) struct Watch {
+    /// The file is a `.efmod` package (else a bare `.efvm` module).
+    pub package: bool,
     pub path: std::path::PathBuf,
     pub mtime: Option<std::time::SystemTime>,
 }
@@ -47,13 +49,18 @@ pub(crate) struct ModuleSlot {
     pub version: u32,
     /// Units per frame.
     pub budget: u64,
+    /// `Limits::max_memory_pages` of the instance.
+    pub memory_pages: u32,
     /// Units left this frame.
     pub remaining: u64,
     /// Import namespace prefixes this module may use; `None` = all (game modules).
     pub allowed: Option<Vec<String>>,
     pub pending_init: bool,
-    /// `(function, doc)` requested with `engine.mods.export` during `init`.
-    pub exports: Vec<(String, String)>,
+    /// Doc of the namespace the mod's provides live in (only used with section 13).
+    pub doc: String,
+    /// What a loaded `.efmod` package adds (manifest, grant, assets); `None` for game modules
+    /// and bare `load_mod` mods.
+    pub package: Option<super::packages::PackageInfo>,
     #[cfg(not(target_family = "wasm"))]
     pub watch: Option<Watch>,
 }
@@ -121,10 +128,13 @@ pub struct ScriptHost {
     pub(crate) events_in: Vec<ScriptEvent>,
     /// Script events sent this frame (readable next frame).
     pub(crate) events_out: Vec<ScriptEvent>,
+    /// Sends refused by the per-frame cap since the last `leave`.
+    pub(crate) dropped_events: usize,
+    /// Registered events and their payload sizes (qualified name), refreshed when scripts run.
+    pub(crate) event_sizes: std::collections::BTreeMap<String, usize>,
     pub(crate) logs: Vec<LogLine>,
     pub(crate) modules: Vec<ModuleSlot>,
     pub(crate) current: Option<ModuleId>,
-    pub(crate) in_init: bool,
 }
 
 impl ScriptHost {
@@ -137,10 +147,11 @@ impl ScriptHost {
             input: InputState::new(),
             events_in: Vec::new(),
             events_out: Vec::new(),
+            dropped_events: 0,
+            event_sizes: Default::default(),
             logs: Vec::new(),
             modules: Vec::new(),
             current: None,
-            in_init: false,
         }
     }
 
@@ -182,10 +193,37 @@ impl ScriptHost {
         &self.events_in
     }
 
-    /// Send a script event (readable next frame by scripts and Rust systems).
-    pub fn send_event(&mut self, ev: ScriptEvent) {
+    /// The payloads of the script events `event` (`namespace.name`) readable this frame, in
+    /// send order. Entries whose length differs from the registered payload size are skipped.
+    pub fn events_named<'a>(&'a self, event: &'a str) -> impl Iterator<Item = &'a [u8]> + 'a {
+        let size = self.event_sizes.get(event).copied();
+        self.events_in.iter().filter(move |e| e.event == event && Some(e.payload.len()) == size).map(|e| e.payload.as_slice())
+    }
+
+    /// Send the script event `event` (`namespace.name`, registered) with `payload` (exactly the
+    /// registered payload struct's size; empty for an event without payload); readable next
+    /// frame by scripts and Rust systems. An unregistered event or a payload of the wrong size
+    /// is refused. Counts against the 4096 events per frame cap like a script's send: beyond
+    /// it the event is dropped (and counted, `Scripting::dropped_events_last_frame`), which is
+    /// not an error.
+    pub fn send_event(&mut self, event: &str, payload: &[u8]) -> Result<(), ScriptEventError> {
+        match self.event_sizes.get(event) {
+            None => return Err(ScriptEventError::Unknown { event: event.to_string() }),
+            Some(&n) if n != payload.len() => {
+                return Err(ScriptEventError::Payload { event: event.to_string(), expected: n, got: payload.len() });
+            }
+            Some(_) => {}
+        }
+        self.queue_event(ScriptEvent { event: event.to_string(), payload: payload.to_vec() });
+        Ok(())
+    }
+
+    /// Queue an already checked event, or count it as dropped over the cap.
+    pub(crate) fn queue_event(&mut self, ev: ScriptEvent) {
         if self.events_out.len() < MAX_EVENTS {
             self.events_out.push(ev);
+        } else {
+            self.dropped_events += 1;
         }
     }
 
@@ -206,58 +244,128 @@ impl ScriptHost {
         }
     }
 
-    /// `engine.mods.export`: remember `func` to be registered after `init` returns.
-    /// 0 ok, -1 refused (not inside `init`, no such exported function, bad name or doc).
-    pub(crate) fn request_export(&mut self, func: &str, doc: &str) -> i32 {
-        let (Some(id), true) = (self.current, self.in_init) else { return -1 };
-        if !efevm::api::is_ident(func) || doc.trim().is_empty() {
-            return -1;
-        }
-        let Some(slot) = self.modules.get_mut(id.0 as usize) else { return -1 };
-        if slot.module.export_func(func).is_none() {
-            return -1;
-        }
-        match slot.exports.iter_mut().find(|(f, _)| f == func) {
-            Some(e) => e.1 = doc.to_string(),
-            None => slot.exports.push((func.to_string(), doc.to_string())),
-        }
-        0
-    }
-
     /// Call export `export` of module `id` with raw argument bits, from the module's
     /// remaining budget. The instance is taken out of its slot while it runs, so calling a
     /// module that is already running (directly or through another module) is a clean error.
     pub(crate) fn run_export(&mut self, id: ModuleId, export: &str, args: &[u64]) -> Result<Vec<u64>, RunError> {
+        self.run_inner(id, Target::Export(export), args, 0, &[]).map(|(r, _)| r)
+    }
+
+    /// Call function `func` (module index space) of module `id`: the same as
+    /// [`run_export`](Self::run_export) but by index, for provides, which need not be exports.
+    #[allow(dead_code)]
+    pub(crate) fn run_func(&mut self, id: ModuleId, func: u32, args: &[u64]) -> Result<Vec<u64>, RunError> {
+        self.run_inner(id, Target::Func(func), args, 0, &[]).map(|(r, _)| r)
+    }
+
+    /// Run a provide for a call from another module (the copy ABI, e8-design section 7):
+    /// charge `call.units` from the module's remaining budget, write the copied arguments into
+    /// the module's memory, run `call.func` and, only after a normal return, read the ranges
+    /// marked `back` out again (in order).
+    pub(crate) fn run_provide(&mut self, id: ModuleId, call: &ProvideCall) -> Result<(Vec<u64>, Vec<Vec<u8>>), RunError> {
+        self.run_inner(id, Target::Func(call.func), &call.args, call.units, &call.copies)
+    }
+
+    fn run_inner(
+        &mut self,
+        id: ModuleId,
+        target: Target<'_>,
+        args: &[u64],
+        units: u64,
+        copies: &[CopyIn],
+    ) -> Result<(Vec<u64>, Vec<Vec<u8>>), RunError> {
         let idx = id.0 as usize;
         let slot = self.modules.get_mut(idx).ok_or(RunError::NoModule)?;
         if !slot.loaded {
             return Err(RunError::Unloaded(slot.name.clone()));
         }
-        let Some(mut inst) = slot.instance.take() else {
+        if slot.instance.is_none() {
             return Err(RunError::Busy(slot.name.clone()));
-        };
+        }
+        if slot.remaining < units {
+            return Err(RunError::OutOfBudget);
+        }
+        slot.remaining -= units;
+        let mut inst = slot.instance.take().expect("checked above");
         let budget = slot.remaining;
-        let prev = self.current.replace(id);
-        let (result, units) = drive(&mut inst, export, args, self, budget);
-        self.current = prev;
+        let mut written = Ok(());
+        for c in copies {
+            if let Err(t) = inst.memory_mut().write(c.dst, &c.data) {
+                written = Err(RunError::Trap(format!("{t} (copying an argument into the scratch region of module {})", slot.name)));
+                break;
+            }
+        }
+        let (result, spent) = match written {
+            Ok(()) => {
+                let prev = self.current.replace(id);
+                let r = drive(&mut inst, target, args, self, budget);
+                self.current = prev;
+                r
+            }
+            Err(e) => (Err(e), 0),
+        };
+        let mut back = Vec::new();
+        let mut result = result;
+        if result.is_ok() {
+            for c in copies.iter().filter(|c| c.back) {
+                let mut buf = vec![0u8; c.data.len()];
+                match inst.memory().read(c.dst, &mut buf) {
+                    Ok(()) => back.push(buf),
+                    Err(t) => {
+                        result = Err(RunError::Trap(t.to_string()));
+                        break;
+                    }
+                }
+            }
+        }
         let slot = &mut self.modules[idx];
-        slot.remaining = slot.remaining.saturating_sub(units);
+        slot.remaining = slot.remaining.saturating_sub(spent);
         if matches!(result, Err(RunError::OutOfBudget)) {
             slot.remaining = 0;
         }
         slot.instance = Some(inst);
-        result
+        result.map(|r| (r, back))
     }
+}
+
+/// What to start in a module.
+#[derive(Clone, Copy)]
+enum Target<'a> {
+    Export(&'a str),
+    Func(u32),
+}
+
+/// One argument range copied into a provider's scratch region.
+pub(crate) struct CopyIn {
+    /// Address in the provider's memory.
+    pub dst: u64,
+    pub data: Vec<u8>,
+    /// Copy the range back to the caller after a normal return.
+    pub back: bool,
+}
+
+/// Everything [`ScriptHost::run_provide`] needs for one call.
+pub(crate) struct ProvideCall {
+    pub func: u32,
+    /// Raw argument slots as the provider's function takes them (pointers already rewritten).
+    pub args: Vec<u64>,
+    pub copies: Vec<CopyIn>,
+    /// Budget units to charge before the run.
+    pub units: u64,
 }
 
 fn drive(
     inst: &mut Instance<ScriptHost>,
-    export: &str,
+    target: Target<'_>,
     args: &[u64],
     host: &mut ScriptHost,
     budget: u64,
 ) -> (Result<Vec<u64>, RunError>, u64) {
-    let fiber = match inst.spawn(export, args) {
+    let spawned = match target {
+        Target::Export(name) => inst.spawn(name, args),
+        Target::Func(f) => inst.spawn_func(f, args),
+    };
+    let fiber = match spawned {
         Ok(f) => f,
         Err(e) => return (Err(RunError::Spawn(e)), 0),
     };

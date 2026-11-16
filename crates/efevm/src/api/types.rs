@@ -199,6 +199,46 @@ impl HostFn {
     }
 }
 
+/// A script event: a name in a namespace with an optional struct payload (API_INDEX.md
+/// "events"). Registering it with `HostRegistry::register_event` puts it in the index; a
+/// module refers to it in section 14 `events` and the reference is checked at link time.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EventDesc {
+    /// Dot-separated namespace, e.g. `game`. Must be defined in the registry first.
+    pub namespace: String,
+    /// A plain identifier, e.g. `score_changed`.
+    pub name: String,
+    /// The name of a registered struct whose bytes are the payload; `None` = no payload.
+    pub payload: Option<String>,
+    /// One line at least; the registry rejects an empty doc.
+    pub doc: String,
+    /// Filled by the registry from the namespace's owner.
+    pub owner: String,
+}
+
+impl EventDesc {
+    /// An event without payload, doc or owner; set them with the chained setters.
+    pub fn new(namespace: impl Into<String>, name: impl Into<String>) -> Self {
+        EventDesc { namespace: namespace.into(), name: name.into(), payload: None, doc: String::new(), owner: String::new() }
+    }
+
+    pub fn doc(mut self, doc: impl Into<String>) -> Self {
+        self.doc = doc.into();
+        self
+    }
+
+    /// Sets the payload struct.
+    pub fn payload(mut self, name: impl Into<String>) -> Self {
+        self.payload = Some(name.into());
+        self
+    }
+
+    /// `namespace.name`.
+    pub fn qualified(&self) -> String {
+        format!("{}.{}", self.namespace, self.name)
+    }
+}
+
 /// A namespace of host functions with a version and an owner (`std`, `engine`, or a mod name).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NamespaceInfo {

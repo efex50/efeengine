@@ -213,6 +213,11 @@ fn build_big(n_hint: u32) -> ModuleData {
             hash: 0x9f0c_2b5e_17a4_d3c8,
             namespaces: vec![("env".into(), 1), ("engine.world".into(), u32::MAX)],
         }),
+        interface: None,
+        events: vec![
+            EventRef { namespace: "game".into(), name: "score_changed".into(), payload: Some(("Score".into(), 8)) },
+            EventRef { namespace: "engine.input".into(), name: "jump".into(), payload: None },
+        ],
     }
 }
 
@@ -418,6 +423,52 @@ fn all_sections_module(memory: MemoryType) -> ModuleData {
             ],
         },
         api: Some(ApiRef { hash: u64::MAX, namespaces: vec![("".into(), 0), ("x\u{e9}".into(), 300)] }),
+        interface: Some(odd_interface()),
+        events: vec![
+            EventRef { namespace: "".into(), name: "".into(), payload: Some(("".into(), u32::MAX)) },
+            EventRef { namespace: "x\u{e9}".into(), name: "1".into(), payload: None },
+            EventRef { namespace: "x\u{e9}".into(), name: "1".into(), payload: None },
+        ],
+    }
+}
+
+/// Decodable but not verifiable: every `apitype` and `prim` byte, extreme LEB values.
+fn odd_interface() -> Interface {
+    let all_types = [
+        ApiType::I32,
+        ApiType::I64,
+        ApiType::F32,
+        ApiType::F64,
+        ApiType::Bool,
+        ApiType::Entity,
+        ApiType::Str,
+        ApiType::Bytes,
+        ApiType::Struct("".into()),
+        ApiType::Struct("S\u{e9}".into()),
+    ];
+    let mut s = StructDesc::new("S\u{e9}", u32::MAX, 1 << 31).doc("d\u{0}");
+    s.owner = "engine.world".into();
+    s.component = Some(u32::MAX);
+    for (i, p) in Prim::ALL.into_iter().enumerate() {
+        s.fields.push(FieldDesc::new(format!("f{i}"), u32::MAX - i as u32, p, 1 << 20).with_doc("x"));
+    }
+    Interface {
+        scratch: Some((u64::MAX, u32::MAX)),
+        structs: vec![s, StructDesc::new("", 0, 0)],
+        provides: vec![
+            Provide {
+                name: "p".into(),
+                func: u32::MAX,
+                doc: "".into(),
+                params: all_types.iter().enumerate().map(|(i, t)| Param::new(format!("a{i}"), t.clone())).collect(),
+                results: all_types.iter().map(|t| Param::new("", t.clone())).collect(),
+            },
+            Provide::default(),
+        ],
+        events: vec![
+            ProvidedEvent { name: "".into(), payload: Some("".into()), doc: "".into() },
+            ProvidedEvent { name: "e\u{e9}".into(), payload: None, doc: "d\u{0}".into() },
+        ],
     }
 }
 
@@ -439,7 +490,7 @@ fn every_section_round_trips() {
         if expect_mem {
             expect.push(5);
         }
-        expect.extend([6, 7, 8, 9, 10, 11, 12]);
+        expect.extend([6, 7, 8, 9, 10, 11, 12, 13, 14]);
         assert_eq!(ids, expect, "{memory:?}");
         let back = decode(&bytes).unwrap_or_else(|e| panic!("{memory:?}: {e}"));
         assert_eq!(back, m, "{memory:?}");
@@ -552,7 +603,7 @@ fn duplicate_section_rejected() {
 
 #[test]
 fn unknown_section_ids_rejected() {
-    for id in [0u8, 13, 14, 50, 127] {
+    for id in [0u8, 15, 50, 127] {
         let mut b = HEADER.to_vec();
         b.extend_from_slice(&[id, 0]);
         assert_eq!(decode_err(&b), DecodeError::UnknownSection(id), "id {id}");
@@ -693,6 +744,41 @@ fn runnable_module() -> ModuleData {
     b.export_func("imp", imp);
     b.export_global("g", g);
     b.func_name(f, "main");
+    // A provided function taking `str` and a struct, so the seed carries a valid section 13.
+    let mut tb = FunctionBuilder::new(4);
+    tb.ret(0);
+    let take = b.add_func(FuncType::new([ValType::I64; 3], [ValType::I64]), tb);
+    let item = StructDesc::new("Item", 8, 4)
+        .field(FieldDesc::new("count", 0, Prim::U32, 1))
+        .field(FieldDesc::new("weight", 4, Prim::F32, 1).with_doc("kg"))
+        .doc("An item.");
+    let mut transform = StructDesc::new("Transform", 12, 4).field(FieldDesc::new("pos", 0, Prim::F32, 3));
+    transform.owner = "engine".into();
+    transform.component = Some(7);
+    b.interface(Interface {
+        scratch: Some((64, 256)),
+        structs: vec![item, transform],
+        provides: vec![
+            Provide {
+                name: "give".into(),
+                func: take,
+                doc: "Give an item.".into(),
+                params: vec![Param::new("text", ApiType::Str), Param::new("item", ApiType::Struct("Item".into()))],
+                results: vec![Param::new("n", ApiType::I64)],
+            },
+            Provide {
+                name: "run".into(),
+                func: f,
+                doc: "Run main.".into(),
+                params: vec![Param::new("x", ApiType::I32)],
+                results: vec![Param::new("r", ApiType::I32)],
+            },
+        ],
+        events: vec![ProvidedEvent { name: "dropped".into(), payload: Some("Item".into()), doc: "Dropped.".into() }],
+    });
+    // Section 14: events the module sends or reads, so the seed carries a valid one.
+    assert_eq!(b.event_ref("game", "score_changed", Some(("Score", 8))), 0);
+    assert_eq!(b.event_ref("engine.input", "jump", None), 1);
     b.finish().expect("runnable module builds").data().clone()
 }
 
@@ -710,6 +796,15 @@ fn instantiate_and_run(module: &Module) -> bool {
         let ty = data.types[imp.type_idx as usize].clone();
         // Invalid names cannot be registered; such a module then fails to link.
         let _ = try_host(&mut reg, &imp.namespace, &imp.name, ty, |_c, _a, _r| Ok(HostOk::Continue));
+    }
+    for e in &data.events {
+        let _ = reg.define_namespace(&e.namespace, 1, "test", "Test events.");
+        if let Some((s, size)) = &e.payload {
+            let _ = reg.register_type(StructDesc::new(s.clone(), *size, 1));
+        }
+        let mut d = EventDesc::new(e.namespace.clone(), e.name.clone()).doc("Test event.");
+        d.payload = e.payload.as_ref().map(|(s, _)| s.clone());
+        let _ = reg.register_event(d);
     }
     let limits = Limits { max_memory_pages: 16, max_call_depth: 64, max_registers: 1 << 16, max_fibers: 8 };
     let Ok(mut inst) = Instance::new(module, &reg.imports(), limits) else {

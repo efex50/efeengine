@@ -74,7 +74,7 @@ pub(crate) fn script_system(cx: &mut Ctx<'_>) {
 }
 
 impl Scripting {
-    /// Run `init` of every module that has not had it yet (and register what it exports).
+    /// Run `init` of every module that has not had it yet.
     pub(crate) fn run_inits(&mut self) {
         for idx in 0..self.host.modules.len() {
             let slot = &mut self.host.modules[idx];
@@ -83,7 +83,6 @@ impl Scripting {
             }
             slot.pending_init = false;
             slot.remaining = slot.budget;
-            slot.exports.clear();
             let (name, sig) = (slot.name.clone(), check_sig(&slot.module, "init", &[], &[]));
             let id = ModuleId(idx as u32);
             match sig {
@@ -94,12 +93,8 @@ impl Scripting {
                 }
                 Sig::Ok => {}
             }
-            self.host.in_init = true;
-            let r = self.host.run_export(id, "init", &[]);
-            self.host.in_init = false;
-            match r {
-                Ok(_) => self.register_exports(id),
-                Err(e) => self.report(id, "init", e),
+            if let Err(e) = self.host.run_export(id, "init", &[]) {
+                self.report(id, "init", e);
             }
         }
     }

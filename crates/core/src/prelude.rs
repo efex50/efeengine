@@ -17,7 +17,7 @@ pub use crate::{
     engine::commands::{Commands, EngineCommands},
     engine::components::{Transform, Velocity, MeshHandle, Name},
     engine::types::{TypeRegistry, TypeEntry, ScriptType, ScriptField, CompError, TypeError, entity_to_bits, entity_from_bits},
-    engine::scripting::{Scripting, ScriptHost, Script, ScriptEvent, ScriptError, ModOptions, ModuleId, ModuleInfo, LogLevel, LogLine},
+    engine::scripting::{Scripting, ScriptHost, Script, ScriptEvent, ScriptEventError, ScriptError, ModOptions, ModuleId, ModPolicy, ModRequest, Grant, DefaultPolicy, PackageInfo, LoadReport, ModError, ModuleInfo, LogLevel, LogLine},
     engine::events::Events,
     engine::resources::Resources,
     engine::time::Time,

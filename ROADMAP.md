@@ -6,7 +6,7 @@ Tags: **[N]** native (SDL3) · **[W]** web (wasm) · **[S]** shared by both.
 
 _Last updated: 2026-11-15_
 
-**Order:** IO → game systems → hecs world → rendering (wgpu). Scripting (Phase 5) needs only the world, so it can run alongside rendering.
+**Order:** IO → game systems → hecs world → rendering (wgpu) → UI (Phase 6, last). Scripting (Phase 5) needs only the world, so it can run alongside rendering. UI needs the Phase 4 renderer.
 Rendering is deliberately last: until Phase 4 the current wgpu code stays as a
 **placeholder**. The native triangle keeps working as it does now, and on the web
 nothing is drawn, which is fine. Earlier phases are tested through logs, the
@@ -18,6 +18,7 @@ native window and headless unit tests, not through rendering.
 1. Check the native-window and browser input paths by hand with `cargo xtask run input_test native` and `cargo xtask run input_test web`: they are compile-checked only so far. Include a gamepad (1.12) in both runs.
 2. Phase 3 (hecs world, `Commands`, type registry), now that the input system, schedule, fixed-step loop and headless mode (Phases 1–2) are in.
 3. Scripting E3–E5 (host registry, API index, engine bindings, mods) is done, together with 3.1–3.4. Next for Phase 3: 3.5–3.7. Not yet checked by hand: `cargo xtask run script_demo native` (window) and a web dist. See `crates/efescript/ROADMAP.md`.
+4. Scripting modules and `.efmod` mod packages are done (5.9, efescript E8); next for scripting is the language (efescript E6).
 
 Input now flows through the engine, not the global message queue, and is polled and applied in the same frame it is used.
 
@@ -223,6 +224,40 @@ Today's efescript API is unstable and static (fixed syscall numbers compiled int
   - The language server reads the index file from 5.3 and reloads it when the file changes, so completion, signatures and type errors follow the live API automatically.
 - [ ] 5.7 **AOT compilation.** Compile modules ahead of time to native code (and to wasm for the web build), using the same ABI and import resolution as the interpreter.
 - [ ] 5.8 **JIT compilation.** Native only at first (for example with Cranelift). Browsers cannot run generated machine code, so the web build uses the interpreter or AOT-to-wasm modules.
+- [x] 5.9 **Modules and mod packages.** Details: `crates/efescript/ROADMAP.md`, E8.
+  _Done: multi-file `.efa` with a linker, `.efmod` 7z packages (`crates/efemod`), `efescript pack`/`inspect`, `cargo xtask mods`, `Engine::load_package` with a deny-by-default `ModPolicy`, dependency order, declared provides with a copy ABI, unload/reload rules and typed script events in the index (efescript E8.1–E8.13)._
+  - Mods are written as many files and linked into one module at build time (multi-file `.efa`, a linker, later the language's `use`).
+  - A mod ships as one `.efmod` package (like a `.jar`): manifest with id, version, dependencies, requested permissions and the engine index it was built against, plus its module, its own `.efapi` and its assets.
+  - `Engine::load_package(bytes)` and a `mods/` folder on native; load order from dependencies; the game grants permissions, the package only requests them.
+  - A mod's exports are declared in its module, so they reach the index without running it; strings and structs passed between mods are copied between their separate memories.
+
+## Phase 6: UI (editor with egui, game UI with iced) (last)
+
+Goal: two UI toolkits for two audiences, both optional. **egui** for the people building
+games (editor, inspectors, console, profiler); **iced** for the people playing them (menus,
+settings, inventory, dialogs). The core stays toolkit-agnostic. Full proposal, principles and
+risks: [`ui-roadmap.md`](ui-roadmap.md); this phase maps it onto the engine as it is.
+
+Depends on Phase 4: both toolkits draw through wgpu, and today the renderer is a placeholder
+that the window owns. Until 4.1 (one `Renderer` owned by `Engine`) and 4.3 (resize) land there
+is nowhere to put a UI pass. Some editor work (6.4) also needs the type registry from 3.4,
+which is done.
+
+What the engine already decides for this phase (from the code, 2026-11-15):
+- **Windowing is SDL3 natively and the DOM on the web, not winit.** egui is backend-agnostic: the engine feeds it `egui::RawInput` built from `InputEvent` and draws with `egui-wgpu`, so this is low risk. iced's normal shell is `iced_winit`; embedding it in the engine means driving `iced_runtime`'s `UserInterface` with engine events and drawing with `iced_wgpu` (iced's own "integration" pattern). This is the main thing 6.1 must prove.
+- **wgpu version lockstep.** The engine uses wgpu 27 (with `webgl` on wasm). `egui-wgpu` and `iced_wgpu` each pin a wgpu version, so the engine, egui and iced must agree on one wgpu release, or the UI crate cannot share the device. Upgrades then move together.
+- **Web.** The web build uses wasm threads (atomics, shared memory) and the DOM backend; both toolkits must work there with the engine's canvas, not their own.
+- **Scripts and mods.** iced's model (Rust types, messages, `view` functions) cannot be written from efescript. Game UI that mods may add needs a data-driven layer exposed through host functions, so it is in the API index like everything else (efescript roadmap E8).
+
+- [ ] 6.1 **Platform check (ui-roadmap Phase 0).** Pick egui and iced versions whose wgpu matches the engine's; build two proof-of-concept apps on the engine's renderer (native SDL3 and web canvas), not on winit. Record a compatibility matrix (native, web WebGPU, web WebGL; Android and iOS only if they become targets) and minimum versions. _Done when_ both draw a widget inside an engine window natively and in the browser, or the matrix says why not.
+- [ ] 6.2 **UI pass in the renderer.** A `RenderStage::Ui` after the scene pass: the renderer owns surface acquire and present; UI integrations record into an encoder they are given, with an explicit order (scene, game UI, editor overlay). Texture registration and lifetime, clipping and DPI (logical vs physical pixels from 1.2/1.11) are defined here once for both toolkits.
+- [ ] 6.3 **Input ownership.** Before game systems run, UI layers see the frame's `InputEvent`s in order (editor overlay, then game UI) and mark what they consumed; `InputState` exposes "consumed by UI" so a click on a menu does not also fire the weapon. Text input, IME and clipboard go through the existing window API (`set_text_input`).
+- [ ] 6.4 **egui developer tools (ui-roadmap Phases 1 and 4), crate `efeengine-editor`.** First a stats panel (FPS, frame time, entity count), then: an entity and component inspector driven by the type registry (3.4) so every registered component is editable without per-type code; a log viewer on the engine logger; a script panel (loaded modules and mods, budgets, traps, the live API index); later a profiler (with the `tracing`/`puffin` item) and an asset browser. Not linked into game builds unless the game opts in.
+- [ ] 6.5 **iced game UI (ui-roadmap Phases 2 and 3), crate `efeengine-ui`.** A main menu and a settings screen with a custom theme, fonts and images; measure startup cost, binary size (native and wasm), memory and frame time. Then the public API: how a game creates, updates and draws its UI, how UI actions become engine events or `Commands`, threading and lifecycle rules. No iced types in `efeengine-core`.
+- [ ] 6.6 **Script-facing UI.** A small, data-driven UI description (panels, labels, buttons, lists, bound to script state) that scripts and mods build through host functions registered in the API index, rendered by the game UI crate. Mod permissions decide whether a mod may open UI. Decide in 6.5 whether this sits on iced or on a simpler immediate-mode layer.
+- [ ] 6.7 **Escape hatches and docs.** A game can use iced, another toolkit or its own UI without the editor; document how to bypass the built-in game UI; examples for each; platform smoke tests.
+
+Open questions carried from `ui-roadmap.md`: iced maturity on the web and on mobile; text shaping, fonts and localization (shared with the "Text and UI" item below); the editor's own window and lifecycle versus the game's.
 
 ## Later: missing parts
 
@@ -230,7 +265,7 @@ Today's efescript API is unstable and static (fixed syscall numbers compiled int
 |---|---|---|
 | 2D rendering | Textured sprites, sprite batching, depth or sorting, blending | after Phase 4 |
 | Assets | `AssetServer` with handles; `std::fs` natively, async `fetch` on web; start with `include_bytes!`. The data side can start before Phase 4. | after Phase 3 |
-| Text and UI | Font rendering (`glyphon`/`fontdue`), debug overlay, FPS counter | after sprites |
+| Text and UI | Font rendering (`glyphon`/`fontdue`) for in-world text. UI toolkits, the debug overlay and the FPS counter moved to Phase 6. | after sprites |
 | Audio | `kira` or `cpal` (both work natively and on web via WebAudio). Independent of rendering, so it can come earlier if needed. | later |
 | Scripting | Moved to Phase 5. | after Phase 3 |
 | Logging | Use `log` levels (`env_logger` is used as the log-crate logger on native). On a 1-core web build, use a direct logger instead of the worker logger. | soon |

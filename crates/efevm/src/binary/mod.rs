@@ -26,6 +26,10 @@ pub enum DecodeError {
     FunctionCodeMismatch,
     RegisterTooLarge,
     ValueTooLarge,
+    /// An `apitype` byte of section 13 that is not 0..=8 (`ptr` has no encoding).
+    BadApiType(u8),
+    /// A struct field `prim` byte of section 13 that is not 0..=11.
+    BadPrim(u8),
 }
 
 impl fmt::Display for DecodeError {
@@ -47,6 +51,8 @@ impl fmt::Display for DecodeError {
             DecodeError::FunctionCodeMismatch => f.write_str("functions and code counts differ"),
             DecodeError::RegisterTooLarge => f.write_str("register number too large"),
             DecodeError::ValueTooLarge => f.write_str("value too large"),
+            DecodeError::BadApiType(b) => write!(f, "bad API type {b}"),
+            DecodeError::BadPrim(b) => write!(f, "bad struct field type {b}"),
         }
     }
 }

@@ -1,0 +1,12 @@
+; inventory: root file. Declares the mod's interface; the code is in items.efa.
+use "items.efa"
+
+export struct Item, "One stack of items." {
+    id: u32
+    count: i32
+}
+
+provide give(name: str, item: &Item) -> (status: i32) = items.give,
+    "Give the stack `item` under `name`: returns len(name) + the old count and adds 1 to item.count."
+
+provide event given(&Item), "A stack was given; the payload is the stack after the gift."

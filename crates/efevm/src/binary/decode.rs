@@ -2,10 +2,11 @@
 
 use super::leb::{self, LebError};
 use super::DecodeError;
+use crate::api::{ApiType, FieldDesc, Param, Prim, StructDesc};
 use crate::error::LoadError;
 use crate::module::{
     ApiRef, BrTable, DataSegment, Export, ExportKind, FuncLines, Function, Global, Import, Inst,
-    LineEntry, MemoryType, ModuleData,
+    EventRef, Interface, LineEntry, MemoryType, ModuleData, Provide, ProvidedEvent,
 };
 use crate::op::{Op, Shape};
 use crate::types::{FuncType, ValType};
@@ -174,7 +175,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<ModuleData, LoadError> {
         if id >= 128 {
             continue;
         }
-        if !(1..=12).contains(&id) {
+        if !(1..=14).contains(&id) {
             return Err(r.err_at(id_pos, DecodeError::UnknownSection(id)));
         }
         if id <= last_id {
@@ -197,7 +198,9 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<ModuleData, LoadError> {
             }
             10 => names(&mut p, &mut m)?,
             11 => lines(&mut p, &mut m)?,
-            _ => api(&mut p, &mut m)?,
+            12 => api(&mut p, &mut m)?,
+            13 => interface(&mut p, &mut m)?,
+            _ => events(&mut p, &mut m)?,
         }
         p.finish(id)?;
     }
@@ -435,6 +438,107 @@ fn api(p: &mut Reader, m: &mut ModuleData) -> Res<()> {
     }
     m.api = Some(ApiRef { hash, namespaces });
     Ok(())
+}
+
+/// Section 13 (SPEC.md 9.2): `scratch, vec(struct), vec(provide), vec(pevent)`. Vectors grow
+/// by push: the elements are much larger than the one byte per element `count` guarantees.
+fn interface(p: &mut Reader, m: &mut ModuleData) -> Res<()> {
+    let scratch = if p.flag()? { Some((p.u64()?, p.u32()?)) } else { None };
+    let mut structs = Vec::new();
+    for _ in 0..p.count()? {
+        structs.push(struct_desc(p)?);
+    }
+    let mut provides = Vec::new();
+    for _ in 0..p.count()? {
+        let name = p.string()?;
+        let func = p.u32()?;
+        let doc = p.string()?;
+        let params = param_list(p)?;
+        let results = param_list(p)?;
+        provides.push(Provide { name, func, doc, params, results });
+    }
+    let mut events = Vec::new();
+    for _ in 0..p.count()? {
+        let name = p.string()?;
+        let payload = if p.flag()? { Some(p.string()?) } else { None };
+        let doc = p.string()?;
+        events.push(ProvidedEvent { name, payload, doc });
+    }
+    m.interface = Some(Interface { scratch, structs, provides, events });
+    Ok(())
+}
+
+/// Section 14 (SPEC.md 9.3): `vec(eventref)`; eventref = `string namespace, string name,
+/// flag byte; if 1: string struct name, uleb size`. Grows by push.
+fn events(p: &mut Reader, m: &mut ModuleData) -> Res<()> {
+    for _ in 0..p.count()? {
+        let namespace = p.string()?;
+        let name = p.string()?;
+        let payload = if p.flag()? { Some((p.string()?, p.u32()?)) } else { None };
+        m.events.push(EventRef { namespace, name, payload });
+    }
+    Ok(())
+}
+
+fn struct_desc(p: &mut Reader) -> Res<StructDesc> {
+    let name = p.string()?;
+    let owner = p.string()?;
+    let component = if p.flag()? { Some(u32::from_le_bytes(p.array::<4>()?)) } else { None };
+    let doc = p.string()?;
+    let size = p.u32()?;
+    let align = p.u32()?;
+    let mut fields = Vec::new();
+    for _ in 0..p.count()? {
+        let name = p.string()?;
+        let at = p.pos;
+        let b = p.byte()?;
+        let ty = prim(b).ok_or_else(|| p.err_at(at, DecodeError::BadPrim(b)))?;
+        let count = p.u32()?;
+        let offset = p.u32()?;
+        let doc = p.string()?;
+        fields.push(FieldDesc { name, offset, ty, count, doc });
+    }
+    Ok(StructDesc { name, size, align, fields, doc, owner, component })
+}
+
+fn param_list(p: &mut Reader) -> Res<Vec<Param>> {
+    let mut out = Vec::new();
+    for _ in 0..p.count()? {
+        let name = p.string()?;
+        let at = p.pos;
+        let ty = match p.byte()? {
+            0 => ApiType::I32,
+            1 => ApiType::I64,
+            2 => ApiType::F32,
+            3 => ApiType::F64,
+            4 => ApiType::Bool,
+            5 => ApiType::Entity,
+            6 => ApiType::Str,
+            7 => ApiType::Bytes,
+            8 => ApiType::Struct(p.string()?),
+            b => return Err(p.err_at(at, DecodeError::BadApiType(b))),
+        };
+        out.push(Param { name, ty });
+    }
+    Ok(out)
+}
+
+fn prim(b: u8) -> Option<Prim> {
+    Some(match b {
+        0 => Prim::U8,
+        1 => Prim::I8,
+        2 => Prim::U16,
+        3 => Prim::I16,
+        4 => Prim::U32,
+        5 => Prim::I32,
+        6 => Prim::U64,
+        7 => Prim::I64,
+        8 => Prim::F32,
+        9 => Prim::F64,
+        10 => Prim::Bool,
+        11 => Prim::Entity,
+        _ => return None,
+    })
 }
 
 fn names(p: &mut Reader, m: &mut ModuleData) -> Res<()> {
@@ -711,7 +815,7 @@ mod tests {
         let b = section(4, &u(0));
         assert_eq!(err_kind(&module(&[a.clone(), b])), DecodeError::SectionOutOfOrder(4));
         assert_eq!(err_kind(&module(&[a.clone(), a.clone()])), DecodeError::SectionOutOfOrder(5));
-        assert_eq!(err_kind(&module(&[section(13, &[])])), DecodeError::UnknownSection(13));
+        assert_eq!(err_kind(&module(&[section(15, &[])])), DecodeError::UnknownSection(15));
         assert_eq!(err_kind(&module(&[section(0, &[])])), DecodeError::UnknownSection(0));
         assert_eq!(err_kind(&module(&[section(127, &[])])), DecodeError::UnknownSection(127));
     }

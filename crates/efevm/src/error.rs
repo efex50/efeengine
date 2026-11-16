@@ -33,6 +33,12 @@ pub enum LinkError {
     /// module's recorded index hash differs from the host's (`host` is `None` for imports not
     /// built by a `HostRegistry`). `Instance::new` never returns it.
     ApiHash { module: u64, host: Option<u64> },
+    /// The module's section 14 refers to event `namespace.name`, which the host does not
+    /// register.
+    UnknownEvent { namespace: String, name: String },
+    /// The module's section 14 records another payload for event `namespace.name` than the
+    /// host registers. `module` and `host` are `&Name (N bytes)` or `no payload`.
+    EventPayload { namespace: String, name: String, module: String, host: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +104,12 @@ impl fmt::Display for LinkError {
                     Some(h) => write!(f, ", host index is fnv1a64:{h:016x}"),
                     None => f.write_str(", host imports have no index"),
                 }
+            }
+            LinkError::UnknownEvent { namespace, name } => {
+                write!(f, "module uses event {namespace}.{name}, which the host does not register")
+            }
+            LinkError::EventPayload { namespace, name, module, host } => {
+                write!(f, "payload mismatch for event {namespace}.{name}: module expects {module}, host has {host}")
             }
         }
     }

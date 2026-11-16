@@ -11,6 +11,7 @@
 ; signatures):  cargo xtask build script_demo native   (or: efescript build mover.efa
 ;   --api script_demo.efapi -o mover.efvm)
 
+import engine.log.info
 import engine.world.get
 import engine.world.set
 import game.score_add
@@ -18,9 +19,13 @@ import game.score_add
 const SPEED = 60.0          ; world units per second
 
 buf resb Transform.size
+hello db "first frame: moving my entity along +x"   ; the engine prefixes [mover]
 
 export fn update(entity: i64, dt: f32, state: i64) -> i64 {
     reg status, x, step, total
+    br_if state, run              ; log once per entity, on its first frame (state 0)
+    call engine.log.info(hello, hello.len)
+run:
     call engine.world.get(entity, Transform.id, buf) -> status
     br_if status, done            ; stale entity or no Transform: do nothing
     f32.load x, buf, Transform.position

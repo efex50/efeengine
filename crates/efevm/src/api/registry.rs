@@ -4,7 +4,7 @@
 //! index file) are two views of one table.
 
 use crate::api::index::ApiIndex;
-use crate::api::types::{ApiType, HostFn, NamespaceInfo, StructDesc, is_ident, is_namespace};
+use crate::api::types::{ApiType, EventDesc, HostFn, NamespaceInfo, StructDesc, is_ident, is_namespace};
 use crate::imports::{Caller, HostFunc, HostOk, Imports};
 use crate::trap::Trap;
 use crate::types::FuncType;
@@ -228,6 +228,22 @@ pub enum RegistryError {
     DuplicateComponent { id: u32, name: String, existing: String },
     /// `unregister_owner` would remove a struct that a function of another owner still uses.
     StructInUse { name: String, function: String },
+    /// `register_event`/`replace_event` into a namespace that was never defined.
+    UnknownEventNamespace { event: String },
+    /// An event name that is not an identifier.
+    InvalidEventName { event: String },
+    /// An event with an empty (or blank) doc.
+    EmptyEventDoc { event: String },
+    /// An event payload naming a struct that is not registered.
+    UnknownEventPayload { event: String, name: String },
+    /// `register_event` of a `namespace.name` that already exists (use `replace_event`).
+    DuplicateEvent { event: String },
+    /// `replace_event` of an event that does not exist.
+    NoSuchEvent { event: String },
+    /// A function and an event may not have the same full name `namespace.name`.
+    EventFunctionClash { name: String },
+    /// `unregister_owner` would remove a struct that an event of another owner still carries.
+    StructInUseByEvent { name: String, event: String },
 }
 
 impl fmt::Display for RegistryError {
@@ -260,6 +276,18 @@ impl fmt::Display for RegistryError {
             E::StructInUse { name, function } => {
                 write!(f, "struct `{name}` is still used by {function}, which has another owner")
             }
+            E::UnknownEventNamespace { event } => write!(f, "event {event}: namespace is not defined"),
+            E::InvalidEventName { event } => write!(f, "event {event}: name is not an identifier"),
+            E::EmptyEventDoc { event } => write!(f, "event {event}: doc is empty"),
+            E::UnknownEventPayload { event, name } => {
+                write!(f, "event {event}: payload struct `{name}` is not registered")
+            }
+            E::DuplicateEvent { event } => write!(f, "event {event} is already registered"),
+            E::NoSuchEvent { event } => write!(f, "event {event} is not registered"),
+            E::EventFunctionClash { name } => write!(f, "{name} is both a function and an event"),
+            E::StructInUseByEvent { name, event } => {
+                write!(f, "struct `{name}` is still the payload of event {event}, which has another owner")
+            }
         }
     }
 }
@@ -283,6 +311,7 @@ pub struct HostRegistry<H> {
     namespaces: BTreeMap<String, NamespaceInfo>,
     functions: BTreeMap<(String, String), Entry<H>>,
     types: BTreeMap<String, StructDesc>,
+    events: BTreeMap<(String, String), EventDesc>,
 }
 
 impl<H: 'static> Default for HostRegistry<H> {
@@ -298,6 +327,7 @@ impl<H: 'static> HostRegistry<H> {
             namespaces: BTreeMap::new(),
             functions: BTreeMap::new(),
             types: BTreeMap::new(),
+            events: BTreeMap::new(),
         }
     }
 
@@ -371,6 +401,9 @@ impl<H: 'static> HostRegistry<H> {
         if let Some(r) = f.results.iter().find(|r| !r.ty.is_scalar()) {
             return Err(RegistryError::NonScalarResult { function, name: r.name.clone() });
         }
+        if self.events.contains_key(&(f.namespace.clone(), f.name.clone())) {
+            return Err(RegistryError::EventFunctionClash { name: function });
+        }
         f.owner = ns.owner.clone();
         Ok(())
     }
@@ -439,11 +472,65 @@ impl<H: 'static> HostRegistry<H> {
         Ok(())
     }
 
-    /// Removes every namespace (with its functions) and struct owned by `owner` (a mod
-    /// unload) and returns how many items (namespaces + functions + structs) were removed.
+    /// Checks `e` against the event rules and fills in its owner.
+    fn check_event(&self, e: &mut EventDesc) -> Result<(), RegistryError> {
+        let event = e.qualified();
+        let ns = self
+            .namespaces
+            .get(&e.namespace)
+            .ok_or_else(|| RegistryError::UnknownEventNamespace { event: event.clone() })?;
+        if !is_ident(&e.name) {
+            return Err(RegistryError::InvalidEventName { event });
+        }
+        if e.doc.trim().is_empty() {
+            return Err(RegistryError::EmptyEventDoc { event });
+        }
+        if let Some(s) = &e.payload
+            && !self.types.contains_key(s)
+        {
+            return Err(RegistryError::UnknownEventPayload { event, name: s.clone() });
+        }
+        if self.functions.contains_key(&(e.namespace.clone(), e.name.clone())) {
+            return Err(RegistryError::EventFunctionClash { name: event });
+        }
+        e.owner = ns.owner.clone();
+        Ok(())
+    }
+
+    /// Registers a script event. Rules: the namespace exists (the event's `owner` becomes the
+    /// namespace's owner), the name is an identifier, the doc is not blank, the payload (if
+    /// any) is a registered struct, no function has the same `namespace.name`, and the event
+    /// is not registered yet.
+    pub fn register_event(&mut self, mut desc: EventDesc) -> Result<(), RegistryError> {
+        self.check_event(&mut desc)?;
+        let key = (desc.namespace.clone(), desc.name.clone());
+        if self.events.contains_key(&key) {
+            return Err(RegistryError::DuplicateEvent { event: desc.qualified() });
+        }
+        self.events.insert(key, desc);
+        Ok(())
+    }
+
+    /// Replaces a registered event (hot reload): same rules as `register_event`, except that
+    /// `namespace.name` must already exist. The payload may change; `Imports` snapshots and
+    /// instances linked earlier keep the old layout.
+    pub fn replace_event(&mut self, mut desc: EventDesc) -> Result<(), RegistryError> {
+        self.check_event(&mut desc)?;
+        let key = (desc.namespace.clone(), desc.name.clone());
+        if !self.events.contains_key(&key) {
+            return Err(RegistryError::NoSuchEvent { event: desc.qualified() });
+        }
+        self.events.insert(key, desc);
+        Ok(())
+    }
+
+    /// Removes every namespace (with its functions and events), event and struct owned by
+    /// `owner` (a mod unload) and returns how many items (namespaces + functions + events +
+    /// structs) were removed.
     ///
     /// If a function of another owner still takes `&S` for a struct `S` of this owner, the
-    /// call fails with `StructInUse` and nothing is removed.
+    /// call fails with `StructInUse`; if an event of another owner still carries such a struct
+    /// as its payload, with `StructInUseByEvent`. Then nothing is removed.
     pub fn unregister_owner(&mut self, owner: &str) -> Result<usize, RegistryError> {
         for e in self.functions.values() {
             if e.sig.desc.owner == owner {
@@ -457,13 +544,25 @@ impl<H: 'static> HostRegistry<H> {
                 }
             }
         }
-        let before = self.namespaces.len() + self.functions.len() + self.types.len();
+        for e in self.events.values() {
+            if e.owner == owner {
+                continue;
+            }
+            if let Some(s) = &e.payload
+                && self.types.get(s).is_some_and(|t| t.owner == owner)
+            {
+                return Err(RegistryError::StructInUseByEvent { name: s.clone(), event: e.qualified() });
+            }
+        }
+        let count = |r: &Self| r.namespaces.len() + r.functions.len() + r.events.len() + r.types.len();
+        let before = count(self);
         let gone: Vec<String> =
             self.namespaces.values().filter(|n| n.owner == owner).map(|n| n.name.clone()).collect();
         self.namespaces.retain(|_, n| n.owner != owner);
         self.functions.retain(|(ns, _), e| e.sig.desc.owner != owner && !gone.contains(ns));
+        self.events.retain(|(ns, _), e| e.owner != owner && !gone.contains(ns));
         self.types.retain(|_, t| t.owner != owner);
-        Ok(before - (self.namespaces.len() + self.functions.len() + self.types.len()))
+        Ok(before - count(self))
     }
 
     pub fn function(&self, namespace: &str, name: &str) -> Option<&HostFn> {
@@ -472,6 +571,16 @@ impl<H: 'static> HostRegistry<H> {
 
     pub fn struct_type(&self, name: &str) -> Option<&StructDesc> {
         self.types.get(name)
+    }
+
+    /// The event `namespace.name`.
+    pub fn event(&self, namespace: &str, name: &str) -> Option<&EventDesc> {
+        self.events.get(&(namespace.to_string(), name.to_string()))
+    }
+
+    /// Events sorted by `(namespace, name)`.
+    pub fn events(&self) -> impl Iterator<Item = &EventDesc> {
+        self.events.values()
     }
 
     pub fn namespace(&self, name: &str) -> Option<&NamespaceInfo> {
@@ -493,8 +602,9 @@ impl<H: 'static> HostRegistry<H> {
         self.types.values()
     }
 
-    /// A snapshot of everything callable (cheap: `Arc` clones), with the namespace versions
-    /// and the index hash, for `Instance::new`. Later registrations do not affect it.
+    /// A snapshot of everything callable (cheap: `Arc` clones), with the namespace versions,
+    /// the registered events with their payload struct name and size, and the index hash, for
+    /// `Instance::new`. Later registrations do not affect it.
     pub fn imports(&self) -> Imports<H> {
         let mut imp = Imports::new();
         for ((ns, name), e) in &self.functions {
@@ -502,6 +612,12 @@ impl<H: 'static> HostRegistry<H> {
         }
         for ns in self.namespaces.values() {
             imp.namespaces.insert(ns.name.clone(), ns.version);
+        }
+        for ((ns, name), e) in &self.events {
+            // A payload struct is registered (checked by `register_event`, kept by
+            // `unregister_owner`), so its size is known.
+            let payload = e.payload.as_ref().map(|s| (s.clone(), self.types.get(s).map_or(0, |t| t.size)));
+            imp.events.insert((ns.clone(), name.clone()), payload);
         }
         imp.hash = Some(self.index().hash());
         imp
@@ -514,6 +630,7 @@ impl<H: 'static> HostRegistry<H> {
             namespaces: self.namespaces.values().cloned().collect(),
             types: self.types.values().cloned().collect(),
             functions: self.functions.values().map(|e| e.sig.desc.clone()).collect(),
+            events: self.events.values().cloned().collect(),
         }
     }
 }

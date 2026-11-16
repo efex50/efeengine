@@ -17,7 +17,7 @@ pub mod interp;
 pub mod memory;
 
 pub use api::{
-    ApiError, ApiIndex, ApiType, Args, FieldDesc, GuestSlice, HostFn, HostRegistry, NamespaceInfo, Param,
+    ApiError, ApiIndex, ApiType, Args, EventDesc, FieldDesc, GuestSlice, HostFn, HostRegistry, NamespaceInfo, Param,
     Prim, RegistryError, Results, StructDesc,
 };
 pub use binary::DecodeError;
@@ -27,8 +27,8 @@ pub use instance::{FiberId, FiberStatus, Instance};
 pub use memory::Memory;
 pub use error::{BuildError, CallError, LinkError, LoadError, SpawnError};
 pub use module::{
-    ApiRef, BrTable, DataSegment, Export, ExportKind, FuncLines, Function, Global, Import, Inst,
-    LineEntry, Lines, MemoryType, Module, ModuleData, Names,
+    ApiRef, BrTable, DataSegment, EventRef, Export, ExportKind, FuncLines, Function, Global, Import, Inst,
+    Interface, LineEntry, Lines, MemoryType, Module, ModuleData, Names, Provide, ProvidedEvent,
 };
 pub use op::{Op, Shape};
 pub use trap::{Exit, Trap};

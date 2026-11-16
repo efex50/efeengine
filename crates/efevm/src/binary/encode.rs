@@ -16,6 +16,8 @@
 //!   - 10: Names (debug names for functions and registers)
 //!   - 11: Lines (source file and line mappings)
 //!   - 12: Api (index hash and namespace versions; written when `ModuleData::api` is `Some`)
+//!   - 13: Interface (scratch, structs, provides, events; written when `ModuleData::interface` is `Some`)
+//!   - 14: Events (script event references; written when `ModuleData::events` is non-empty)
 //!
 //! Each section consists of:
 //! - 1-byte section ID
@@ -23,6 +25,7 @@
 //! - Raw payload bytes
 
 use super::leb;
+use crate::api::{ApiType, Prim};
 use crate::module::*;
 use crate::op::Shape;
 use crate::types::ValType;
@@ -307,7 +310,132 @@ pub(crate) fn encode(m: &ModuleData) -> Vec<u8> {
         emit_section(&mut out, 12, &payload);
     }
 
+    // Section 13: interface (written whenever present, even when empty)
+    if let Some(iface) = &m.interface {
+        let mut payload = Vec::new();
+        interface(&mut payload, iface);
+        emit_section(&mut out, 13, &payload);
+    }
+
+    // Section 14: event references (written when non-empty)
+    if !m.events.is_empty() {
+        let mut payload = Vec::new();
+        write_len(&mut payload, m.events.len());
+        for e in &m.events {
+            write_str(&mut payload, &e.namespace);
+            write_str(&mut payload, &e.name);
+            match &e.payload {
+                None => payload.push(0),
+                Some((s, size)) => {
+                    payload.push(1);
+                    write_str(&mut payload, s);
+                    leb::write_u32(&mut payload, *size);
+                }
+            }
+        }
+        emit_section(&mut out, 14, &payload);
+    }
+
     out
+}
+
+/// SPEC.md 9.2: `scratch, vec(struct), vec(provide), vec(pevent)`.
+fn interface(out: &mut Vec<u8>, iface: &Interface) {
+    match iface.scratch {
+        None => out.push(0),
+        Some((offset, size)) => {
+            out.push(1);
+            leb::write_u64(out, offset);
+            leb::write_u32(out, size);
+        }
+    }
+    write_len(out, iface.structs.len());
+    for s in &iface.structs {
+        write_str(out, &s.name);
+        write_str(out, &s.owner);
+        match s.component {
+            None => out.push(0),
+            Some(id) => {
+                out.push(1);
+                out.extend_from_slice(&id.to_le_bytes());
+            }
+        }
+        write_str(out, &s.doc);
+        leb::write_u32(out, s.size);
+        leb::write_u32(out, s.align);
+        write_len(out, s.fields.len());
+        for f in &s.fields {
+            write_str(out, &f.name);
+            out.push(prim_byte(f.ty));
+            leb::write_u32(out, f.count);
+            leb::write_u32(out, f.offset);
+            write_str(out, &f.doc);
+        }
+    }
+    write_len(out, iface.provides.len());
+    for p in &iface.provides {
+        write_str(out, &p.name);
+        leb::write_u32(out, p.func);
+        write_str(out, &p.doc);
+        for list in [&p.params, &p.results] {
+            write_len(out, list.len());
+            for param in list {
+                write_str(out, &param.name);
+                api_type(out, &param.ty);
+            }
+        }
+    }
+    write_len(out, iface.events.len());
+    for e in &iface.events {
+        write_str(out, &e.name);
+        match &e.payload {
+            None => out.push(0),
+            Some(s) => {
+                out.push(1);
+                write_str(out, s);
+            }
+        }
+        write_str(out, &e.doc);
+    }
+}
+
+/// `ptr` has no encoding (SPEC.md 9.2) and the verifier rejects it in a provide; the encoder
+/// cannot fail, so it writes `0xFF`, which the decoder rejects as `BadApiType(0xFF)`.
+const PTR_PLACEHOLDER: u8 = 0xFF;
+
+fn api_type(out: &mut Vec<u8>, t: &ApiType) {
+    match t {
+        ApiType::I32 => out.push(0),
+        ApiType::I64 => out.push(1),
+        ApiType::F32 => out.push(2),
+        ApiType::F64 => out.push(3),
+        ApiType::Bool => out.push(4),
+        ApiType::Entity => out.push(5),
+        ApiType::Str => out.push(6),
+        ApiType::Bytes => out.push(7),
+        ApiType::Struct(name) => {
+            out.push(8);
+            write_str(out, name);
+        }
+        ApiType::Ptr => out.push(PTR_PLACEHOLDER),
+    }
+}
+
+fn prim_byte(p: Prim) -> u8 {
+    match p {
+        Prim::U8 => 0,
+        Prim::I8 => 1,
+        Prim::U16 => 2,
+        Prim::I16 => 3,
+        Prim::U32 => 4,
+        Prim::I32 => 5,
+        Prim::U64 => 6,
+        Prim::I64 => 7,
+        Prim::F32 => 8,
+        Prim::F64 => 9,
+        Prim::Bool => 10,
+        Prim::Entity => 11,
+    }
 }
 
 /// Writes a length as a u32 uleb. Lengths above `u32::MAX` saturate silently: modules that

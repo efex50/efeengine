@@ -4,7 +4,7 @@ use once_cell::sync::{Lazy, OnceCell};
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::{debug_info, engine::{config::EngineConfig, error::EngineError, events::EventRegistry, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::Resources, schedule::{Ctx, EngineCommand, Commands, Schedule, Stage}, scripting::{ModOptions, ModuleId, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, renderer::GraphicsContext, window::WindowManager};
+use crate::{debug_info, engine::{config::EngineConfig, error::EngineError, events::EventRegistry, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::Resources, schedule::{Ctx, EngineCommand, Commands, Schedule, Stage}, scripting::{LoadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, renderer::GraphicsContext, window::WindowManager};
 use crate::engine::components::{MeshHandle, Transform, Velocity};
 use crate::{global_info, thread_pool::{init_global_pool, init_global_pool_auto}};
 pub mod window;
@@ -294,6 +294,26 @@ impl Engine {
         self.state.scripting.register_host_fn(desc, f)
     }
 
+    /// Register a script event of the game: its namespace must be defined with
+    /// [`define_namespace`](Self::define_namespace) (owner = that namespace's owner), its name an
+    /// identifier, its doc not blank, its payload (if any) a registered struct (see
+    /// [`register_struct`](Self::register_struct)). It is what makes the event usable by scripts
+    /// (modules list it in their events section and call `engine.events.*`) and what puts it in
+    /// the API index. The engine itself registers no events today (`engine.*` namespaces are
+    /// reserved for it).
+    pub fn register_event(&mut self, desc: efevm::EventDesc) -> Result<(), efevm::RegistryError> {
+        self.state.scripting.register_event(desc)
+    }
+
+    /// Send the registered script event `event` (`namespace.name`) with `payload` bytes from
+    /// outside a system; readable by scripts and systems during the next frame. Refused if the
+    /// event is not registered or the payload is not exactly its struct's size.
+    pub fn send_script_event(&mut self, event: &str, payload: &[u8]) -> Result<(), scripting::ScriptEventError> {
+        self.state.scripting.check_event(event, payload.len())?;
+        self.events.send(ScriptEvent { event: event.to_string(), payload: payload.to_vec() });
+        Ok(())
+    }
+
     /// Load a game script module (all namespaces may be imported); runs its `init` at once.
     pub fn load_module(&mut self, name: &str, bytes: &[u8]) -> Result<ModuleId, ScriptError> {
         let id = self.state.scripting.load_module(name, bytes)?;
@@ -301,8 +321,9 @@ impl Engine {
         Ok(id)
     }
 
-    /// Load a mod (only `opts.allowed` namespaces may be imported); runs its `init` at once, so
-    /// what it exports is in the index when this returns.
+    /// Load a mod (only `opts.allowed` namespaces may be imported). What its module declares
+    /// as provides (section 13) is registered, and so in the index, when this returns (before
+    /// its `init` runs, which happens at once). See [`Scripting::load_mod`].
     pub fn load_mod(&mut self, bytes: &[u8], opts: ModOptions) -> Result<ModuleId, ScriptError> {
         let id = self.state.scripting.load_mod(bytes, opts)?;
         self.run_script_inits();
@@ -317,12 +338,140 @@ impl Engine {
         Ok(id)
     }
 
-    /// Unload a module: its instance is dropped and its functions and types leave the index;
-    /// modules that still call it trap cleanly.
+    /// Unload a module: its instance is dropped and its namespace, functions and types leave
+    /// the index. Refused with [`ScriptError::Needed`] while another loaded module imports
+    /// from its namespaces or copies its structs; see
+    /// [`unload_module_and_dependents`](Self::unload_module_and_dependents).
     pub fn unload_module(&mut self, id: ModuleId) -> Result<(), ScriptError> {
         let name = self.state.scripting.unload(id)?;
         self.state.types.remove_owner(&name);
         Ok(())
+    }
+
+    /// Unload `id` and every loaded module that depends on it, transitively, dependents first
+    /// (the latest loaded first). Returns the unloaded modules in that order, `id` last.
+    pub fn unload_module_and_dependents(&mut self, id: ModuleId) -> Result<Vec<ModuleId>, ScriptError> {
+        let removed = self.state.scripting.unload_cascade(id)?;
+        for (_, name) in &removed {
+            self.state.types.remove_owner(name);
+        }
+        Ok(removed.into_iter().map(|(id, _)| id).collect())
+    }
+
+    // ---- mod packages (E8) ----
+
+    /// Set the game's policy for mod packages: what each package is granted. Until set, the
+    /// [`DefaultPolicy`](scripting::DefaultPolicy) grants no namespace.
+    pub fn set_mod_policy(&mut self, policy: impl ModPolicy + 'static) {
+        self.state.scripting.set_mod_policy(policy);
+    }
+
+    /// Load one `.efmod` package (read, game check, id clash, policy, link, register, `init`).
+    /// Its dependencies must already be loaded packages. See `scripting/packages.rs`.
+    pub fn load_package(&mut self, bytes: &[u8]) -> Result<ModuleId, ModError> {
+        let pkg = efemod::Package::read(bytes, &efemod::ReadLimits::default())?;
+        let id = self.state.scripting.load_package_parsed(pkg)?;
+        self.run_script_inits();
+        Ok(id)
+    }
+
+    /// Load a set of packages `(label, bytes)`: the dependencies are resolved over the set and
+    /// the packages already loaded, packages load in dependency order (ties by id), and the
+    /// dependents of a package that fails are skipped (`ResolveProblem::DependencyFailed`).
+    pub fn load_packages(&mut self, packages: Vec<(String, Vec<u8>)>) -> LoadReport {
+        let mut report = LoadReport::default();
+        let mut read: Vec<(String, efemod::Package)> = Vec::new();
+        for (label, bytes) in packages {
+            match efemod::Package::read(&bytes, &efemod::ReadLimits::default()) {
+                Ok(p) => read.push((label, p)),
+                Err(e) => report.failed.push((label, ModError::Package(e))),
+            }
+        }
+        let loaded = self.state.scripting.loaded_packages();
+        let loaded_refs: Vec<(&str, &efemod::Version)> = loaded.iter().map(|(i, v)| (i.as_str(), v)).collect();
+        let cands: Vec<efemod::Candidate<'_>> = read
+            .iter()
+            .map(|(_, p)| efemod::Candidate { id: &p.manifest.id, version: &p.manifest.version, dependencies: &p.manifest.dependencies })
+            .collect();
+        let resolution = efemod::resolve(&cands, &loaded_refs);
+        drop(cands);
+        let mut slots: Vec<Option<(String, efemod::Package)>> = read.into_iter().map(Some).collect();
+        for (i, problem) in resolution.problems {
+            if let Some((label, _)) = slots[i].take() {
+                report.failed.push((label, ModError::Resolve(problem)));
+            }
+        }
+        let mut failed_ids: Vec<String> = Vec::new();
+        for i in resolution.order {
+            let Some((label, pkg)) = slots[i].take() else { continue };
+            if let Some(dep) = pkg.manifest.dependencies.iter().find(|d| failed_ids.contains(&d.id)) {
+                failed_ids.push(pkg.manifest.id.clone());
+                report.failed.push((label, ModError::Resolve(efemod::ResolveProblem::DependencyFailed { dep: dep.id.clone() })));
+                continue;
+            }
+            let pid = pkg.manifest.id.clone();
+            match self.state.scripting.load_package_parsed(pkg) {
+                Ok(id) => {
+                    self.run_script_inits();
+                    report.loaded.push((label, id));
+                }
+                Err(e) => {
+                    failed_ids.push(pid);
+                    report.failed.push((label, e));
+                }
+            }
+        }
+        report
+    }
+
+    /// Load every `*.efmod` file directly in `dir` (not recursive, sorted by file name) with
+    /// [`load_packages`](Self::load_packages); labels are the file names. An unreadable
+    /// directory or file is a failed entry.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn load_mods_dir(&mut self, dir: impl AsRef<std::path::Path>) -> LoadReport {
+        let dir = dir.as_ref();
+        let io = |what: String, e: std::io::Error| ModError::Script(ScriptError::Io(format!("{what}: {e}")));
+        let mut report = LoadReport::default();
+        let entries = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                report.failed.push((dir.display().to_string(), io(dir.display().to_string(), e)));
+                return report;
+            }
+        };
+        let mut files: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("efmod")))
+            .collect();
+        files.sort();
+        let mut set = Vec::new();
+        for p in files {
+            let label = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            match std::fs::read(&p) {
+                Ok(bytes) => set.push((label, bytes)),
+                Err(e) => report.failed.push((label, io(p.display().to_string(), e))),
+            }
+        }
+        let mut r = self.load_packages(set);
+        report.loaded.append(&mut r.loaded);
+        report.failed.append(&mut r.failed);
+        report
+    }
+
+    /// Hot reload the package `id` from `path` (see `Scripting::watch_package`).
+    #[cfg(not(target_family = "wasm"))]
+    pub fn watch_package(&mut self, id: ModuleId, path: impl AsRef<std::path::Path>) -> Result<(), ScriptError> {
+        self.state.scripting.watch_package(id, path)
+    }
+
+    /// The manifest, grant and assets of the package behind `id`.
+    pub fn package(&self, id: ModuleId) -> Option<&PackageInfo> {
+        self.state.scripting.package(id)
+    }
+
+    /// An asset of the package behind `id` (path without `assets/`).
+    pub fn package_asset(&self, id: ModuleId, path: &str) -> Option<&[u8]> {
+        self.state.scripting.package_asset(id, path)
     }
 
     /// Hot reload `id` from `path` (see [`Scripting::watch`]).

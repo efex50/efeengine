@@ -1,5 +1,6 @@
 //! In-memory module form: `ModuleData` (unverified) and `Module` (verified, cheap to clone).
 
+use crate::api::{Param, StructDesc};
 use crate::error::LoadError;
 use crate::op::Op;
 use crate::types::{FuncType, ValType};
@@ -162,6 +163,75 @@ pub struct ApiRef {
     pub namespaces: Vec<(String, u32)>,
 }
 
+/// One provide of section 13: a name in the mod's namespace bound to one of the module's own
+/// functions, with the typed and named signature and the doc of the API index (SPEC.md 9.2).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Provide {
+    /// A plain identifier, unique among the provides.
+    pub name: String,
+    /// Function index in the whole index space (imports first); must be a defined function.
+    pub func: u32,
+    /// Not blank.
+    pub doc: String,
+    pub params: Vec<Param>,
+    /// Scalars only.
+    pub results: Vec<Param>,
+}
+
+/// One event a mod declares in its own namespace (section 13, SPEC.md 9.2): registered as
+/// `<mod id>.name` when the mod loads, so it is in the index like every other event.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ProvidedEvent {
+    /// A plain identifier, unique among the provided events and not a provide's name.
+    pub name: String,
+    /// The name of a struct listed in the interface's `structs`; `None` = no payload.
+    pub payload: Option<String>,
+    /// Not blank.
+    pub doc: String,
+}
+
+/// Section 13 `interface`: what a module provides when it is loaded as a mod (SPEC.md 9.2).
+///
+/// More fields may be added; construct it with `..Default::default()`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Interface {
+    /// `(offset, size)` of the scratch region in linear memory that `str`, `bytes` and struct
+    /// arguments are copied into (e8-design.md section 7).
+    pub scratch: Option<(u64, u32)>,
+    /// Own structs (empty `owner`) and copies of structs defined elsewhere (non-empty `owner`).
+    pub structs: Vec<StructDesc>,
+    pub provides: Vec<Provide>,
+    /// Events the mod declares in its own namespace.
+    pub events: Vec<ProvidedEvent>,
+}
+
+/// One entry of section 14 `events` (SPEC.md 9.3): a script event the module sends or reads.
+/// The event's id inside the module is its index in `ModuleData::events`; the engine's
+/// `engine.events.*` functions take that id. Resolved against the registry at link time.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct EventRef {
+    /// Dot-separated namespace of the event (`game`, `engine.input`, a mod id).
+    pub namespace: String,
+    /// A plain identifier.
+    pub name: String,
+    /// `(struct name, size in bytes)` of the payload as the module was built against it;
+    /// `None` = the event has no payload. Must equal the registered payload at link time.
+    pub payload: Option<(String, u32)>,
+}
+
+impl EventRef {
+    /// `namespace.name`.
+    pub fn qualified(&self) -> String {
+        format!("{}.{}", self.namespace, self.name)
+    }
+
+    /// The payload size in bytes (0 without payload): how many bytes `engine.events.send`
+    /// copies from guest memory and `engine.events.read` copies to it.
+    pub fn payload_size(&self) -> u32 {
+        self.payload.as_ref().map_or(0, |(_, n)| *n)
+    }
+}
+
 /// Unverified module contents.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ModuleData {
@@ -177,12 +247,26 @@ pub struct ModuleData {
     pub lines: Lines,
     /// `None` for modules assembled without an index (no section 12).
     pub api: Option<ApiRef>,
+    /// `None` for modules that provide nothing (no section 13).
+    pub interface: Option<Interface>,
+    /// Section 14: the script events the module refers to; event id = index.
+    pub events: Vec<EventRef>,
 }
 
 impl ModuleData {
     /// Imports plus module functions.
     pub fn num_funcs(&self) -> u32 {
         (self.imports.len() + self.functions.len()) as u32
+    }
+
+    /// The distinct namespaces of the events of section 14, sorted. The engine checks each
+    /// against the module's namespace allow-list (the same prefix rule as imports) before it
+    /// instantiates the module.
+    pub fn event_namespaces(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self.events.iter().map(|e| e.namespace.as_str()).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     /// Type of a function in the whole index space (imports first).

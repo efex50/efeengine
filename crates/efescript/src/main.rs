@@ -3,14 +3,17 @@ use efescript::host_std::{std_registry, StdEnv, StdOptions};
 use efescript::prelude::StdHost;
 use efevm::api::ApiIndex;
 
-const USAGE: &str = r#"usage: efescript run   <file.efa|file.efvm> [--budget N] [--api FILE.efapi] [--fs-root DIR]
-       efescript build <file.efa> -o <out.efvm> [--api FILE.efapi]
+const USAGE: &str = r#"usage: efescript run   <file.efa|file.efvm> [--budget N] [--api FILE.efapi]... [--fs-root DIR]
+       efescript build <root.efa> [more.efa...] -o <out.efvm> [--api FILE.efapi]...
        efescript dis   <file.efvm|file.efa> [-o out.efa]
        efescript bundle <file.efa|file.efvm> -o <out> [--runner PATH]
        efescript api   <file.efapi>
        efescript api-export [-o FILE.efapi]
-       efescript lsp   [--api FILE.efapi]     (language server on stdin/stdout)
-       efescript debug <file.efa|file.efvm> [--api FILE.efapi] [--fs-root DIR]
+       efescript pack  <DIR> [--api F]... [-o out.efmod]
+       efescript inspect <file.efmod|file.efvm>
+       efescript api-export <file.efmod|file.efvm> [--id ID] [-o FILE.efapi]
+       efescript lsp   [--api FILE.efapi]...  (language server on stdin/stdout)
+       efescript debug <file.efa|file.efvm> [--api FILE.efapi]... [--fs-root DIR]
                                              (debugger; commands on stdin, `help` lists them)
        efescript <file.efa> [--budget N]      (shorthand for run)
 
@@ -23,8 +26,31 @@ const USAGE: &str = r#"usage: efescript run   <file.efa|file.efvm> [--budget N] 
   out the signature, struct constants (Transform.size, Transform.pos, ...) are defined,
   and the module records the index hash and namespace versions. `run` links against the
   std host only, so it can run such a module only when it imports nothing but std.
+  --api may be repeated: the indices are merged (identical entries are kept once; the
+  same name with different content is an error that names both games). The merged
+  index is what the module is checked against.
+
+  build follows `use` from the root file (files below its directory only); more
+  roots are linked into the same module as if the first one used them.
 
   --fs-root DIR lets std.fs read and write files below DIR (default: std.fs is denied).
+
+  --api F may be a .efapi file or a .efmod package (its index is the mod's provides,
+  structs and events under its id); `pack`, `build`, `run`, `debug` and `lsp` accept both.
+
+  pack reads DIR/mod.toml, builds [build] entry (default src/main.efa) following `use`
+  against the merged --api inputs plus the [build] api list (relative to mod.toml), checks
+  the manifest against the module, adds every file below [build] assets (default
+  assets/) and writes the canonical package. The output is -o FILE, else
+  <id>-<version>.efmod in the current directory.
+
+  inspect prints a package's manifest, dependencies, permissions, provides (with
+  signatures and docs), structs, events, assets with sizes, ignored entries (warnings)
+  and the recorded api section; for a bare .efvm it prints the module's contents.
+
+  api-export FILE writes the API index of a mod (.efmod) or of a bare module (.efvm,
+  which needs --id ID, the namespace it provides under). Without FILE it writes the
+  index of the std host.
 
   api prints the namespaces, types and functions of an index file (exit 2 when it
   cannot be read). api-export writes the index of the std host (default: stdout).
@@ -49,10 +75,15 @@ fn v2_fail(msg: impl std::fmt::Display) -> ! {
 #[derive(Default)]
 struct V2Args {
     file: Option<String>,
+    /// Further positional arguments (only with `Allow::many`).
+    more: Vec<String>,
     out: Option<String>,
     budget: Option<u64>,
-    api: Option<String>,
+    /// Every `--api` value, in the order given.
+    api: Vec<String>,
     fs_root: Option<String>,
+    /// `--id` of `api-export`.
+    id: Option<String>,
 }
 
 /// Which options a subcommand accepts.
@@ -62,6 +93,9 @@ struct Allow {
     out: bool,
     api: bool,
     fs_root: bool,
+    id: bool,
+    /// Several positional arguments.
+    many: bool,
 }
 
 fn v2_args(args: &[String], allow: Allow) -> V2Args {
@@ -78,8 +112,12 @@ fn v2_args(args: &[String], allow: Allow) -> V2Args {
                 None => v2_fail("error: --budget needs a number"),
             },
             "--api" if allow.api => match it.next() {
-                Some(f) => r.api = Some(f.clone()),
+                Some(f) => r.api.push(f.clone()),
                 None => v2_fail("error: --api needs a .efapi file"),
+            },
+            "--id" if allow.id => match it.next() {
+                Some(i) => r.id = Some(i.clone()),
+                None => v2_fail("error: --id needs a mod id"),
             },
             "--fs-root" if allow.fs_root => match it.next() {
                 Some(d) => r.fs_root = Some(d.clone()),
@@ -87,23 +125,34 @@ fn v2_args(args: &[String], allow: Allow) -> V2Args {
             },
             _ if a.starts_with('-') && a.len() > 1 => v2_fail(format!("error: unknown or misplaced option `{a}`")),
             _ if r.file.is_none() => r.file = Some(a.clone()),
+            _ if allow.many => r.more.push(a.clone()),
             _ => v2_fail(format!("error: unexpected argument `{a}`")),
         }
     }
     r
 }
 
-/// Reads and checks an `.efapi` file; exits 2 with a message on failure.
+/// Reads and checks an `.efapi` file or a `.efmod` package; exits 2 with a message on failure.
 fn read_index(path: &str) -> ApiIndex {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| v2_fail(format!("error: {path}: {e}")));
-    ApiIndex::from_json(&text).unwrap_or_else(|e| v2_fail(format!("error: {path}: {e}")))
+    efescript::pack::read_api_input(std::path::Path::new(path)).unwrap_or_else(|e| v2_fail(format!("error: {e}")))
+}
+
+/// The index of every `--api` given: none gives `None`, one is read as is, several are
+/// read and merged with `ApiIndex::merge`. Exits 2 with a message on failure.
+fn read_indices(paths: &[String]) -> Option<ApiIndex> {
+    if paths.is_empty() {
+        return None;
+    }
+    let indices: Vec<ApiIndex> = paths.iter().map(|p| read_index(p)).collect();
+    let refs: Vec<&ApiIndex> = indices.iter().collect();
+    Some(ApiIndex::merge(&refs).unwrap_or_else(|e| v2_fail(format!("error: {e}"))))
 }
 
 fn v2_run(args: &[String]) -> ! {
     use efescript::run_v2;
     let a = v2_args(args, Allow { budget: true, api: true, fs_root: true, ..Allow::default() });
     let Some(file) = a.file else { v2_fail("error: run needs a file (.efa or .efvm)") };
-    let index = a.api.as_deref().map(read_index);
+    let index = read_indices(&a.api);
     let prog = run_v2::load_path_with(&file, &AsmOptions { api: index.as_ref() }).unwrap_or_else(|e| v2_fail(e));
     let opts = StdOptions { fs_root: a.fs_root.map(Into::into) };
     let mut env = StdEnv::with_stdin(StdHost);
@@ -124,7 +173,7 @@ fn v2_debug(args: &[String]) -> ! {
     use efescript::{debugger::Debugger, run_v2};
     let a = v2_args(args, Allow { api: true, fs_root: true, ..Allow::default() });
     let Some(file) = a.file else { v2_fail("error: debug needs a file (.efa or .efvm)") };
-    let index = a.api.as_deref().map(read_index);
+    let index = read_indices(&a.api);
     let prog = run_v2::load_path_with(&file, &AsmOptions { api: index.as_ref() }).unwrap_or_else(|e| v2_fail(e));
     let opts = StdOptions { fs_root: a.fs_root.map(Into::into) };
     let reg = std_registry::<StdHost>(&opts);
@@ -146,12 +195,34 @@ fn v2_debug(args: &[String]) -> ! {
 
 fn v2_build(args: &[String]) -> ! {
     use efescript::run_v2;
-    let a = v2_args(args, Allow { out: true, api: true, ..Allow::default() });
+    let a = v2_args(args, Allow { out: true, api: true, many: true, ..Allow::default() });
     let Some(file) = a.file else { v2_fail("error: build needs a .efa file") };
     let Some(out) = a.out else { v2_fail("error: build needs -o <out.efvm>") };
-    let index = a.api.as_deref().map(read_index);
-    let prog = run_v2::load_path_with(&file, &AsmOptions { api: index.as_ref() }).unwrap_or_else(|e| v2_fail(e));
-    std::fs::write(&out, prog.module.encode()).unwrap_or_else(|e| v2_fail(format!("error: {out}: {e}")));
+    let index = read_indices(&a.api);
+    let opts = AsmOptions { api: index.as_ref() };
+    let module = if file.ends_with(".efa") {
+        // Follow `use` below the root file's directory; more roots must lie there too.
+        let (src, root) = efescript::asm::FsSource::for_file(&file);
+        let dir = file.rsplit_once('/').map(|(d, _)| format!("{d}/"));
+        let mut roots = vec![root];
+        for m in &a.more {
+            match &dir {
+                Some(d) => match m.strip_prefix(d.as_str()) {
+                    Some(rel) => roots.push(rel.to_string()),
+                    None => v2_fail(format!("error: `{m}` is not below `{d}`, the directory of the root file")),
+                },
+                None => roots.push(m.clone()),
+            }
+        }
+        let refs: Vec<&str> = roots.iter().map(String::as_str).collect();
+        efescript::asm::assemble_programs(&refs, &src, &opts).unwrap_or_else(|d| v2_fail(d))
+    } else {
+        if let Some(m) = a.more.first() {
+            v2_fail(format!("error: unexpected argument `{m}`"));
+        }
+        run_v2::load_path_with(&file, &opts).unwrap_or_else(|e| v2_fail(e)).module
+    };
+    std::fs::write(&out, module.encode()).unwrap_or_else(|e| v2_fail(format!("error: {out}: {e}")));
     std::process::exit(0);
 }
 
@@ -198,15 +269,164 @@ fn v2_api(args: &[String]) -> ! {
 }
 
 fn v2_api_export(args: &[String]) -> ! {
-    let a = v2_args(args, Allow { out: true, ..Allow::default() });
-    if let Some(extra) = a.file {
-        v2_fail(format!("error: unexpected argument `{extra}`"));
-    }
-    let json = std_registry::<StdHost>(&StdOptions::default()).index().to_json();
+    let a = v2_args(args, Allow { out: true, id: true, ..Allow::default() });
+    let json = match &a.file {
+        Some(f) => mod_api_json(f, a.id.as_deref()),
+        None => {
+            if a.id.is_some() {
+                v2_fail("error: --id needs a .efmod or .efvm file");
+            }
+            std_registry::<StdHost>(&StdOptions::default()).index().to_json()
+        }
+    };
     match a.out {
         Some(o) => std::fs::write(&o, json).unwrap_or_else(|e| v2_fail(format!("error: {o}: {e}"))),
         None => write_stdout(json.as_bytes()),
     }
+    std::process::exit(0);
+}
+
+/// The `.efapi` text of a `.efmod` (its own index) or a bare `.efvm` (needs `--id`).
+fn mod_api_json(file: &str, id: Option<&str>) -> String {
+    use efescript::pack;
+    let bytes = std::fs::read(file).unwrap_or_else(|e| v2_fail(format!("error: {file}: {e}")));
+    if bytes.starts_with(&[b'7', b'z']) {
+        if id.is_some() {
+            v2_fail("error: --id is only for a bare module (a package has its own id)");
+        }
+        return pack::read_api_input(std::path::Path::new(file)).unwrap_or_else(|e| v2_fail(format!("error: {e}"))).to_json();
+    }
+    let module = efevm::Module::decode(&bytes).unwrap_or_else(|e| v2_fail(format!("error: {file}: {e}")));
+    let Some(id) = id else { v2_fail("error: a bare module needs --id ID (the namespace it provides under)") };
+    let doc = format!("Functions provided by the mod `{id}`.");
+    pack::mod_index(&module, id, 1, &doc).to_json()
+}
+
+fn v2_pack(args: &[String]) -> ! {
+    let a = v2_args(args, Allow { out: true, api: true, ..Allow::default() });
+    let Some(dir) = a.file else { v2_fail("error: pack needs a mod folder (the one with mod.toml)") };
+    let indices: Vec<ApiIndex> = a.api.iter().map(|p| read_index(p)).collect();
+    let refs: Vec<&ApiIndex> = indices.iter().collect();
+    let packed = efescript::pack::pack_dir(std::path::Path::new(&dir), &refs).unwrap_or_else(|e| v2_fail(e));
+    let out = a.out.unwrap_or_else(|| packed.file_name.clone());
+    std::fs::write(&out, &packed.bytes).unwrap_or_else(|e| v2_fail(format!("error: {out}: {e}")));
+    eprintln!("packed {out} ({} bytes)", packed.bytes.len());
+    std::process::exit(0);
+}
+
+/// The text `efescript inspect` prints for a package or a bare module.
+fn inspect_text(file: &str) -> String {
+    use efemod::{Package, ReadLimits};
+    use std::fmt::Write;
+    let bytes = std::fs::read(file).unwrap_or_else(|e| v2_fail(format!("error: {file}: {e}")));
+    let mut o = String::new();
+    let pkg = if bytes.starts_with(&[b'7', b'z']) {
+        Some(Package::read(&bytes, &ReadLimits::default()).unwrap_or_else(|e| v2_fail(format!("error: {file}: {e}"))))
+    } else {
+        None
+    };
+    let module = match &pkg {
+        Some(p) => p.module.clone(),
+        None => efevm::Module::decode(&bytes).unwrap_or_else(|e| v2_fail(format!("error: {file}: {e}"))),
+    };
+    if let Some(p) = &pkg {
+        let m = &p.manifest;
+        let _ = writeln!(o, "package {} {} ({})", m.id, m.version, m.display_name());
+        if let Some(d) = &m.description {
+            let _ = writeln!(o, "  description: {d}");
+        }
+        if !m.authors.is_empty() {
+            let _ = writeln!(o, "  authors: {}", m.authors.join(", "));
+        }
+        if let Some(l) = &m.license {
+            let _ = writeln!(o, "  license: {l}");
+        }
+        if let Some(g) = &m.game {
+            let _ = writeln!(o, "  game: {g}");
+        }
+        let _ = writeln!(o, "  api_version: {}", m.api_version);
+        let _ = writeln!(o, "\ndependencies:");
+        for d in &m.dependencies {
+            let _ = writeln!(o, "  {} {}", d.id, d.req);
+        }
+        let pm = &m.permissions;
+        let _ = writeln!(o, "\npermissions (requested):");
+        for n in &pm.namespaces {
+            let _ = writeln!(o, "  namespace {n}");
+        }
+        if let Some(b) = pm.budget {
+            let _ = writeln!(o, "  budget {b}");
+        }
+        if let Some(n) = pm.memory_pages {
+            let _ = writeln!(o, "  memory_pages {n}");
+        }
+    } else {
+        let _ = writeln!(o, "bare module {file}");
+    }
+    let d = module.data();
+    let _ = writeln!(o, "\nprovides:");
+    if let Some(i) = &d.interface {
+        for p in &i.provides {
+            let list = |ps: &[efevm::api::Param]| ps.iter().map(|p| format!("{}: {}", p.name, p.ty)).collect::<Vec<_>>().join(", ");
+            let res = if p.results.is_empty() { String::new() } else { format!(" -> ({})", list(&p.results)) };
+            let _ = writeln!(o, "  {}({}){res}", p.name, list(&p.params));
+            let _ = writeln!(o, "      {}", p.doc);
+        }
+        if let Some((off, len)) = i.scratch {
+            let _ = writeln!(o, "\nscratch: {len} bytes at {off}");
+        }
+        let _ = writeln!(o, "\nstructs:");
+        for s in &i.structs {
+            let owner = if s.owner.is_empty() { String::new() } else { format!(", from {}", s.owner) };
+            let _ = writeln!(o, "  {} (size {}, align {}{owner})", s.name, s.size, s.align);
+            for f in &s.fields {
+                let count = if f.count > 1 { format!(" x{}", f.count) } else { String::new() };
+                let _ = writeln!(o, "      +{:<3} {}: {}{count}", f.offset, f.name, f.ty);
+            }
+        }
+        let _ = writeln!(o, "\nprovided events:");
+        for e in &i.events {
+            let payload = e.payload.as_deref().map(|p| format!(" ({p})")).unwrap_or_default();
+            let _ = writeln!(o, "  {}{payload}  {}", e.name, e.doc);
+        }
+    }
+    let _ = writeln!(o, "\nevent references:");
+    for e in &d.events {
+        let payload = e.payload.as_ref().map(|(n, s)| format!(" ({n}, {s} bytes)")).unwrap_or_default();
+        let _ = writeln!(o, "  {}{payload}", e.qualified());
+    }
+    let _ = writeln!(o, "\nimports:");
+    for i in &d.imports {
+        let _ = writeln!(o, "  {}.{}", i.namespace, i.name);
+    }
+    let _ = writeln!(o, "\napi section:");
+    match &d.api {
+        Some(a) => {
+            let _ = writeln!(o, "  index hash fnv1a64:{:016x}", a.hash);
+            for (n, v) in &a.namespaces {
+                let _ = writeln!(o, "  {n} v{v}");
+            }
+        }
+        None => {
+            let _ = writeln!(o, "  none (assembled without an index)");
+        }
+    }
+    if let Some(p) = &pkg {
+        let _ = writeln!(o, "\nassets:");
+        for (n, data) in &p.assets {
+            let _ = writeln!(o, "  {n}  {} bytes", data.len());
+        }
+        for n in &p.ignored {
+            let _ = writeln!(o, "warning: ignored entry `{n}`");
+        }
+    }
+    o
+}
+
+fn v2_inspect(args: &[String]) -> ! {
+    let a = v2_args(args, Allow::default());
+    let Some(file) = a.file else { v2_fail("error: inspect needs a .efmod or .efvm file") };
+    write_stdout(inspect_text(&file).as_bytes());
     std::process::exit(0);
 }
 
@@ -290,13 +510,16 @@ fn main() {
         Some("api") => v2_api(&argv[1..]),
         Some("debug") => v2_debug(&argv[1..]),
         Some("api-export") => v2_api_export(&argv[1..]),
+        Some("pack") => v2_pack(&argv[1..]),
+        Some("inspect") => v2_inspect(&argv[1..]),
         Some("bundle") => v2_bundle(&argv[1..]),
         Some("lsp") => {
             let a = v2_args(&argv[1..], Allow { api: true, ..Allow::default() });
             if let Some(extra) = a.file {
                 v2_fail(format!("error: unexpected argument `{extra}`"));
             }
-            std::process::exit(efescript::lsp::run_stdio_code(a.api.map(Into::into)));
+            let apis: Vec<std::path::PathBuf> = a.api.into_iter().map(Into::into).collect();
+            std::process::exit(efescript::lsp::run_stdio_code(apis));
         }
         Some(f) if f.ends_with(".efa") => v2_run(&argv),
         _ => {}

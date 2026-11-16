@@ -3,7 +3,7 @@
 //! the API index; there is no other list. Status codes of `engine.world`: 0 ok, 1 stale or
 //! forged entity, 2 component missing, 3 unknown component id, 4 wrong size, -1 other.
 
-use efevm::{ApiType as T, Caller, GuestSlice, HostFn, HostOk, HostRegistry, RegistryError, Results, Trap};
+use efevm::{ApiType as T, Caller, EventRef, GuestSlice, HostFn, HostOk, HostRegistry, RegistryError, Results, Trap};
 use hecs::{Entity, World};
 
 use super::{LogLevel, ScriptEvent, ScriptHost};
@@ -45,12 +45,17 @@ pub(crate) fn register_engine_api(r: &mut HostRegistry<ScriptHost>) -> Result<()
         ("engine.world", "Entities and their components. Entity handles are u64 values; a stale or forged handle gives status 1, never a crash."),
         ("engine.input", "Keyboard and mouse state of the current frame."),
         ("engine.time", "Frame timing."),
-        ("engine.events", "Named byte-payload events; events sent in one frame are readable during the next."),
         ("engine.log", "Write to the engine log."),
-        ("engine.mods", "Mod support: share functions with other modules."),
     ] {
         r.define_namespace(ns, 1, OWNER, doc)?;
     }
+    // Version 2: `export` is gone. A mod's functions are declared in its module (section 13);
+    // this namespace is how a mod reads the assets of its own package.
+    r.define_namespace("engine.mods", 2, OWNER, "Mod support. A mod declares what it provides in its module (section 13), so no function is needed to share one; `asset_len` and `asset_read` read the assets of the calling mod's own package.")?;
+    // Version 2: events are typed. A module lists the events it uses in its events section and
+    // passes their ids; the payload is the registered struct (the string-named, raw-bytes
+    // `send`/`count`/`read` of version 1 are gone).
+    r.define_namespace("engine.events", 2, OWNER, "Typed script events. A module lists the events it sends or reads in its events section (an event's id is its index there); `send`, `count` and `read` take that id, and the payload is the event's registered struct. Events sent in one frame are readable during the next.")?;
     world_api(r)?;
     input_api(r)?;
     time_api(r)?;
@@ -378,55 +383,86 @@ fn time_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
     Ok(())
 }
 
+/// The event `ev` of the calling module's section 14 (the module whose code runs now). An id
+/// outside the list traps with a message naming the module and the id.
+fn event_of(c: &mut Caller<'_, ScriptHost>, func: &str, ev: i32) -> Result<EventRef, Trap> {
+    let h = c.host();
+    let slot = h
+        .current
+        .and_then(|id| h.modules.get(id.0 as usize))
+        .ok_or_else(|| Trap::Host(format!("engine.events.{func}: no module is running")))?;
+    let events = &slot.module.data().events;
+    usize::try_from(ev).ok().and_then(|i| events.get(i)).cloned().ok_or_else(|| {
+        Trap::Host(format!(
+            "engine.events.{func}: module `{}` has no event with id {ev} (its section 14 lists {} event{})",
+            slot.name,
+            events.len(),
+            if events.len() == 1 { "" } else { "s" }
+        ))
+    })
+}
+
 fn events_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
     const NS: &str = "engine.events";
     r.register(
         HostFn::new(NS, "send")
-            .doc("Send an event called `name` with a byte payload; it is readable during the next frame (also from Rust as ScriptEvent).")
-            .param("name", T::Str)
-            .param("data", T::Bytes),
+            .doc("Queue the event `ev` (an id of the calling module's events section) for the next frame; copies the registered payload struct's size in bytes from `payload` (an event without payload ignores `payload`: pass 0). At most 4096 events are queued per frame, further sends are dropped, counted and logged once per frame. An unknown `ev` or an out-of-bounds `payload` traps.")
+            .param("ev", T::I32)
+            .param("payload", T::Ptr),
         |c, a, _res| {
-            let name = c.read_str(a.str(0)?)?;
-            let data = c.read_bytes(a.bytes(1)?)?;
-            c.host().send_event(ScriptEvent { name, data });
+            let ev = event_of(c, "send", a.i32(0)?)?;
+            let ptr = a.ptr(1)?;
+            let size = ev.payload_size() as u64;
+            let payload = if size == 0 {
+                Vec::new()
+            } else {
+                // Bounds first, so a bogus size never allocates.
+                if ptr > i64::MAX as u64 || ptr.checked_add(size).is_none_or(|end| end > c.memory().len()) {
+                    return Err(Trap::OutOfBounds);
+                }
+                c.read_bytes(GuestSlice::new(ptr, size))?
+            };
+            c.host().queue_event(ScriptEvent { event: ev.qualified(), payload });
             Ok(HostOk::Continue)
         },
     )?;
     r.register(
         HostFn::new(NS, "count")
-            .doc("Number of events called `name` readable this frame.")
-            .param("name", T::Str)
-            .result("count", T::I64),
+            .doc("Number of events `ev` (an id of the calling module's events section) readable this frame, that is, sent during the previous frame (or by Rust). An unknown `ev` traps.")
+            .param("ev", T::I32)
+            .result("count", T::I32),
         |c, a, res| {
-            let name = c.read_str(a.str(0)?)?;
-            let n = c.host().events_in.iter().filter(|e| e.name == name).count();
-            res.set_i64(0, n as i64)?;
+            let ev = event_of(c, "count", a.i32(0)?)?;
+            let name = ev.qualified();
+            let n = c.host().events_named(&name).count();
+            res.set_i32(0, n.min(i32::MAX as usize) as i32)?;
             Ok(HostOk::Continue)
         },
     )?;
     r.register(
         HostFn::new(NS, "read")
-            .doc("Copy the payload of event number `index` (0-based) called `name` into `buf`, as much as fits; returns the full payload length, or -1 if there is no such event.")
-            .param("name", T::Str)
-            .param("index", T::I64)
-            .param("buf", T::Bytes)
-            .result("len", T::I64),
+            .doc("Copy the payload of the `index`-th (0-based, in send order) event `ev` of this frame to `out` (the registered payload struct's size in bytes; nothing for an event without payload) and return 0, or return -1 if there is no such event (negative or too large `index`). An unknown `ev` or an out-of-bounds `out` traps.")
+            .param("ev", T::I32)
+            .param("index", T::I32)
+            .param("out", T::Ptr)
+            .result("status", T::I32),
         |c, a, res| {
-            let name = c.read_str(a.str(0)?)?;
-            let index = a.i64(1)?;
-            let buf = a.bytes(2)?;
-            if buf.ptr > i64::MAX as u64 || buf.len > i64::MAX as u64 {
+            let ev = event_of(c, "read", a.i32(0)?)?;
+            let index = a.i32(1)?;
+            let out = a.ptr(2)?;
+            let name = ev.qualified();
+            let size = ev.payload_size() as u64;
+            if size > 0 && (out > i64::MAX as u64 || out.checked_add(size).is_none_or(|end| end > c.memory().len())) {
                 return Err(Trap::OutOfBounds);
             }
-            let data = usize::try_from(index)
-                .ok()
-                .and_then(|i| c.host().events_in.iter().filter(|e| e.name == name).nth(i).map(|e| e.data.clone()));
+            let data = usize::try_from(index).ok().and_then(|i| c.host().events_named(&name).nth(i).map(<[u8]>::to_vec));
             match data {
-                None => res.set_i64(0, -1)?,
+                None => res.set_i32(0, -1)?,
                 Some(d) => {
-                    let n = buf.len.min(d.len() as u64) as usize;
-                    c.write_bytes(buf.ptr, &d[..n])?;
-                    res.set_i64(0, d.len() as i64)?;
+                    if size > 0 {
+                        c.write_bytes(out, &d)?;
+                    }
+                    res.set_i32(0, 0)?;
                 }
             }
             Ok(HostOk::Continue)
@@ -453,18 +489,50 @@ fn log_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
     Ok(())
 }
 
+/// The asset `path` of the package of the module that is running now.
+fn own_asset<'a>(h: &'a ScriptHost, path: &str) -> Option<&'a [u8]> {
+    let id = h.current?;
+    h.modules.get(id.0 as usize)?.package.as_ref()?.assets.get(path).map(Vec::as_slice)
+}
+
 fn mods_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
+    const NS: &str = "engine.mods";
     r.register(
-        HostFn::new("engine.mods", "export")
-            .doc("Call from `init`: offer the exported function `func` of this module to other modules as `<module name>.<func>`, with `doc` as its documentation. It is registered (and appears in the API index) when init returns. Status: 0 ok, -1 refused (not in init, no such function, bad name or empty doc).")
-            .param("func", T::Str)
-            .param("doc", T::Str)
-            .result("status", T::I32),
+        HostFn::new(NS, "asset_len")
+            .doc("Length in bytes of the asset `path` (relative to the package's assets/ folder, e.g. \"items.json\") of the calling mod's own package; -1 if there is no such asset or the caller is not a package.")
+            .param("path", T::Str)
+            .result("len", T::I64),
         |c, a, res| {
-            let func = c.read_str(a.str(0)?)?;
-            let doc = c.read_str(a.str(1)?)?;
-            let s = c.host().request_export(&func, &doc);
-            status(res, s)
+            let path = read_name(c, a.str(0)?)?;
+            let len = own_asset(c.host(), &path).map_or(-1, |d| d.len() as i64);
+            res.set_i64(0, len)?;
+            Ok(HostOk::Continue)
+        },
+    )?;
+    r.register(
+        HostFn::new(NS, "asset_read")
+            .doc("Copy the asset `path` of the calling mod's own package into `buf`, as much as fits (at most buf.len bytes); returns the asset's full length, or -1 if there is no such asset or the caller is not a package.")
+            .param("path", T::Str)
+            .param("buf", T::Bytes)
+            .result("len", T::I64),
+        |c, a, res| {
+            let path = read_name(c, a.str(0)?)?;
+            let buf = a.bytes(1)?;
+            if buf.ptr > i64::MAX as u64 || buf.len > i64::MAX as u64 {
+                return Err(Trap::OutOfBounds);
+            }
+            let found = own_asset(c.host(), &path).map(|d| {
+                let n = buf.len.min(d.len() as u64) as usize;
+                (d.len(), d[..n].to_vec())
+            });
+            match found {
+                None => res.set_i64(0, -1)?,
+                Some((full, head)) => {
+                    c.write_bytes(buf.ptr, &head)?;
+                    res.set_i64(0, full as i64)?;
+                }
+            }
+            Ok(HostOk::Continue)
         },
     )?;
     Ok(())

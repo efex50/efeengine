@@ -54,11 +54,13 @@ pub fn build(project: &Project, ex: &Example, release: bool) -> Result<PathBuf> 
     if dry_run() {
         println!("[dry-run] copy templates/web (+ examples/{}/web overrides) into {}", ex.dir, out.display());
         crate::api::copy_into_dist(project, ex, &out);
+        crate::mods::pack_into(project, ex, &crate::mods::game_index_path(project, ex), &out.join("mods"))?;
         return Ok(out);
     }
     copy_template(&root().join("templates/web"), &out, &crate_name, &ex.dir)?;
     copy_overrides(&root().join("examples").join(&ex.dir).join("web"), &out)?;
     crate::api::copy_into_dist(project, ex, &out);
+    crate::mods::pack_into(project, ex, &crate::mods::game_index_path(project, ex), &out.join("mods"))?;
     Ok(out)
 }
 

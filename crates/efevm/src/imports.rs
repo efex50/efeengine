@@ -184,19 +184,22 @@ pub type HostFunc<H> =
     Arc<dyn Fn(&mut Caller<'_, H>, &[u64], &mut [u64]) -> Result<HostOk, Trap> + Send + Sync>;
 
 /// The host functions a module can link against, keyed by (namespace, name), plus the
-/// namespace versions and the API index hash of the registry they came from.
+/// namespace versions, the registered script events (with their payload struct name and size)
+/// and the API index hash of the registry they came from.
 ///
 /// The only way to fill it is `HostRegistry::imports()`; `Imports::new()` is the empty set.
 pub struct Imports<H> {
     pub(crate) funcs: BTreeMap<(String, String), (FuncType, HostFunc<H>)>,
     pub(crate) namespaces: BTreeMap<String, u32>,
+    /// `(namespace, name)` -> `Some((payload struct, size in bytes))` or `None` (no payload).
+    pub(crate) events: BTreeMap<(String, String), Option<(String, u32)>>,
     pub(crate) hash: Option<u64>,
 }
 
 impl<H> Imports<H> {
     /// No functions, no namespaces, no hash.
     pub fn new() -> Self {
-        Imports { funcs: BTreeMap::new(), namespaces: BTreeMap::new(), hash: None }
+        Imports { funcs: BTreeMap::new(), namespaces: BTreeMap::new(), events: BTreeMap::new(), hash: None }
     }
 
     pub(crate) fn insert(&mut self, namespace: &str, name: &str, ty: FuncType, f: HostFunc<H>) {
@@ -218,6 +221,20 @@ impl<H> Imports<H> {
         self.namespaces.iter().map(|(n, v)| (n.as_str(), *v))
     }
 
+    /// The payload of a registered event: `Some(Some((struct name, size)))`, `Some(None)` for
+    /// an event without payload, `None` if no such event is registered.
+    pub fn event(&self, namespace: &str, name: &str) -> Option<Option<(&str, u32)>> {
+        self.events
+            .get(&(namespace.to_string(), name.to_string()))
+            .map(|p| p.as_ref().map(|(s, n)| (s.as_str(), *n)))
+    }
+
+    /// Every registered event sorted by (namespace, name), with its payload as in
+    /// [`event`](Self::event).
+    pub fn events(&self) -> impl Iterator<Item = (&str, &str, Option<(&str, u32)>)> {
+        self.events.iter().map(|((ns, n), p)| (ns.as_str(), n.as_str(), p.as_ref().map(|(s, z)| (s.as_str(), *z))))
+    }
+
     /// `ApiIndex::hash()` of the registry this snapshot came from (`None` for `Imports::new()`).
     pub fn api_hash(&self) -> Option<u64> {
         self.hash
@@ -229,7 +246,10 @@ impl<H> Imports<H> {
 
     /// Every reason `module` cannot link against these imports, in this order: namespaces of
     /// the module's `api` section that are unknown or have another version, then each import
-    /// that is missing or has another signature (in import order). If there is any error and
+    /// that is missing or has another signature (in import order), then each event reference
+    /// of section 14 that is not registered (`UnknownEvent`) or whose payload struct name or
+    /// size differs from the registered one (`EventPayload`), in section order. If there is
+    /// any error and
     /// the module records an index hash different from ours, a final `LinkError::ApiHash`
     /// says which index the module was built against. Empty means `Instance::new` links
     /// (memory limits aside). A different hash alone is not an error.
@@ -260,6 +280,18 @@ impl<H> Imports<H> {
                 _ => errs.push(LinkError::MissingImport { namespace: imp.namespace.clone(), name: imp.name.clone() }),
             }
         }
+        for ev in &data.events {
+            match self.events.get(&(ev.namespace.clone(), ev.name.clone())) {
+                None => errs.push(LinkError::UnknownEvent { namespace: ev.namespace.clone(), name: ev.name.clone() }),
+                Some(have) if *have == ev.payload => {}
+                Some(have) => errs.push(LinkError::EventPayload {
+                    namespace: ev.namespace.clone(),
+                    name: ev.name.clone(),
+                    module: payload_text(ev.payload.as_ref()),
+                    host: payload_text(have.as_ref()),
+                }),
+            }
+        }
         if let Some(api) = &data.api
             && !errs.is_empty()
             && self.hash != Some(api.hash)
@@ -267,6 +299,14 @@ impl<H> Imports<H> {
             errs.push(LinkError::ApiHash { module: api.hash, host: self.hash });
         }
         errs
+    }
+}
+
+/// `&Name (N bytes)` or `no payload`, for `LinkError::EventPayload`.
+fn payload_text(p: Option<&(String, u32)>) -> String {
+    match p {
+        Some((s, n)) => format!("&{s} ({n} bytes)"),
+        None => "no payload".into(),
     }
 }
 

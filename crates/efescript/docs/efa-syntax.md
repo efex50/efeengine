@@ -5,13 +5,15 @@ It refines `e2-design.md` and folds in the manager's decisions; where this docum
 design differ, this document wins. Section 14 lists every decision that goes beyond the
 design and the decisions file, for review.
 
-Code that implements this document: `src/asm/{ast,diag,lexer}.rs` (contracts, done),
-`src/asm/parser.rs`, `src/asm/lower.rs`, the disassembler (`src/disasm`) and the CLI.
+Code that implements this document: `src/asm/{ast,diag,lexer,parser,source}.rs`,
+`src/asm/lower/` (one file as a `link::Unit`), `src/link/` (the linker), the disassembler
+(`src/disasm.rs`) and the CLI.
 
 Contents: 1 lexical rules, 2 grammar, 3 top-level items, 4 functions and registers,
 5 operand forms per instruction shape, 6 immediates and their types, 7 lowering,
 8 data layout, 9 names and lines, 10 extras, 11 round trip, 12 disassembler output,
-13 diagnostics, 14 decisions beyond the design, 15 complete example.
+13 diagnostics, 14 decisions beyond the design, 15 complete example, 16 multi-file programs
+and the mod interface (E8).
 
 ## 1. Lexical rules
 
@@ -49,13 +51,14 @@ whitespace). Columns count chars (a tab is one column), lines and columns are 1-
   minus: `i64.sub n, n, 1` is just the mnemonic `i64.sub` and three operands.
 - **Errors recover**: the bad character or literal is skipped and lexing continues.
 - **Reserved words** (cannot be declared as names of anything): `import memory const global
-  table fn export mut reg nregs null db dw dd dq resb i32 i64 f32 f64 inf nan`.
+  table fn export mut reg nregs null db dw dd dq resb i32 i64 f32 f64 inf nan use as pub
+  provide struct scratch` (the last six since E8, section 16.9).
   `r<digits>` (`r0`, `r17`) is always a raw register and cannot be declared either (the
   exception is a parameter `rK: T` at position K, see 4).
 
 Token kinds (`asm::lexer::TokenKind`): `Name(String)`, `Int(i128)`, `Float(String)`,
 `Char(char)`, `Str(Vec<u8>)`, `LBrace RBrace LParen RParen LBracket RBracket Comma Colon
-Equals Arrow Newline Eof`.
+Equals Arrow Amp Newline Eof` (`Amp` is `&`, section 16.9).
 
 ## 2. Grammar
 
@@ -695,3 +698,339 @@ address `1024 + 16 + 8 + 4 + ...` aligned to 8 per item (`msg` 1024, `words` 104
 1048, `reals` 1056, `buf` 1080); `inc`, `twice` and the unnamed-parameter function
 `raw_demo` show the register forms; `raw_demo` mentions `r4`, so its hidden-temporary base `B`
 is 5 and its nregs is 5; `main`'s `nregs 12` is above its computed requirement (10).
+
+## 16. Multi-file programs and the mod interface (E8)
+
+Design and rationale: `docs/e8-design.md` sections 3–5. Everything in sections 1–15 stays
+valid, and a program of one file without the new items assembles to exactly the same bytes as
+before. Entry points: `asm::assemble_program(root, &dyn FileSource, &AsmOptions)` and
+`asm::assemble_programs(&[roots], ..)` read the use graph through a `FileSource` (`FsSource`
+on native, `MemSource` in memory); `assemble_with(src, file, opts)` is a program of one
+in-memory file (a `use` in it finds no file). `efescript build ROOT.efa [MORE.efa...] -o
+OUT` follows `use` with `FsSource`. `run`, `debug`, `dis`, `bundle` and the language server
+still read one file (they do not follow `use` yet).
+
+### 16.1 `use`
+
+```
+use "items.efa"                 ; alias `items` (the file stem)
+use "util/math.efa" as m        ; alias `m`
+```
+
+- `use STRING [as NAME]` is a top-level item. The string is a path **relative to the
+  directory of the file that contains the `use`**, with `/` as the separator, ending in
+  `.efa`. Absolute paths, `\`, and empty segments are errors. `..` is allowed, but the
+  normalised path must stay inside the **root directory** (the directory of the root file
+  given to `efescript build`, or `[build] entry`'s directory for `efescript pack`); leaving
+  it is an error. Paths are normalised lexically; the native file source also canonicalises
+  and refuses a symlink that leads outside the root. A file that cannot be read is reported
+  at the `use` that first reached it. A `use` of the root file (or of the file itself) is
+  allowed and refers to it.
+- The alias is the `as` name, or the file stem. An alias is local to the file that declares
+  it. Two `use` items with the same alias in one file are an error; one file may be used
+  under two aliases. Aliases are declared names (no dots, not reserved).
+- The **use graph** is every file reachable from the root file. Each file is assembled once
+  however often it is used. Cycles are allowed (two files may call each other). Syntax
+  errors of every file are reported together; linking only runs when no file has one.
+  Diagnostics are sorted by (file order, line, column) and capped at 100 in total.
+- Several roots (`assemble_programs`, `build a.efa b.efa`): the first is the root (its
+  directory is the root directory; only it may hold `memory` and `scratch`); the others are
+  numbered after the first one's graph as if it used them, and must lie inside the root
+  directory (they get a namespace from their path).
+- Order: the files are numbered depth-first in `use` order starting with the root (the first
+  time a file is reached decides its place). This order fixes function, global and import
+  indices and the data layout (16.5), so builds are deterministic.
+
+### 16.2 `pub` and visibility
+
+- Every item of a file is private to that file unless marked `pub`:
+  `pub fn`, `pub const`, `pub global [mut]`, `pub NAME db ...` (any data directive),
+  `pub struct`. `export fn` and `export global` are also visible to other files (an export is
+  public by nature). `pub` on `import`, `use`, `memory`, `table`, `scratch` or `provide` is an
+  error.
+- Imports are per file: a file must declare every host function it calls. Identical imports
+  (same `ns.name`) of several files become one module import; a different signature for the
+  same `ns.name` in two files is an error naming both.
+- Export names (`export fn`, `export global`), provide names (16.6) and exported struct
+  names (16.7) are unique across the whole program; the error's note names the file and line
+  of the first one (`first defined in main.efa:2`).
+
+### 16.3 Name resolution
+
+Within a file, in the positions of section 5:
+- An **undotted** name is resolved in the file's own scope only (its own items, public or
+  not, plus registers and labels as before). Another file's item is never found without an
+  alias.
+- **`A.x`**, where `A` is an alias of this file, is item `x` of the aliased file: a function
+  (function position), a global (global position), a `const` or data symbol (immediate
+  position); `A.x.len` is the length of data item `x`; `A.S.size`, `A.S.align`, `A.S.<field>`
+  are the constants of struct `S` (16.7); `A.f` is also valid as a `table` entry and as
+  the function of a `provide`, `&A.S` as a provide type. The item must be public, otherwise
+  the error is ``` `x` is private to `util/math.efa` ``` with the note ``declared at
+  util/math.efa:3; mark it `pub` to use it from other files``.
+- Positions evaluated while the layout is decided (`resb` sizes, `memory`, `scratch`, struct
+  array lengths) accept literals and the file's **own** consts only, not `A.X`.
+- **`ns.name`** that equals a declared `import` of this file is that import, as before.
+- Index struct constants (`Transform.size`, from `--api`) work as before.
+- Conflicts are errors at the alias declaration: an alias may not equal a `const`, data,
+  global or function name of the same file, a struct name visible in the file (local or from
+  the index), or the first segment of a namespace imported by the file (`use "x.efa" as
+  engine` next to `import engine.log.info` is refused). So a dotted name always has exactly
+  one meaning.
+
+### 16.4 Per-file namespaces and debug info
+
+- Each file has a **namespace** derived from its path relative to the root directory: the
+  `.efa` suffix is dropped and `/` becomes `.` (`util/math.efa` → `util.math`). Every segment
+  must be an identifier (so `my-file.efa` cannot be used). The root file's namespace is empty.
+- `names` section: a function of a non-root file is named `<namespace>.<name>`
+  (`util.math.square`); root-file functions keep their plain names; imports keep `ns.name`.
+  So backtraces and the debugger show which file a function came from.
+- `lines` section: one file entry per file of the use graph, in file order. The root file is
+  written as given; the others by the file source's display name of their normalised path
+  (relative to the root directory for `MemSource`; with the root directory as the user typed
+  it in front for `FsSource::for_file`, so `build examples/main.efa` records
+  `examples/util/math.efa` and backtraces find the source). Every instruction maps to its file.
+- Diagnostics name the file the error is in (by the same name), and a note names the file of a
+  related declaration (`first defined in items.efa:12`).
+- `efescript dis` of a multi-file module prints one file; dotted function names are
+  sanitised as in section 12 (`util_math_square`). The round trip of section 11 is guaranteed
+  per single-file program only.
+
+### 16.5 Program-wide items and layout
+
+- `memory` and `scratch` may appear only in the root file; at most one `table` in the whole
+  program (in any file; its entries may be `A.f`). An explicit root `memory` must hold the
+  data and the scratch region.
+- Data items of all files are laid out in file order (16.1), each file's items in source
+  order, from address 1024 with the alignment of section 8, as one continuous cursor. The
+  scratch region (16.8) follows the last data item.
+- Globals, functions and imports are numbered in file order; imports first in order of first
+  appearance, as in section 7.
+
+### 16.6 `provide`: declared mod exports
+
+```
+provide give(player: entity, item: str, count: i32) -> (status: i32) = give_impl,
+    "Give `count` copies of `item` to `player`; 0 ok, 1 unknown item."
+provide count(item: str) -> (n: i64),
+    "How many of `item` the bag holds."
+```
+
+- `provide NAME(params) [-> (results)] [= FUNC], STRING` declares that the mod offers
+  `<mod id>.NAME` (the mod id comes from the manifest when the package is built; the
+  assembler does not know it, so its diagnostics say ``provide `NAME` ``). `FUNC` is a function of this file or `A.f` of another file; without `= FUNC` it is
+  the function `NAME` of this file. The string is the doc (required, not blank). The line may
+  break after the comma before the doc, as any list.
+- Parameter and result types: `i32 i64 f32 f64 bool entity str bytes &S`, where `S` is a
+  struct of the file (16.7), `A.S`, or an index struct (`&Transform`). `ptr` is not allowed.
+  Results are written in parentheses, named, and scalar only (`i32 i64 f32 f64 bool entity`).
+- The lowered signature (`bool` → `i32`, `entity` → `i64`, `str`/`bytes` → `i64, i64`, `&S` →
+  `i64`) must equal the function's signature exactly; otherwise the error shows both:
+  ``provide `p` lowers to `(i32) -> i64`, but its function `p` has `(i64) -> i64` ``. A
+  cross-file function is shown with its file's namespace (`items.add`). Parameter and result
+  names are unique within a provide; `ptr` is refused with its own error.
+- At run time, `str` arrives as a pointer and length **into the provider's own memory** (the
+  copy in its scratch region), `bytes` likewise and is copied back to the caller after the
+  call, `&S` points to a copy of the struct that is copied back too (e8-design 7). The
+  provider must not keep pointers into the scratch region after it returns.
+- Provides go into section 13 (`SPEC.md` 9.2). They need not be `export fn`.
+- `provide` may appear in any file of the program.
+
+### 16.7 `struct`
+
+```
+export struct Item, "One stack of items." {
+    id: u32
+    count: i32
+    pos: f32[2], "World position."
+    owner: entity
+}
+```
+
+- `[pub | export] struct NAME [, STRING] {` then one field per line, `NAME: PRIM [ "[" N "]" ]
+  [, STRING]`, then `}` alone. `PRIM` is `u8 i8 u16 i16 u32 i32 u64 i64 f32 f64 bool entity`;
+  `[N]` (N ≥ 1, an integer or `const`) makes a fixed array. These type words are contextual,
+  not reserved.
+- Layout is C's: each field at the next offset aligned to its primitive size, `align` the
+  largest field alignment, `size` rounded up to `align`. A struct needs at least one field.
+- The struct defines the constants `NAME.size`, `NAME.align` and `NAME.<field>` (byte offset)
+  in the file, like index structs (e3-design "Changes recorded": `size`/`align` win over a
+  field of that name). A struct name that equals an index struct is an error.
+- `export struct` puts the struct in section 13 as one of the mod's own types (it appears in
+  the mod's index with the mod as owner). A struct used by a `provide` must be `export` (or
+  come from the index, in which case the assembler writes a copy with its owner into section
+  13, keeping its component id). `pub struct` only shares the constants with other files.
+  A struct name shares the value name space with consts and data (a data item `S` next to
+  struct `S` is a duplicate definition).
+- Section 13 lists the structs as: every `export struct` of the program in file then source
+  order, then the copies of index structs in the order provides first use them. Section 13
+  exists only when the program has a provide, an `export struct` or a scratch region, so a
+  program without them is unchanged.
+
+### 16.8 `scratch`
+
+`scratch N` (root file, at most once, N an integer or `const`, `0 ..= 1048576`) sets the size in
+bytes of the exchange region the engine copies `str`, `bytes` and struct arguments into. Without
+it, a program with a provide that needs one gets 4096 bytes; a program without such a provide
+gets none. `scratch 0` with such a provide is an error. The region is 8-aligned, placed after
+the last data item (at 1024 when there is no data) and counts toward the default `memory`
+size (section 8). An explicit `scratch N > 0` reserves the region even without a provide that
+needs it.
+
+### 16.9 Grammar and lexer additions
+
+```
+item     += use | provide | struct | scratch | event_import | provide_event   (section 17.4)
+use       = "use" STRING [ "as" NAME ] NL
+provide   = "provide" NAME "(" [ aparam { "," aparam } ] ")"
+            [ "->" "(" aparam { "," aparam } ")" ] [ "=" NAME ] "," STRING NL
+aparam    = NAME ":" atype
+atype     = "i32" | "i64" | "f32" | "f64" | "bool" | "entity" | "str" | "bytes" | "&" NAME
+struct    = [ "pub" | "export" ] "struct" NAME [ "," STRING ] "{" NL { field } "}" NL
+field     = NAME ":" NAME [ "[" operand "]" ] [ "," STRING ] NL
+scratch   = "scratch" operand NL
+func, const, global, data: may start with "pub"
+```
+
+- New punctuation token: `&` (only valid before a struct name in an `atype`).
+- New reserved words: `use as pub provide struct scratch`. A program of today that uses one of
+  them as a name (a label `use:`, a register `reg as`) no longer assembles; the error says
+  the word is reserved (``` `use` is a reserved word and cannot be a label name ```; a data
+  item `use db 1` gets ``` `use` is a reserved word and cannot be a data name ```). `as` is a
+  keyword only after the path of a `use`. Type words of provides (`bool entity str bytes`)
+  and fields (`u8 ... entity`) are contextual. `export struct` is accepted; the message for a
+  bad word after `export` keeps its E2 wording. `pub` on `import`, `use`, `memory`, `table`,
+  `scratch`, `provide`, `export` or `pub` gives ``` `pub` is not allowed on `X` ```.
+
+### 16.10 Example
+
+```
+; main.efa (root)
+use "items.efa"
+import engine.log.info(i64, i64)
+
+provide give(item: str, count: i32) -> (status: i32) = items.add,
+    "Add `count` of `item` to the bag; 0 ok, 1 bag full."
+
+export fn init() {
+    call engine.log.info(hello, hello.len)
+    ret
+}
+
+hello db "inventory ready"
+```
+
+```
+; items.efa
+pub const CAPACITY = 64
+slots resb 512
+
+pub fn add(name: i64, len: i64, count: i32) -> i32 {
+    ; `name`/`len` point into this mod's scratch region; the work is left out here
+    ret 0
+}
+```
+
+## 17. Events (E8.13)
+
+Design: `docs/e8-design.md` "E8.13 Typed script events"; format and engine ABI: `efevm/SPEC.md`
+9.2 rule 9 and 9.3, `efevm/API_INDEX.md` "Events". A script sends and reads events through the
+engine functions `engine.events.send(ev: i32, payload: ptr)`, `count(ev: i32) -> (count: i32)` and
+`read(ev: i32, index: i32, out: ptr) -> (status: i32)`. `ev` is the event's **id inside the
+module**: its index in section 14 `events`. This section is how `.efa` fills section 14 and the
+events of section 13. A program without these items assembles to the same bytes as before.
+
+### 17.1 `import event`: using an event
+
+```
+import event game.score_changed            ; payload and size from the API index (--api)
+import event game.score_changed(&Score)    ; explicit payload struct
+import event game.reset()                  ; explicit: no payload
+```
+
+- `import event NS.NAME [ "(" [ "&" STRUCT ] ")" ]` is a top-level item and file-local, like
+  `import`: a file must declare every event it uses. `NS.NAME` splits at the last dot; `NS` is a
+  namespace (dot-separated identifiers), `NAME` an identifier. Two imports of the same event in
+  one file are an error.
+- **With `--api`** the event must exist in the index (``unknown event `game.score_changd` ``, with
+  a "did you mean" note). Without a payload list the payload struct and its size come from the
+  index. A written payload list must agree with the index: `&S` is the index's struct `S`, `()`
+  means the index lists no payload; otherwise ``payload mismatch for event `game.x`: declared
+  `&Lives`, but the API index has `&Score` ``. (Exception: the program's own provided events,
+  17.3.)
+- **Without `--api`** the payload form is required (``event `game.reset` has no payload: write
+  `import event game.reset(&Struct)` or `import event game.reset()` ``). `&S` is a struct of the
+  file (16.7, `pub`/`export` or not), or `&A.S` a public struct of a used file; its name and size
+  go into section 14. There is no index, so nothing checks them here: the host's link check
+  (section 14 rules) does.
+- **The id** is the constant `NS.NAME.id` (for example `game.score_changed.id`), valid wherever
+  an integer immediate is (call arguments, `const.i32`, a global initialiser, data values). It is
+  a link-time constant: it cannot be used in layout positions (`resb` size, `memory`, `scratch`,
+  array lengths), where the error says so. Reason for the form: `NS.NAME` alone could equal a
+  struct constant (`S.field`) or data symbol, and `NS.NAME` is also the name of the *function*
+  `import` family; `NS.NAME.id` has three or more segments and is never one of
+  `S.size`/`x.len`/`S.field`; the only remaining clash is a `use` alias, which the alias rule of
+  16.3 refuses (the first segment of an imported event's namespace counts like an imported
+  namespace). `id` follows the `S.id` (component id) precedent of struct constants. An event
+  and a function never have the same full name (the index guarantees it); without an index, an
+  `import event` and an `import` with the same `ns.name` in the program is an error.
+- **Merge.** Section 14 lists the events of all files: unit (file) order, source order within a
+  file, first appearance decides the id; identical imports in several files become one entry.
+  Different payloads for one event are an error naming both files:
+  ``event `game.reset` is declared with &Score (4 bytes) here but with no payload in `main.efa` ``
+  (note ``first defined in main.efa:2``). Payload equality is by struct name and size.
+- Section 14 is written only when the program has an event import; section 12 (with `--api`)
+  also lists the namespaces of the events with their versions.
+
+### 17.2 `provide event`: declaring an event of the mod
+
+```
+export struct Hit { damage: i32  who: entity }      ; (one field per line, 16.7)
+provide event hit(&Hit), "A hit landed; damage is in hit points."
+provide event cleared(), "Everything was cleared."
+```
+
+- `provide event NAME ( [&S] ), STRING` (any file). The name is an identifier (not reserved),
+  the doc is required and not blank. The payload `&S` is an `export struct` of the program or
+  `&A.S` of a used file (it must be `export`), or a struct of the index (a copy with its owner
+  goes into section 13, as for provide parameters, 16.6/16.7).
+- Names are unique among the program's provided events, and a provided event may not have the
+  name of a `provide` (SPEC.md 9.2 rule 9: a function and an event never share a full name).
+- They go into `Interface.events` (section 13) in file then source order. Section 13's structs
+  are: the `export struct`s, then the copied index structs in order of first use (provides
+  first, then events). Section 13 also exists when the program only has provided events.
+- The event is `<mod id>.NAME`; the engine registers it when the mod loads.
+
+### 17.3 A mod using its own event
+
+The assembler does not know the mod id, so it cannot name the event's namespace itself. A mod
+sends or reads its own event by importing it by its full name with an explicit payload:
+
+```
+export struct Hit { damage: i32 }
+provide event hit(&Hit), "A hit landed."
+import event mymod.hit(&Hit)
+...
+call engine.events.send(mymod.hit.id, buf)
+```
+
+With `--api`, an event that is not in the index is accepted only when the program has a
+`provide event` of the same name (its last segment) with the same payload struct name, and the
+import has an explicit payload; anything else is ``unknown event``, and a different payload is
+reported. The namespace is **not** checked by the assembler (it is the mod's id); the engine's
+link check of section 14 (the mod's own events are registered first) and `efescript pack`, which
+knows the id, are where a wrong namespace is caught.
+
+### 17.4 Grammar and words
+
+```
+item         += event_import | provide_event
+event_import  = "import" "event" NAME [ "(" [ "&" NAME ] ")" ] NL      ; NAME is ns.name
+provide_event = "provide" "event" NAME "(" [ "&" NAME ] ")" "," STRING NL
+```
+
+`event` is a **contextual** word, not reserved: it is a keyword only directly after `import` or
+`provide` when a name follows. `import event.ping(i32)` (a function in namespace `event`),
+`provide event(...)` (a provide called `event`), and `event` as a label, register, const or data
+name keep their meaning. The reserved-word list of 16.9 is unchanged.

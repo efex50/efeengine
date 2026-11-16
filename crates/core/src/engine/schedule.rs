@@ -86,6 +86,29 @@ impl<'a> Ctx<'a> {
     pub fn send<T: 'static>(&mut self, ev: T) {
         self.events.send(ev);
     }
+
+    /// Send the registered script event `event` (`namespace.name`) with `payload` (exactly the
+    /// size of its payload struct; empty for an event without payload). It is refused, and not
+    /// queued, if the event is not registered or the size is wrong
+    /// ([`ScriptEventError`](crate::engine::scripting::ScriptEventError)). Readable by scripts
+    /// (`engine.events.read`) and by Rust systems ([`script_events`](Self::script_events))
+    /// during the next frame. Rust sends do not count against the scripts' 4096 per frame cap.
+    pub fn send_script_event(&mut self, event: &str, payload: &[u8]) -> Result<(), crate::engine::scripting::ScriptEventError> {
+        self.scripting.check_event(event, payload.len())?;
+        self.events.send(crate::engine::scripting::ScriptEvent { event: event.to_string(), payload: payload.to_vec() });
+        Ok(())
+    }
+
+    /// The payloads of the script events `event` (`namespace.name`) readable this frame, in
+    /// send order (sent by scripts or by Rust last frame). Entries whose size is not the
+    /// registered payload size are skipped.
+    pub fn script_events<'b>(&'b self, event: &'b str) -> impl Iterator<Item = &'b [u8]> + 'b {
+        let size = self.scripting.event_payload_size(event);
+        self.events::<crate::engine::scripting::ScriptEvent>()
+            .iter()
+            .filter(move |e| e.event == event && Some(e.payload.len()) == size)
+            .map(|e| e.payload.as_slice())
+    }
 }
 
 /// A boxed system function.

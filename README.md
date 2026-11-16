@@ -56,6 +56,7 @@ cargo xtask run test_example native [--release] [--static]
 cargo xtask run test_example web [--port 8080] [--host 0.0.0.0]
 cargo xtask serve test_example               # serve dist/ again without rebuilding
 cargo xtask build | dist | list | check | test | doctor | dev | clean
+cargo xtask mods <example>                   # pack examples/<example>/mods/* into .efmod packages; build/dist copy them
 cargo xtask --help                           # every command and flag
 ```
 

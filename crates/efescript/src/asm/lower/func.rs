@@ -335,6 +335,9 @@ impl<'a, 'm> Fl<'a, 'm> {
     }
 
     fn unknown_reg(&self, id: &Ident) -> Diagnostic {
+        if let Some(d) = self.env.private_err(crate::link::Space::Value, id) {
+            return d;
+        }
         let what = if id.name.contains('.') { "name" } else { "register" };
         let d = self.d(id.span, format!("unknown {what} `{}`", id.name));
         let cands = self.reg_list.iter().chain(self.env.value_names.iter());

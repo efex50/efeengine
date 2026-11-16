@@ -2,7 +2,7 @@
 
 use crate::error::{BuildError, LoadError};
 use crate::module::{
-    ApiRef, BrTable, DataSegment, Export, ExportKind, FuncLines, Function, Global, Import, Inst,
+    ApiRef, BrTable, DataSegment, EventRef, Export, ExportKind, FuncLines, Function, Global, Import, Interface, Inst,
     LineEntry, MemoryType, Module, ModuleData,
 };
 use crate::op::{Op, Shape};
@@ -289,6 +289,8 @@ pub struct ModuleBuilder {
     file_ids: HashMap<String, u32>,
     errors: Vec<BuildError>,
     api: Option<ApiRef>,
+    interface: Option<Interface>,
+    events: Vec<EventRef>,
 }
 
 impl ModuleBuilder {
@@ -344,6 +346,26 @@ impl ModuleBuilder {
     pub fn api_ref<S: Into<String>>(&mut self, hash: u64, namespaces: impl IntoIterator<Item = (S, u32)>) {
         let namespaces = namespaces.into_iter().map(|(n, v)| (n.into(), v)).collect();
         self.api = Some(ApiRef { hash, namespaces });
+    }
+
+    /// Sets section 13 `interface` (SPEC.md 9.2): what the module provides when loaded as a
+    /// mod. Replaces an earlier call. Its rules are checked by `finish`.
+    pub fn interface(&mut self, interface: Interface) {
+        self.interface = Some(interface);
+    }
+
+    /// Adds a reference to script event `namespace.name` to section 14 (SPEC.md 9.3) and
+    /// returns its event id (its index in the section), the value `engine.events.*` take.
+    /// `payload` is `(struct name, size in bytes)` from the API index, `None` for an event
+    /// without payload. A second call with the same `namespace.name` returns the first id;
+    /// if the payload differs it is still added, and `finish` rejects the duplicate.
+    pub fn event_ref(&mut self, namespace: &str, name: &str, payload: Option<(&str, u32)>) -> u32 {
+        let payload = payload.map(|(s, n)| (s.to_string(), n));
+        if let Some(i) = self.events.iter().position(|e| e.namespace == namespace && e.name == name && e.payload == payload) {
+            return i as u32;
+        }
+        self.events.push(EventRef { namespace: namespace.to_string(), name: name.to_string(), payload });
+        (self.events.len() - 1) as u32
     }
 
     pub fn add_func(&mut self, ty: FuncType, body: FunctionBuilder) -> u32 {
@@ -442,6 +464,8 @@ impl ModuleBuilder {
             exports: self.exports,
             data: self.data,
             api: self.api,
+            interface: self.interface,
+            events: self.events,
             ..Default::default()
         };
         data.names.funcs = self.func_names;

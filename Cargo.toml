@@ -10,6 +10,7 @@ members = [
     "crates/efepages/page_size_macro",
     "crates/calc",
     "crates/efevm",
+    "crates/efemod",
     "examples/*",
     "xtask",
 ]

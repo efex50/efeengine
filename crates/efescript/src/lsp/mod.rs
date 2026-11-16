@@ -5,6 +5,7 @@
 //! [`run_stdio`] only frames messages around it.
 
 mod analysis;
+mod project;
 mod text;
 
 use crate::asm::{self, ast::Module, AsmOptions};
@@ -15,7 +16,7 @@ use lsp_types as lt;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const INVALID_REQUEST: i32 = -32600;
@@ -27,6 +28,8 @@ const NOT_INITIALIZED: i32 = -32002;
 type Reply = Result<Value, (i32, String)>;
 
 struct Doc {
+    /// The normalised file path of the URI (`None` for a non-file URI).
+    path: Option<PathBuf>,
     text: String,
     version: Option<i32>,
     /// The last AST that parsed (kept while the text has syntax errors).
@@ -35,8 +38,10 @@ struct Doc {
 
 #[derive(Default)]
 struct ApiState {
-    path: Option<PathBuf>,
-    stamp: Option<(SystemTime, u64)>,
+    /// The `--api` files, in the order given; their merge is `index`.
+    paths: Vec<PathBuf>,
+    /// The (modified time, length) of each path when the index was last loaded.
+    stamps: Vec<Option<(SystemTime, u64)>>,
     index: Option<ApiIndex>,
 }
 
@@ -49,6 +54,11 @@ pub struct Server {
     root: Option<PathBuf>,
     docs: HashMap<String, Doc>,
     api: ApiState,
+    /// The diagnostics last published per URI (other files of a program are published only
+    /// when they change).
+    last: HashMap<String, Vec<Value>>,
+    /// Per program root: the URIs of files that are not open but got diagnostics.
+    extras: HashMap<PathBuf, HashSet<String>>,
 }
 
 fn log(kind: u32, message: impl Into<String>) -> Message {
@@ -96,15 +106,23 @@ fn file_name_of(uri: &str) -> String {
 impl Server {
     /// `api`: the `--api` file, when given on the command line.
     pub fn new(api: Option<PathBuf>) -> Server {
+        Server::with_apis(api.into_iter().collect())
+    }
+
+    /// `apis`: the `--api` files, when given on the command line. Several are merged the same
+    /// way as `efescript build --api` (`ApiIndex::merge`).
+    pub fn with_apis(apis: Vec<PathBuf>) -> Server {
         Server {
             initialized: false,
             shutdown: false,
             exited: false,
-            explicit_api: api.is_some(),
+            explicit_api: !apis.is_empty(),
             watch_dynamic: false,
             root: None,
             docs: HashMap::new(),
-            api: ApiState { path: api, ..ApiState::default() },
+            api: ApiState { paths: apis, ..ApiState::default() },
+            last: HashMap::new(),
+            extras: HashMap::new(),
         }
     }
 
@@ -168,25 +186,46 @@ impl Server {
 
     // ---- the API index ----
 
-    /// Reloads the index when its file changed (or `force`). True when a new index was loaded.
+    /// Reloads the index when one of its files changed (or `force`). True when a new index was
+    /// loaded. Several files are merged with `ApiIndex::merge`; a file that fails keeps the
+    /// previous index.
     fn reload(&mut self, force: bool, out: &mut Vec<Message>) -> bool {
-        let Some(path) = self.api.path.clone() else { return false };
-        let stamp = std::fs::metadata(&path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
-        if !force && stamp == self.api.stamp {
+        if self.api.paths.is_empty() {
             return false;
         }
-        self.api.stamp = stamp;
-        let loaded = std::fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|t| ApiIndex::from_json(&t).map_err(|e| e.to_string()));
-        match loaded {
+        let stamps: Vec<Option<(SystemTime, u64)>> = self
+            .api
+            .paths
+            .iter()
+            .map(|p| std::fs::metadata(p).ok().and_then(|m| Some((m.modified().ok()?, m.len()))))
+            .collect();
+        if !force && stamps == self.api.stamps {
+            return false;
+        }
+        self.api.stamps = stamps;
+        let names: Vec<String> = self.api.paths.iter().map(|p| p.display().to_string()).collect();
+        let mut indices = Vec::with_capacity(self.api.paths.len());
+        for path in self.api.paths.clone() {
+            let loaded = std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|t| ApiIndex::from_json(&t).map_err(|e| e.to_string()));
+            match loaded {
+                Ok(ix) => indices.push(ix),
+                Err(e) => {
+                    out.push(log(1, format!("efescript: cannot load API index {}: {e}", path.display())));
+                    return false;
+                }
+            }
+        }
+        let refs: Vec<&ApiIndex> = indices.iter().collect();
+        match ApiIndex::merge(&refs) {
             Ok(ix) => {
-                out.push(log(3, format!("efescript: loaded API index {}", path.display())));
+                out.push(log(3, format!("efescript: loaded API index {}", names.join(", "))));
                 self.api.index = Some(ix);
                 true
             }
             Err(e) => {
-                out.push(log(1, format!("efescript: cannot load API index {}: {e}", path.display())));
+                out.push(log(1, format!("efescript: cannot merge API indices {}: {e}", names.join(", "))));
                 false
             }
         }
@@ -211,7 +250,7 @@ impl Server {
         };
         found.sort();
         match found.len() {
-            1 => self.api.path = found.pop(),
+            1 => self.api.paths = found,
             0 => out.push(log(3, "efescript: no .efapi file in the workspace root; running without an API index")),
             n => out.push(log(
                 2,
@@ -289,7 +328,15 @@ impl Server {
         let Some((s, e, word)) = text::word_at(line, text::char_col(line, tp.position.character)) else {
             return Ok(Value::Null);
         };
-        let Some(md) = analysis::hover_text(self.api.index.as_ref(), &word) else { return Ok(Value::Null) };
+        let md = match self.alias_item(doc, &word) {
+            Some(hit) => Some(hit.hover()),
+            None => doc
+                .module
+                .as_ref()
+                .and_then(|m| analysis::event_hover(self.api.index.as_ref(), m, tp.position.line + 1, &word))
+                .or_else(|| analysis::hover_text(self.api.index.as_ref(), &word)),
+        };
+        let Some(md) = md else { return Ok(Value::Null) };
         let l = tp.position.line;
         Ok(json!({
             "contents": {"kind": "markdown", "value": md},
@@ -308,6 +355,10 @@ impl Server {
             return Ok(Value::Null);
         };
         let Some(m) = &doc.module else { return Ok(Value::Null) };
+        if let Some(hit) = self.alias_item(doc, &word) {
+            let tl = text::lines(&hit.text);
+            return Ok(json!({"uri": hit.uri, "range": text::span_range(&tl, hit.item.name_span)}));
+        }
         match analysis::definition(m, tp.position.line + 1, &word) {
             Some(span) => Ok(json!({"uri": uri, "range": text::span_range(&lines, span)})),
             None => Ok(Value::Null),
@@ -339,6 +390,22 @@ impl Server {
             }
             items.push(it);
         };
+        if line[..line.char_indices().nth(start).map_or(line.len(), |(b, _)| b)].trim() == "import event" {
+            if let Some(ix) = &self.api.index {
+                for (label, detail, d) in analysis::event_candidates(ix) {
+                    add(label, 20, detail, d);
+                }
+            }
+            return Ok(Value::Array(items));
+        }
+        if let Some((alias, _)) = _prefix.split_once('.') {
+            if let Some(target) = self.alias_file(doc, alias) {
+                for it in analysis::public_items(&target.module) {
+                    add(format!("{alias}.{}", it.name), it.kind, it.detail, it.doc);
+                }
+                return Ok(Value::Array(items));
+            }
+        }
         if let Some(ix) = &self.api.index {
             for f in &ix.functions {
                 add(f.qualified(), 3, f.signature_text(), f.doc.clone());
@@ -382,7 +449,7 @@ impl Server {
                 Ok(p) => {
                     let d = p.text_document;
                     let uri = d.uri.as_str().to_string();
-                    self.docs.insert(uri.clone(), Doc { text: d.text, version: Some(d.version), module: None });
+                    self.docs.insert(uri.clone(), Doc { path: uri_to_path(&uri).map(|p| project::normalize(&p)), text: d.text, version: Some(d.version), module: None });
                     self.update_doc(&uri, out);
                 }
                 Err(e) => out.push(log(1, format!("malformed didOpen: {e}"))),
@@ -424,13 +491,18 @@ impl Server {
             "textDocument/didClose" => {
                 if let Ok(p) = serde_json::from_value::<lt::DidCloseTextDocumentParams>(p) {
                     let uri = p.text_document.uri.as_str().to_string();
-                    if self.docs.remove(&uri).is_some() {
+                    if let Some(doc) = self.docs.remove(&uri) {
                         out.push(publish(&uri, None, Vec::new()));
+                        self.last.remove(&uri);
+                        // The buffer is gone: the other open files of its program see the disk.
+                        if let Some(path) = doc.path {
+                            self.publish_program(Some(project::program_root(&path)), None, false, out);
+                        }
                     }
                 }
             }
             "workspace/didChangeWatchedFiles" => {
-                if !self.explicit_api && self.api.path.is_none() {
+                if !self.explicit_api && self.api.paths.is_empty() {
                     self.discover(out);
                 }
                 if self.reload(true, out) {
@@ -442,6 +514,30 @@ impl Server {
         }
     }
 
+    // ---- other files of a program ----
+
+    /// The file a `use` alias of `doc` names: an open buffer, else the disk.
+    fn alias_file(&self, doc: &Doc, alias: &str) -> Option<AliasFile> {
+        let path = analysis::use_path(doc.module.as_ref()?, alias)?;
+        let full = project::normalize(&doc.path.as_ref()?.parent()?.join(path));
+        if let Some((uri, d)) = self.docs.iter().find(|(_, d)| d.path.as_ref() == Some(&full)) {
+            let module = d.module.clone().or_else(|| asm::parse(&d.text, "").ok())?;
+            return Some(AliasFile { uri: uri.clone(), text: d.text.clone(), module });
+        }
+        let text = std::fs::read_to_string(&full).ok()?;
+        let module = asm::parse(&text, "").ok()?;
+        Some(AliasFile { uri: project::path_to_uri(&full), text, module })
+    }
+
+    /// `alias.item` (`m.square`, `m.msg.len`, `m.Point.size`) of `word`, found in the file
+    /// the alias names.
+    fn alias_item(&self, doc: &Doc, word: &str) -> Option<AliasHit> {
+        let (alias, rest) = word.split_once('.')?;
+        let target = self.alias_file(doc, alias)?;
+        let item = analysis::find_item(&target.module, rest)?;
+        Some(AliasHit { uri: target.uri, text: target.text, item })
+    }
+
     // ---- diagnostics ----
 
     fn update_doc(&mut self, uri: &str, out: &mut Vec<Message>) {
@@ -450,44 +546,182 @@ impl Server {
                 doc.module = Some(m);
             }
         }
-        if let Some(m) = self.publish_one(uri) {
-            out.push(m);
+        let Some(doc) = self.docs.get(uri) else { return };
+        match doc.path.as_ref() {
+            Some(path) => {
+                let root = project::program_root(path);
+                self.publish_program(Some(root), Some(uri), false, out);
+            }
+            None => {
+                let diags = self.diagnose_single(doc, &file_name_of(uri));
+                let version = doc.version;
+                out.push(publish(uri, version, diags));
+            }
         }
     }
 
-    fn publish_one(&self, uri: &str) -> Option<Message> {
-        let doc = self.docs.get(uri)?;
-        let name = file_name_of(uri);
+    /// A document that is not a file: a program of one in-memory file.
+    fn diagnose_single(&self, doc: &Doc, name: &str) -> Vec<Value> {
         let opts = AsmOptions { api: self.api.index.as_ref() };
         let lines = text::lines(&doc.text);
-        let diags: Vec<Value> = match asm::assemble_with(&doc.text, &name, &opts) {
+        match asm::assemble_with(&doc.text, name, &opts) {
             Ok(_) => Vec::new(),
-            Err(ds) => ds
-                .0
-                .iter()
-                .map(|d| {
-                    let mut msg = d.message.clone();
-                    if let Some(n) = &d.note {
-                        msg.push_str("\nnote: ");
-                        msg.push_str(n);
-                    }
-                    json!({
-                        "range": text::span_range(&lines, d.span()),
-                        "severity": 1,
-                        "source": "efescript",
-                        "message": msg
-                    })
-                })
-                .collect(),
-        };
-        Some(publish(uri, doc.version, diags))
+            Err(ds) => ds.0.iter().map(|d| lsp_diag(d, &lines)).collect(),
+        }
     }
 
-    fn publish_all(&self) -> Vec<Message> {
-        let mut uris: Vec<&String> = self.docs.keys().collect();
-        uris.sort();
-        uris.into_iter().filter_map(|u| self.publish_one(u)).collect()
+    /// Assembles the program with root file `root` (open buffers over the disk) and returns
+    /// its diagnostics by file path.
+    fn diagnose_program(&self, root: &Path) -> HashMap<PathBuf, Vec<asm::Diagnostic>> {
+        let bufs: HashMap<PathBuf, &str> =
+            self.docs.values().filter_map(|d| Some((d.path.clone()?, d.text.as_str()))).collect();
+        let base = root.parent().map(Path::to_path_buf).unwrap_or_default();
+        let rel = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let src = project::BufSource { base, bufs: &bufs };
+        let opts = AsmOptions { api: self.api.index.as_ref() };
+        let mut by_file: HashMap<PathBuf, Vec<asm::Diagnostic>> = HashMap::new();
+        if let Err(ds) = asm::assemble_program(&rel, &src, &opts) {
+            for d in ds.0 {
+                let key = if d.file.is_empty() { root.to_path_buf() } else { project::normalize(Path::new(&d.file)) };
+                by_file.entry(key).or_default().push(d);
+            }
+        }
+        by_file
     }
+
+    /// Publishes the diagnostics of the program rooted at `root` (`None`: documents that are
+    /// not files are skipped) to every open file of it and to the other files that have
+    /// errors. `primary` is always published; the others only when they changed, or `force`.
+    fn publish_program(&mut self, root: Option<PathBuf>, primary: Option<&str>, force: bool, out: &mut Vec<Message>) {
+        let Some(root) = root else { return };
+        let by_file = self.diagnose_program(&root);
+        let mut group: Vec<String> = self
+            .docs
+            .iter()
+            .filter(|(_, d)| d.path.as_ref().is_some_and(|p| project::program_root(p) == root))
+            .map(|(u, _)| u.clone())
+            .collect();
+        group.sort();
+        if let Some(p) = primary {
+            if let Some(k) = group.iter().position(|u| u == p) {
+                let u = group.remove(k);
+                group.insert(0, u);
+            }
+        }
+        // (uri, version, diagnostics) of every file to consider.
+        let mut jobs: Vec<(String, Option<i32>, Vec<Value>)> = Vec::new();
+        let mut open_paths: HashSet<PathBuf> = HashSet::new();
+        for uri in &group {
+            let Some(doc) = self.docs.get(uri) else { continue };
+            let Some(path) = doc.path.clone() else { continue };
+            let lines = text::lines(&doc.text);
+            let mut diags: Vec<asm::Diagnostic> = by_file.get(&path).cloned().unwrap_or_default();
+            // A file the program does not reach still shows its own syntax errors.
+            if let Err(own) = asm::parse(&doc.text, &path.to_string_lossy()) {
+                for d in own.0 {
+                    if !diags.iter().any(|x| (x.line, x.column, &x.message) == (d.line, d.column, &d.message)) {
+                        diags.push(d);
+                    }
+                }
+                diags.sort_by_key(|d| (d.line, d.column));
+            }
+            jobs.push((uri.clone(), doc.version, diags.iter().map(|d| lsp_diag(d, &lines)).collect()));
+            open_paths.insert(path);
+        }
+        let mut extra_paths: Vec<&PathBuf> = by_file.keys().filter(|p| !open_paths.contains(*p)).collect();
+        extra_paths.sort();
+        let mut new_extras: HashSet<String> = HashSet::new();
+        for path in extra_paths {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            let lines = text::lines(&text);
+            let uri = project::path_to_uri(path);
+            new_extras.insert(uri.clone());
+            jobs.push((uri, None, by_file[path].iter().map(|d| lsp_diag(d, &lines)).collect()));
+        }
+        for (uri, version, diags) in jobs {
+            let changed = self.last.get(&uri).map_or(!diags.is_empty(), |l| *l != diags);
+            if force || changed || primary == Some(uri.as_str()) {
+                out.push(publish(&uri, version, diags.clone()));
+            }
+            self.last.insert(uri, diags);
+        }
+        let old = self.extras.remove(&root).unwrap_or_default();
+        for uri in old.difference(&new_extras) {
+            if !self.docs.contains_key(uri) {
+                out.push(publish(uri, None, Vec::new()));
+                self.last.remove(uri);
+            }
+        }
+        self.extras.insert(root, new_extras);
+    }
+
+    fn publish_all(&mut self) -> Vec<Message> {
+        let mut out = Vec::new();
+        let mut roots: Vec<PathBuf> = Vec::new();
+        let mut uris: Vec<String> = self.docs.keys().cloned().collect();
+        uris.sort();
+        for uri in &uris {
+            let Some(doc) = self.docs.get(uri) else { continue };
+            match &doc.path {
+                Some(p) => {
+                    let r = project::program_root(p);
+                    if !roots.contains(&r) {
+                        roots.push(r.clone());
+                        self.publish_program(Some(r), None, true, &mut out);
+                    }
+                }
+                None => {
+                    let diags = self.diagnose_single(doc, &file_name_of(uri));
+                    out.push(publish(uri, doc.version, diags));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A file of the program found through a `use` alias.
+struct AliasFile {
+    uri: String,
+    text: String,
+    module: Module,
+}
+
+/// An `alias.item` reference resolved to its declaration.
+struct AliasHit {
+    uri: String,
+    text: String,
+    item: analysis::PubItem,
+}
+
+impl AliasHit {
+    fn hover(&self) -> String {
+        let tl = text::lines(&self.text);
+        let decl = tl
+            .get((self.item.item_span.line as usize).saturating_sub(1))
+            .map(|l| l.trim().trim_end_matches('{').trim_end().to_string())
+            .unwrap_or_default();
+        let mut md = format!("```\n{decl}\n```\n\n`{}`: {}", self.item.name, self.item.detail);
+        if !self.item.doc.is_empty() {
+            md.push_str(&format!("\n\n{}", self.item.doc));
+        }
+        md.push_str(&format!("\n\ndefined in `{}`", file_name_of(&self.uri)));
+        md
+    }
+}
+
+fn lsp_diag(d: &asm::Diagnostic, lines: &[&str]) -> Value {
+    let mut msg = d.message.clone();
+    if let Some(n) = &d.note {
+        msg.push_str("\nnote: ");
+        msg.push_str(n);
+    }
+    json!({
+        "range": text::span_range(lines, d.span()),
+        "severity": 1,
+        "source": "efescript",
+        "message": msg
+    })
 }
 
 fn publish(uri: &str, version: Option<i32>, diags: Vec<Value>) -> Message {
@@ -499,9 +733,9 @@ fn publish(uri: &str, version: Option<i32>, diags: Vec<Value>) -> Message {
 }
 
 /// Serves LSP on stdin/stdout and returns the process exit code (0 after `shutdown` + `exit`).
-pub fn run_stdio_code(api: Option<PathBuf>) -> i32 {
+pub fn run_stdio_code(apis: Vec<PathBuf>) -> i32 {
     use std::io::Write;
-    let mut server = Server::new(api);
+    let mut server = Server::with_apis(apis);
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let stdout = std::io::stdout();
@@ -526,6 +760,6 @@ pub fn run_stdio_code(api: Option<PathBuf>) -> i32 {
 }
 
 /// [`run_stdio_code`] as an [`std::process::ExitCode`].
-pub fn run_stdio(api: Option<PathBuf>) -> std::process::ExitCode {
-    std::process::ExitCode::from(run_stdio_code(api) as u8)
+pub fn run_stdio(apis: Vec<PathBuf>) -> std::process::ExitCode {
+    std::process::ExitCode::from(run_stdio_code(apis) as u8)
 }

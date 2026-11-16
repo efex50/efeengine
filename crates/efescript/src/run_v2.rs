@@ -52,7 +52,7 @@ pub fn load_path_with(path: &str, opts: &asm::AsmOptions) -> Result<Program, Loa
     if path.ends_with(".efa") {
         let text = String::from_utf8(bytes)
             .map_err(|_| LoadFailure::Io(format!("{path}: not valid UTF-8")))?;
-        return load_source_with(&text, path, opts);
+        return load_program_with(&text, path, opts);
     }
     if path.ends_with(".efvm") || bytes.starts_with(b"EFVM") {
         return decode(path, &bytes);
@@ -110,6 +110,39 @@ pub fn load_source_with(text: &str, file: &str, opts: &asm::AsmOptions) -> Resul
             module,
             source: Some((file.to_string(), text.to_string())),
         }),
+        Err(d) => Err(LoadFailure::Assemble(d)),
+    }
+}
+
+/// The root file's text is served as given (so a root that is a symbolic link keeps
+/// working); every other file goes through the confined [`asm::FsSource`].
+struct RootSource<'a> {
+    root: &'a str,
+    text: &'a str,
+    fs: asm::FsSource,
+}
+
+impl asm::FileSource for RootSource<'_> {
+    fn read(&self, path: &str) -> Result<String, String> {
+        if path == self.root {
+            Ok(self.text.to_string())
+        } else {
+            self.fs.read(path)
+        }
+    }
+    fn display_name(&self, path: &str) -> String {
+        self.fs.display_name(path)
+    }
+}
+
+/// Assembles the program whose root file is `file` with the given `text`, following `use`
+/// through the file system (efa-syntax 16): the other files are found relative to the
+/// root's directory, and named in debug info with that directory as typed in front.
+pub fn load_program_with(text: &str, file: &str, opts: &asm::AsmOptions) -> Result<Program, LoadFailure> {
+    let (fs, rel) = asm::FsSource::for_file(file);
+    let src = RootSource { root: &rel, text, fs };
+    match asm::assemble_program(&rel, &src, opts) {
+        Ok(module) => Ok(Program { module, source: Some((file.to_string(), text.to_string())) }),
         Err(d) => Err(LoadFailure::Assemble(d)),
     }
 }
@@ -255,8 +288,8 @@ fn frame_text(
     };
     let mut out = format!("\n  at {name} ({file}:{line}:{col})");
     let text = cache.entry(file.clone()).or_insert_with(|| match &prog.source {
-        Some((_, t)) => Some(t.clone()),
-        None => read_source_file(&file),
+        Some((name, t)) if *name == file => Some(t.clone()),
+        _ => read_source_file(&file),
     });
     let src = text
         .as_deref()

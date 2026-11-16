@@ -9,9 +9,10 @@
 //! loop is guaranteed to make progress.
 
 use super::ast::{
-    CallSugar, ConstDecl, DataDecl, DataKind, FuncDecl, GlobalDecl, Ident, ImportDecl, Inst, Item,
-    MemoryDecl, Module, Operand, Param, Signature, Span, Stmt, StmtKind, TableDecl, TableEntry, Ty,
-    TypeRef,
+    AParam, AType, CallSugar, ConstDecl, DataDecl, DataKind, FieldDecl, FuncDecl, GlobalDecl, Ident,
+    EventForm, EventImportDecl, ImportDecl, Inst, Item, MemoryDecl, Module, Operand, Param, ProvideDecl,
+    ProvideEventDecl, ScratchDecl, Signature,
+    Span, Stmt, StmtKind, StructDecl, TableDecl, TableEntry, Ty, TypeRef, UseDecl,
 };
 use super::diag::Diagnostic;
 use super::lexer::{lex, Token, TokenKind};
@@ -20,7 +21,13 @@ use super::lexer::{lex, Token, TokenKind};
 const MAX_DEPTH: u32 = 64;
 
 /// Words that start a top-level item; none of them is a valid first word of a statement.
-const ITEM_KEYWORDS: [&str; 7] = ["import", "memory", "const", "global", "table", "fn", "export"];
+const ITEM_KEYWORDS: [&str; 12] = [
+    "import", "memory", "const", "global", "table", "fn", "export", "use", "pub", "provide", "struct", "scratch",
+];
+
+/// Item keywords added for multi-file programs (efa-syntax 16.9): reserved, so a data item
+/// named after one of them gets an error that says so.
+const NEW_KEYWORDS: [&str; 5] = ["use", "pub", "provide", "struct", "scratch"];
 
 /// A syntax error that has already been recorded; the caller recovers.
 struct Abort;
@@ -64,6 +71,7 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::Colon => "`:`".to_string(),
         TokenKind::Equals => "`=`".to_string(),
         TokenKind::Arrow => "`->`".to_string(),
+        TokenKind::Amp => "`&`".to_string(),
         TokenKind::Newline => "end of line".to_string(),
         TokenKind::Eof => "end of file".to_string(),
     }
@@ -299,27 +307,126 @@ impl<'a> Parser<'a> {
                 ));
             }
         };
+        if NEW_KEYWORDS.contains(&name)
+            && matches!(&self.tok_at(1).kind, TokenKind::Name(k) if DataKind::from_name(k).is_some())
+        {
+            return Err(self.error(tok.span, format!("`{name}` is a reserved word and cannot be a data name")));
+        }
         match name {
             "import" => self.import(),
             "memory" => self.memory(),
-            "const" => self.constant(),
-            "global" => self.global(false, tok.span),
+            "const" => self.constant(false, tok.span),
+            "global" => self.global(false, false, tok.span),
             "table" => self.table(),
-            "fn" => self.func(false, tok.span),
+            "fn" => self.func(false, false, tok.span),
+            "use" => self.use_item(),
+            "provide" => self.provide(),
+            "struct" => self.struct_item(false, false, tok.span),
+            "scratch" => self.scratch(),
             "export" => {
                 self.bump();
                 match self.kind() {
-                    TokenKind::Name(n) if n == "fn" => self.func(true, tok.span),
-                    TokenKind::Name(n) if n == "global" => self.global(true, tok.span),
+                    TokenKind::Name(n) if n == "fn" => self.func(true, false, tok.span),
+                    TokenKind::Name(n) if n == "global" => self.global(true, false, tok.span),
+                    TokenKind::Name(n) if n == "struct" => self.struct_item(false, true, tok.span),
+                    // `export struct` is accepted too; the message keeps its E2 wording.
                     _ => Err(self.expected("`fn` or `global` after `export`")),
                 }
             }
-            _ => self.data(),
+            "pub" => {
+                self.bump();
+                let next = self.tok();
+                match &next.kind {
+                    TokenKind::Name(n) if n == "fn" => self.func(false, true, tok.span),
+                    TokenKind::Name(n) if n == "global" => self.global(false, true, tok.span),
+                    TokenKind::Name(n) if n == "const" => self.constant(true, tok.span),
+                    TokenKind::Name(n) if n == "struct" => self.struct_item(true, false, tok.span),
+                    TokenKind::Name(n)
+                        if ["import", "use", "memory", "table", "scratch", "provide", "export", "pub"]
+                            .contains(&n.as_str()) =>
+                    {
+                        let what = n.clone();
+                        Err(self.error(
+                            next.span,
+                            format!("`pub` is not allowed on `{what}`"),
+                        ))
+                    }
+                    TokenKind::Name(_) if matches!(&self.tok_at(1).kind, TokenKind::Name(k) if DataKind::from_name(k).is_some()) => {
+                        self.data(true, tok.span)
+                    }
+                    _ => Err(self.expected("`fn`, `const`, `global`, `struct` or a data definition after `pub`")),
+                }
+            }
+            _ => self.data(false, Span::none()),
         }
+    }
+
+    /// `( [&S] )` of an event: the payload struct, or `None` for `()`.
+    fn event_payload(&mut self) -> PResult<Option<(Ident, Span)>> {
+        self.expect_tok(TokenKind::LParen, "`(` and the payload of the event: `(&Struct)` or `()`")?;
+        if matches!(self.kind(), TokenKind::RParen) {
+            self.bump();
+            return Ok(None);
+        }
+        if !matches!(self.kind(), TokenKind::Amp) {
+            return Err(self.expected("`&Struct` (the payload) or `)` for an event without payload"));
+        }
+        let amp = self.bump();
+        let s = self.ident("a struct name after `&`")?;
+        let span = amp.join(s.span);
+        self.expect_tok(TokenKind::RParen, "`)` after the payload struct")?;
+        Ok(Some((s, span)))
+    }
+
+    /// `import event NS.NAME [( [&S] )]`, after `import` was consumed and `event` is current.
+    fn event_import(&mut self, start: Span) -> PResult<Item> {
+        self.bump(); // `event`
+        let qualified = self.ident("a qualified event name like `game.score_changed`")?;
+        if !qualified.name.contains('.') {
+            self.push_diag(
+                qualified.span,
+                format!("event name `{}` must be qualified as `namespace.name`", qualified.name),
+                None,
+            );
+        }
+        let form = if matches!(self.kind(), TokenKind::LParen) {
+            match self.event_payload()? {
+                Some((s, span)) => EventForm::Struct(s, span),
+                None => EventForm::NoPayload,
+            }
+        } else {
+            EventForm::FromIndex
+        };
+        let span = start.join(self.prev);
+        self.finish_line("the event import")?;
+        Ok(Item::EventImport(EventImportDecl { span, qualified, form }))
+    }
+
+    /// `provide event NAME ( [&S] ), STRING`, with `event` current.
+    fn provide_event(&mut self, start: Span) -> PResult<Item> {
+        self.bump(); // `event`
+        let name = self.ident("an event name after `provide event`")?;
+        let payload = self.event_payload()?;
+        self.expect_tok(TokenKind::Comma, "`,` and the doc string of the event")?;
+        let (doc, doc_span) = match self.kind() {
+            TokenKind::Str(b) => {
+                let b = b.clone();
+                (b, self.bump())
+            }
+            _ => return Err(self.expected("the doc string of the event")),
+        };
+        let span = start.join(self.prev);
+        self.finish_line("the doc string")?;
+        Ok(Item::ProvideEvent(ProvideEventDecl { span, name, payload, doc, doc_span }))
     }
 
     fn import(&mut self) -> PResult<Item> {
         let start = self.bump();
+        if matches!(self.kind(), TokenKind::Name(n) if n == "event")
+            && matches!(self.tok_at(1).kind, TokenKind::Name(_))
+        {
+            return self.event_import(start);
+        }
         let qualified = self.ident("a qualified name like `std.println` after `import`")?;
         if !qualified.name.contains('.') {
             self.push_diag(
@@ -350,17 +457,17 @@ impl<'a> Parser<'a> {
         Ok(Item::Memory(MemoryDecl { span, min, max }))
     }
 
-    fn constant(&mut self) -> PResult<Item> {
-        let start = self.bump();
+    fn constant(&mut self, public: bool, start: Span) -> PResult<Item> {
+        self.bump(); // `const`
         let name = self.ident("a constant name after `const`")?;
         self.expect_tok(TokenKind::Equals, "`=` after the constant name")?;
         let value = self.parse_operand()?;
         let span = start.join(self.prev);
         self.finish_line("the constant value")?;
-        Ok(Item::Const(ConstDecl { span, name, value }))
+        Ok(Item::Const(ConstDecl { span, public, name, value }))
     }
 
-    fn global(&mut self, exported: bool, start: Span) -> PResult<Item> {
+    fn global(&mut self, exported: bool, public: bool, start: Span) -> PResult<Item> {
         self.bump(); // `global`
         let mut mutable = false;
         if matches!(self.kind(), TokenKind::Name(n) if n == "mut")
@@ -376,7 +483,7 @@ impl<'a> Parser<'a> {
         let init = self.parse_operand()?;
         let span = start.join(self.prev);
         self.finish_line("the global initialiser")?;
-        Ok(Item::Global(GlobalDecl { span, exported, mutable, name, ty, init }))
+        Ok(Item::Global(GlobalDecl { span, exported, public, mutable, name, ty, init }))
     }
 
     fn table(&mut self) -> PResult<Item> {
@@ -415,7 +522,8 @@ impl<'a> Parser<'a> {
         Ok(Item::Table(TableDecl { span, entries }))
     }
 
-    fn data(&mut self) -> PResult<Item> {
+    /// A data item; `start` is the span of a leading `pub` (none without it).
+    fn data(&mut self, public: bool, start: Span) -> PResult<Item> {
         let name = self.ident("a data name")?;
         let (kind, kind_span) = match self.kind() {
             TokenKind::Name(n) => match DataKind::from_name(n) {
@@ -428,9 +536,10 @@ impl<'a> Parser<'a> {
             _ => return Err(self.data_kind_expected(&name.name)),
         };
         let values = self.operands_to_eol()?;
-        let span = name.span.join(self.prev);
+        let first = if public { start } else { name.span };
+        let span = first.join(self.prev);
         self.eat_newline();
-        Ok(Item::Data(DataDecl { span, name, kind, kind_span, values }))
+        Ok(Item::Data(DataDecl { span, public, name, kind, kind_span, values }))
     }
 
     fn data_kind_expected(&mut self, name: &str) -> Abort {
@@ -439,7 +548,7 @@ impl<'a> Parser<'a> {
 
     // ---- functions ----------------------------------------------------------------------
 
-    fn func(&mut self, exported: bool, start: Span) -> PResult<Item> {
+    fn func(&mut self, exported: bool, public: bool, start: Span) -> PResult<Item> {
         self.bump(); // `fn`
         let name = self.ident("a function name after `fn`")?;
         self.expect_tok(TokenKind::LParen, "`(` after the function name")?;
@@ -479,7 +588,206 @@ impl<'a> Parser<'a> {
             self.eat_newline();
         }
         let (body, end) = self.body(&name);
-        Ok(Item::Func(FuncDecl { span, exported, name, params, results, body, end }))
+        Ok(Item::Func(FuncDecl { span, exported, public, name, params, results, body, end }))
+    }
+
+    // ---- multi-file items (efa-syntax 16) -------------------------------------------------
+
+    /// `use STRING [as NAME]`.
+    fn use_item(&mut self) -> PResult<Item> {
+        let start = self.bump(); // `use`
+        let (path, path_span) = match self.kind() {
+            TokenKind::Str(b) => {
+                let b = b.clone();
+                (b, self.bump())
+            }
+            _ => return Err(self.expected("a path string after `use`, like `use \"util/math.efa\"`")),
+        };
+        let alias = if matches!(self.kind(), TokenKind::Name(n) if n == "as") {
+            self.bump();
+            Some(self.ident("an alias name after `as`")?)
+        } else {
+            None
+        };
+        let span = start.join(self.prev);
+        self.finish_line(if alias.is_some() { "the alias" } else { "the path" })?;
+        Ok(Item::Use(UseDecl { span, path, path_span, alias }))
+    }
+
+    /// `scratch N`.
+    fn scratch(&mut self) -> PResult<Item> {
+        let start = self.bump(); // `scratch`
+        let size = self.parse_operand()?;
+        let span = start.join(self.prev);
+        self.finish_line("the scratch size")?;
+        Ok(Item::Scratch(ScratchDecl { span, size }))
+    }
+
+    /// `NAME: atype` with `atype` a type word or `&NAME`.
+    fn aparam(&mut self) -> PResult<AParam> {
+        let name = self.ident("a parameter name")?;
+        self.expect_tok(TokenKind::Colon, "`:` after the parameter name")?;
+        let ty = if matches!(self.kind(), TokenKind::Amp) {
+            let amp = self.bump();
+            let s = self.ident("a struct name after `&`")?;
+            let span = amp.join(s.span);
+            AType::Ref(s, span)
+        } else {
+            AType::Word(self.ident("a type (`i32 i64 f32 f64 bool entity str bytes` or `&Struct`)")?)
+        };
+        Ok(AParam { name, ty })
+    }
+
+    /// After a consumed `(`: `aparam { , aparam }` and the `)` (an empty list is allowed).
+    fn aparams(&mut self) -> PResult<Vec<AParam>> {
+        let mut v = Vec::new();
+        if matches!(self.kind(), TokenKind::RParen) {
+            self.bump();
+            return Ok(v);
+        }
+        loop {
+            v.push(self.aparam()?);
+            match self.kind() {
+                TokenKind::Comma => {
+                    self.bump();
+                }
+                TokenKind::RParen => {
+                    self.bump();
+                    return Ok(v);
+                }
+                _ => return Err(self.expected("`,` or `)` after the parameter")),
+            }
+        }
+    }
+
+    /// `provide NAME(params) [-> (results)] [= FUNC], STRING`.
+    fn provide(&mut self) -> PResult<Item> {
+        let start = self.bump(); // `provide`
+        if matches!(self.kind(), TokenKind::Name(n) if n == "event")
+            && matches!(self.tok_at(1).kind, TokenKind::Name(_))
+        {
+            return self.provide_event(start);
+        }
+        let name = self.ident("a provide name after `provide`")?;
+        self.expect_tok(TokenKind::LParen, "`(` after the provide name")?;
+        let params = self.aparams()?;
+        let mut results = Vec::new();
+        if matches!(self.kind(), TokenKind::Arrow) {
+            self.bump();
+            self.expect_tok(TokenKind::LParen, "`(` after `->`: provide results are named, as in `-> (n: i64)`")?;
+            results = self.aparams()?;
+        }
+        let target = if matches!(self.kind(), TokenKind::Equals) {
+            self.bump();
+            Some(self.ident("a function name after `=`")?)
+        } else {
+            None
+        };
+        self.expect_tok(TokenKind::Comma, "`,` and the doc string of the provide")?;
+        let (doc, doc_span) = match self.kind() {
+            TokenKind::Str(b) => {
+                let b = b.clone();
+                (b, self.bump())
+            }
+            _ => return Err(self.expected("the doc string of the provide")),
+        };
+        let span = start.join(self.prev);
+        self.finish_line("the doc string")?;
+        Ok(Item::Provide(ProvideDecl { span, name, params, results, target, doc, doc_span }))
+    }
+
+    /// `[pub | export] struct NAME [, STRING] {` fields `}`.
+    fn struct_item(&mut self, public: bool, exported: bool, start: Span) -> PResult<Item> {
+        self.bump(); // `struct`
+        let name = self.ident("a struct name after `struct`")?;
+        let doc = if matches!(self.kind(), TokenKind::Comma) {
+            self.bump();
+            match self.kind() {
+                TokenKind::Str(b) => {
+                    let b = b.clone();
+                    self.bump();
+                    Some(b)
+                }
+                _ => return Err(self.expected("the doc string of the struct")),
+            }
+        } else {
+            None
+        };
+        let brace = self.expect_tok(TokenKind::LBrace, "`{` to open the struct")?;
+        let span = start.join(brace);
+        if !self.at_eol() {
+            return Err(self.expected("end of line after `{`"));
+        }
+        self.eat_newline();
+        let mut fields = Vec::new();
+        loop {
+            let tok = self.tok();
+            match &tok.kind {
+                TokenKind::Newline => {
+                    self.bump();
+                    continue;
+                }
+                TokenKind::Eof => {
+                    let msg = format!("expected `}}` to close struct `{}`, found end of file", name.name);
+                    self.push_diag(tok.span, msg, Some(format!("the struct starts at line {}", name.span.line)));
+                    return Ok(Item::Struct(StructDecl { span, public, exported, name, doc, fields, end: tok.span }));
+                }
+                TokenKind::RBrace => {
+                    let end = self.bump();
+                    if self.at_eol() {
+                        self.eat_newline();
+                    } else {
+                        let _ = self.expected("end of line after `}`");
+                        self.skip_line();
+                    }
+                    return Ok(Item::Struct(StructDecl { span, public, exported, name, doc, fields, end }));
+                }
+                _ => {}
+            }
+            let at = self.pos;
+            match self.field() {
+                Ok(f) => fields.push(f),
+                Err(Abort) => self.recover_stmt(),
+            }
+            if self.pos == at {
+                self.bump();
+            }
+        }
+    }
+
+    /// `NAME: PRIM [ "[" operand "]" ] [, STRING]`.
+    fn field(&mut self) -> PResult<FieldDecl> {
+        let name = self.ident("a field name")?;
+        self.expect_tok(TokenKind::Colon, "`:` after the field name")?;
+        let prim = self.ident("a field type (`u8 i8 u16 i16 u32 i32 u64 i64 f32 f64 bool entity`)")?;
+        let count = if matches!(self.kind(), TokenKind::LBracket) {
+            self.bump();
+            let n = self.parse_operand()?;
+            self.expect_tok(TokenKind::RBracket, "`]` after the array length")?;
+            Some(n)
+        } else {
+            None
+        };
+        let doc = if matches!(self.kind(), TokenKind::Comma) {
+            self.bump();
+            match self.kind() {
+                TokenKind::Str(b) => {
+                    let b = b.clone();
+                    self.bump();
+                    Some(b)
+                }
+                _ => return Err(self.expected("the doc string of the field")),
+            }
+        } else {
+            None
+        };
+        let span = name.span.join(self.prev);
+        if self.at_eol() {
+            self.eat_newline();
+        } else if !self.is_closing_brace(self.pos) {
+            return Err(self.expected("end of line after the field"));
+        }
+        Ok(FieldDecl { span, name, prim, count, doc })
     }
 
     /// Parses statements up to the closing `}`; returns them with the span of the brace.

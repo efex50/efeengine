@@ -252,17 +252,29 @@ fn guest_out_of_bounds_pointer_traps_and_the_engine_keeps_running() {
     assert!(errs[0].contains("[bad]") && errs[0].contains("out of bounds"), "{}", errs[0]);
 }
 
+/// The game struct `Ping` (4 bytes) and the events `test.ping` (payload `Ping`) and
+/// `test.from_rust` (no payload) of the `test` namespace.
+fn register_ping_events(e: &mut Engine) {
+    let mut ping = StructDesc::new("Ping", 4, 4).field(FieldDesc::new("n", 0, Prim::I32, 1)).doc("A ping.");
+    ping.owner = "testgame".into();
+    e.register_struct(ping).unwrap();
+    e.register_event(EventDesc::new("test", "ping").payload("Ping").doc("A ping with a number.")).unwrap();
+    e.register_event(EventDesc::new("test", "from_rust").doc("Sent by a Rust system.")).unwrap();
+}
+
 #[test]
-fn events_read_with_a_negative_buffer_traps() {
+fn events_read_with_a_negative_out_pointer_traps() {
     let mut e = engine();
+    e.define_namespace("test", 1, "testgame", "t").unwrap();
+    register_ping_events(&mut e);
     let m = with_frame(
         |mb| {
-            mb.data(3000, b"ping");
+            mb.event_ref("test", "ping", Some(("Ping", 4)));
             vec![import(mb, &e, "engine.events", "read")]
         },
         |f, fns| {
-            // name = (3000, 4), index 0, buf = (4096, -1): the length has bit 63 set
-            call_with(f, fns[0], 10, &[A::I64(3000), A::I64(4), A::I64(0), A::I64(4096), A::I64(-1)]);
+            // ev 0, index 0, out = -1: bit 63 set
+            call_with(f, fns[0], 10, &[A::I32(0), A::I32(0), A::I64(-1)]);
         },
     );
     e.load_module("bad", &m.encode()).unwrap();
@@ -384,97 +396,6 @@ fn disallowed_namespace_and_link_errors_are_reported_by_name() {
     assert!(matches!(e.load_module("engine", &m.encode()), Err(ScriptError::NameTaken(_))));
 }
 
-/// A mod `adder` with `add(a, b) -> a + b`, exported with `engine.mods.export` from `init`.
-fn adder(e: &Engine) -> Module {
-    let mut mb = ModuleBuilder::new();
-    let export = import(&mut mb, e, "engine.mods", "export");
-    mb.memory(1, None);
-    mb.data(100, b"add");
-    mb.data(110, b"Add two numbers.");
-    let mut init = FunctionBuilder::new(8);
-    call_with(&mut init, export, 0, &[A::I64(100), A::I64(3), A::I64(110), A::I64(16)]);
-    init.ret(0);
-    let init_id = mb.add_func(FuncType::new([], []), init);
-    let mut add = FunctionBuilder::new(4);
-    add.op3(Op::I64Add, 2, 0, 1);
-    add.ret(2);
-    let add_id = mb.add_func(FuncType::new([I64, I64], [I64]), add);
-    mb.reg_name(add_id, 0, "a");
-    mb.reg_name(add_id, 1, "b");
-    mb.export_func("init", init_id);
-    mb.export_func("add", add_id);
-    mb.finish().unwrap()
-}
-
-#[test]
-fn mod_exports_appear_in_the_index_are_callable_and_vanish_on_unload() {
-    let (mut e, got) = engine_with_report();
-    let a = e.load_mod(&adder(&e).encode(), ModOptions::new("adder").with_version(3).allow("engine.mods")).unwrap();
-
-    let idx = e.api_index();
-    let f = idx.function("adder", "add").expect("exported function is in the index");
-    assert_eq!(f.owner, "adder");
-    assert_eq!(f.doc, "Add two numbers.");
-    assert_eq!(f.params.iter().map(|p| (p.name.as_str(), &p.ty)).collect::<Vec<_>>(), [("a", &ApiType::I64), ("b", &ApiType::I64)]);
-    assert_eq!(f.results.iter().map(|p| (p.name.as_str(), &p.ty)).collect::<Vec<_>>(), [("ret", &ApiType::I64)]);
-    let ns = idx.namespace("adder").unwrap();
-    assert_eq!((ns.version, ns.owner.as_str()), (3, "adder"));
-    idx.validate().unwrap();
-
-    // module B imports it (typed from the index) and calls it every frame
-    let b = with_frame(
-        |mb| vec![import(mb, &e, "adder", "add"), import(mb, &e, "test", "report")],
-        |f, fns| {
-            call_with(f, fns[0], 10, &[A::I64(20), A::I64(22)]);
-            report_i64(f, fns[1], 10);
-        },
-    );
-    e.load_module("user", &b.encode()).unwrap();
-    e.run_frames(2, 1.0 / 60.0);
-    assert_eq!(*got.lock().unwrap(), [42, 42]);
-    assert!(errors(&e).is_empty(), "{:?}", errors(&e));
-
-    e.unload_module(a).unwrap();
-    let idx = e.api_index();
-    assert!(idx.function("adder", "add").is_none() && idx.namespace("adder").is_none());
-    assert!(!e.scripting().is_loaded(a));
-    e.run_frames(2, 1.0 / 60.0);
-    assert!(e.is_running());
-    assert_eq!(*got.lock().unwrap(), [42, 42], "the call after unload traps");
-    let errs = errors(&e);
-    assert_eq!(errs.len(), 2, "{errs:?}");
-    assert!(errs[0].contains("[user]") && errs[0].contains("module adder unloaded"), "{}", errs[0]);
-    // a new module cannot link against the gone function
-    assert!(matches!(e.load_module("user2", &b.encode()), Err(ScriptError::Link { .. })));
-    // the name can be used again
-    e.load_mod(&adder(&e).encode(), ModOptions::new("adder").allow("engine.mods")).unwrap();
-    assert!(e.api_index().function("adder", "add").is_some());
-}
-
-#[test]
-fn export_outside_init_or_of_a_missing_function_is_refused() {
-    let (mut e, got) = engine_with_report();
-    let m = {
-        let mut mb = ModuleBuilder::new();
-        let export = import(&mut mb, &e, "engine.mods", "export");
-        let report = import(&mut mb, &e, "test", "report");
-        mb.memory(1, None);
-        mb.data(100, b"nothing");
-        mb.data(110, b"Doc.");
-        let mut f = FunctionBuilder::new(64);
-        call_with(&mut f, export, 0, &[A::I64(100), A::I64(7), A::I64(110), A::I64(4)]);
-        report_i32(&mut f, report, 0);
-        f.ret(0);
-        let id = mb.add_func(FuncType::new([F32], []), f);
-        mb.export_func("frame", id);
-        mb.finish().unwrap()
-    };
-    e.load_module("exp", &m.encode()).unwrap();
-    e.run_frames(1, 0.016);
-    assert_eq!(*got.lock().unwrap(), [-1]);
-    assert!(e.api_index().namespace("exp").is_none());
-}
-
 #[test]
 fn game_functions_are_in_the_index_with_their_owner() {
     let (e, _) = engine_with_report();
@@ -494,28 +415,33 @@ fn game_functions_are_in_the_index_with_their_owner() {
 #[test]
 fn events_time_and_input_reach_scripts() {
     let (mut e, got) = engine_with_report();
+    register_ping_events(&mut e);
     let m = with_frame(
         |mb| {
+            // event ids: 0 = test.ping (payload Ping, 4 bytes), 1 = test.from_rust
+            mb.event_ref("test", "ping", Some(("Ping", 4)));
+            mb.event_ref("test", "from_rust", None);
             let mut v = vec![];
             for (ns, n) in [("engine.events", "count"), ("engine.events", "read"), ("engine.events", "send"), ("engine.time", "frame"), ("engine.input", "key_down")] {
                 v.push(import(mb, &e, ns, n));
             }
             v.push(import(mb, &e, "test", "report"));
-            mb.data(100, b"ping");
             mb.data(110, &[1, 2, 3, 4]);
-            mb.data(120, b"from_rust");
             mb.data(140, b"Space");
             v
         },
         |f, fns| {
             let (count, read, send, frame, key, report) = (fns[0], fns[1], fns[2], fns[3], fns[4], fns[5]);
-            call_with(f, count, 10, &[A::I64(100), A::I64(4)]);
-            report_i64(f, report, 10);
-            call_with(f, read, 10, &[A::I64(100), A::I64(4), A::I64(0), A::I64(200), A::I64(2)]);
-            report_i64(f, report, 10); // full length 4 (only 2 bytes copied), or -1
-            call_with(f, count, 10, &[A::I64(120), A::I64(9)]);
-            report_i64(f, report, 10);
-            call_with(f, send, 10, &[A::I64(100), A::I64(4), A::I64(110), A::I64(4)]);
+            call_with(f, count, 10, &[A::I32(0)]);
+            report_i32(f, report, 10);
+            call_with(f, read, 10, &[A::I32(0), A::I32(0), A::I64(200)]);
+            report_i32(f, report, 10); // 0, or -1 if there is no such event
+            f.const_i64(13, 0);
+            f.load(Op::I32Load, 14, 13, 200);
+            report_i32(f, report, 14); // the payload
+            call_with(f, count, 10, &[A::I32(1)]);
+            report_i32(f, report, 10);
+            call_with(f, send, 10, &[A::I32(0), A::I64(110)]);
             f.call(frame, 10);
             report_i64(f, report, 10);
             call_with(f, key, 10, &[A::I64(140), A::I64(5)]);
@@ -523,25 +449,28 @@ fn events_time_and_input_reach_scripts() {
         },
     );
     e.load_module("evt", &m.encode()).unwrap();
-    let rust_saw = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
+    let rust_saw = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let rs = rust_saw.clone();
     e.add_system(Stage::PostUpdate, move |cx| {
-        for ev in cx.events::<ScriptEvent>().iter().filter(|ev| ev.name == "ping") {
-            rs.lock().unwrap().push((ev.name.clone(), ev.data.clone()));
+        for p in cx.script_events("test.ping") {
+            rs.lock().unwrap().push(p.to_vec());
         }
         if cx.time.frame() == 0 {
-            cx.send(ScriptEvent { name: "from_rust".into(), data: vec![] });
+            cx.send_script_event("test.from_rust", &[]).unwrap();
+            // an unregistered event and a payload of the wrong size are refused
+            assert!(matches!(cx.send_script_event("test.nope", &[]), Err(ScriptEventError::Unknown { .. })));
+            assert!(matches!(cx.send_script_event("test.ping", &[1]), Err(ScriptEventError::Payload { expected: 4, got: 1, .. })));
         }
     });
     e.run_frames(1, 1.0 / 60.0);
     e.inject(InputEvent::new(InputEventKind::key_pressed(KeyCode::Space)));
     e.run_frames(2, 1.0 / 60.0);
+    let word = i64::from(i32::from_le_bytes([1, 2, 3, 4]));
     // frame 0: no events yet; frame 1: ping (sent in frame 0) and from_rust readable, Space down
-    assert_eq!(*got.lock().unwrap(), [0, -1, 0, 0, 0, /* frame 1 */ 1, 4, 1, 1, 1, /* frame 2 */ 1, 4, 0, 2, 1]);
+    assert_eq!(*got.lock().unwrap(), [0, -1, 0, 0, 0, 0, /* frame 1 */ 1, 0, word, 1, 1, 1, /* frame 2 */ 1, 0, word, 0, 2, 1]);
     // Rust saw the script's ping in frames 1 and 2, with its payload
     let saw = rust_saw.lock().unwrap();
-    assert_eq!(saw.len(), 2);
-    assert_eq!(saw[0], ("ping".to_string(), vec![1, 2, 3, 4]));
+    assert_eq!(*saw, [vec![1, 2, 3, 4], vec![1, 2, 3, 4]]);
 }
 
 #[cfg(not(target_family = "wasm"))]

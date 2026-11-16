@@ -48,6 +48,7 @@ efeengine/
 | `proc_macros` | `crates/efescript/proc_macros` | proc-macro | Emits `MAX_ADDR_SIZE` (2^48) and `STACK_PAGE_COUNT` (from a build-time env var) for efescript. Neither is used yet. | [structure.md](crates/efescript/proc_macros/structure.md) |
 | `strtohx` | `crates/efescript/strtohx` | bin | Dev helper: converts text into `push64/32/16/8 0x…` lines to paste string constants into `.efe` programs. | [structure.md](crates/efescript/strtohx/structure.md) |
 | `efevm` | `crates/efevm` | lib | the v1 core VM: verified modules (.efvm), register interpreter, fibers, budget, host imports; no dependencies, wasm32-compatible | [crates/efevm/structure.md](crates/efevm/structure.md) |
+| `efemod` | `crates/efemod` | lib (`write` feature for the packer) | Mod packages (`.efmod`): a restricted 7z container read with `sevenz-rust2` and written by its own canonical writer, the manifest, versions and dependency resolution; depends on `efevm` and `sevenz-rust2`; no I/O | [crates/efemod/structure.md](crates/efemod/structure.md) |
 | `efepages` | `crates/efepages` | lib | Sparse paged byte memory (page index → fixed-size buffer); unwritten memory reads as zeros. It holds the VM's code, data and stack. | [crates/efepages/structure.md](crates/efepages/structure.md) |
 | `page_size_macro` | `crates/efepages/page_size_macro` | proc-macro | Emits `PAGE_SIZE` from the build-time env var `efepage_size` (default 4096). | [structure.md](crates/efepages/page_size_macro/structure.md) |
 | `calc` | `crates/calc` | lib + optional bin | Parses infix/prefix/postfix arithmetic into a tree, prints it in any notation, and simplifies it with variables. Integer (`i128`) and float (`f64`) numbers. The `cli` feature adds a clap command-line tool. | [crates/calc/structure.md](crates/calc/structure.md) |
@@ -83,6 +84,7 @@ depend on `efescript`, which is the toolchain (assembler, CLI, LSP, debugger). `
 | `./build.py run <example> web [--port N]` | Build to wasm, assemble `dist/<example>/`, serve it on `http://localhost:8080/` with COOP/COEP headers |
 | `./build.py dist <example>` | Release web build ready to upload to a static host |
 | `cargo xtask api-export <example>` | Build natively and write the script API index to `target/efapi/<example>.efapi` (see `crates/core/structure.md`, scripting) |
+| `cargo xtask mods <example>` | Pack `examples/<example>/mods/*` into `target/mods/<example>/` as `.efmod` packages; `build`/`dist` copy them |
 | `./build.py check` / `test` / `doctor` / `clean` | Type-check, run tests, report missing tools, clean |
 | `./build.py dev <linux\|web\|windows>` | Point rust-analyzer at a target (`.vscode/settings.json`) |
 

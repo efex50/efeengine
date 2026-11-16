@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use efeengine_core::efevm::ApiIndex;
+use efeengine_core::efevm::{ApiIndex, ApiType, FuncType, FunctionBuilder, Interface, Module, ModuleBuilder, Op, Param, Provide, ValType};
 use efeengine_core::prelude::*;
 use efescript::asm::{AsmOptions, assemble_with};
 use script_demo::{Modules, Score, setup, spawn_world};
@@ -71,27 +71,42 @@ fn mover_script_assembled_against_the_exported_index_moves_entities() {
     assert_eq!(score.get(), 15);
 }
 
+/// The mod `adder`, built in Rust: `add(a: i64, b: i64) -> sum: i64`, declared in its
+/// section 13 interface (a later task turns this into a package built from `.efa`).
+fn adder() -> Module {
+    let mut mb = ModuleBuilder::new();
+    let mut f = FunctionBuilder::new(4);
+    f.op3(Op::I64Add, 2, 0, 1);
+    f.ret(2);
+    let add = mb.add_func(FuncType::new([ValType::I64, ValType::I64], [ValType::I64]), f);
+    mb.interface(Interface {
+        provides: vec![Provide {
+            name: "add".into(),
+            func: add,
+            doc: "Add two numbers.".into(),
+            params: vec![Param::new("a", ApiType::I64), Param::new("b", ApiType::I64)],
+            results: vec![Param::new("sum", ApiType::I64)],
+        }],
+        ..Default::default()
+    });
+    mb.finish().expect("adder verifies")
+}
+
 #[test]
-fn a_mod_exports_a_function_that_another_script_calls() {
+fn a_mod_provides_a_function_that_another_script_calls() {
     let (mut e, score) = engine();
     let base = exported_index(&e, "base.efapi");
     assert!(base.function("adder", "add").is_none());
 
-    // the mod
-    let adder = assemble("mod_adder.efa", &base);
-    let adder_id = e
-        .load_mod(&adder.encode(), ModOptions::new("adder").allow("engine.mods"))
-        .expect("load mod adder");
+    // the mod: its provide is registered at load, before any code runs
+    let adder_id = e.load_mod(&adder().encode(), ModOptions::new("adder")).expect("load mod adder");
 
     // re-exported index: the mod's function is there, with names and docs
     let with_mod = exported_index(&e, "with_mod.efapi");
     let f = with_mod.function("adder", "add").expect("adder.add is in the re-exported index");
     assert_eq!(f.owner, "adder");
     assert_eq!(f.doc, "Add two numbers.");
-    assert_eq!(f.params.len(), 2);
-    assert_eq!(f.results.len(), 1);
-    println!("adder.add params: {:?}", f.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>());
-    assert!(f.params.iter().all(|p| !p.name.is_empty()));
+    assert_eq!(f.signature_text(), "(a: i64, b: i64) -> (sum: i64)");
     assert_ne!(with_mod.hash(), base.hash());
 
     // a script that imports it can only be assembled against the new index
@@ -103,12 +118,17 @@ fn a_mod_exports_a_function_that_another_script_calls() {
     assert_eq!(e.world().get::<&Script>(ent).unwrap().state, 30, "state = add(state, 10) per frame");
     assert_eq!(score.get(), 3);
 
-    // unload the mod: its function leaves the index
-    e.unload_module(adder_id).expect("unload adder");
+    // the mod cannot be unloaded while the script that imports it is loaded ...
+    match e.unload_module(adder_id) {
+        Err(ScriptError::Needed { module, by }) => assert_eq!((module.as_str(), by.as_slice()), ("adder", ["user".to_string()].as_slice())),
+        other => panic!("{other:?}"),
+    }
+    // ... unless the dependents go with it
+    let removed = e.unload_module_and_dependents(adder_id).expect("cascade");
+    assert_eq!(removed, [user_id, adder_id]);
     let after = exported_index(&e, "after.efapi");
     assert!(after.function("adder", "add").is_none());
     assert_eq!(after.hash(), base.hash(), "back to the original API");
-    // the script that still imports it traps cleanly instead of crashing the engine
     e.run_frames(1, 1.0 / 60.0);
     assert!(e.is_running());
 }
@@ -129,7 +149,7 @@ fn the_native_binary_writes_the_index_with_efe_api_export() {
     let index = ApiIndex::from_json(&text).expect("valid .efapi");
     assert_eq!(index.game, "script_demo");
     let names = index.qualified_names();
-    for want in ["game.score_add", "engine.world.get", "engine.world.set", "engine.mods.export"] {
+    for want in ["game.score_add", "engine.world.get", "engine.world.set"] {
         assert!(names.iter().any(|n| n == want), "{want} missing from {names:?}");
     }
     assert!(index.struct_type("Transform").is_some());

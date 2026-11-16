@@ -4,6 +4,7 @@
 //! terminal to pick an example and run it native or on the web.
 
 mod api;
+mod mods;
 mod project;
 mod serve;
 mod toolchain;
@@ -28,6 +29,8 @@ use util::{cargo, dry_run, miss_line, ok_line, root, run, stdin_is_tty, step, wa
                   Native builds also write <example>.efapi (the script API index) next to the binary and \
                   assemble examples/<example>/scripts/*.efa into scripts/*.efvm beside it (scripts with a \
                   `; needs-mod:` header are skipped); `run` sets EFE_SCRIPT_DIR. See `api-export`.\n\
+                  Mods: examples/<example>/mods/*/ (folders with a mod.toml) are packed into .efmod packages \
+                  by `mods`, and build/run/dist copy them into mods/ next to the game. See `mods`.\n\
                   Environment: CARGO_TARGET_DIR is respected; WASM_BINDGEN selects a wasm-bindgen binary."
 )]
 struct Cli {
@@ -60,8 +63,13 @@ enum Cmd {
         #[arg(long = "static")]
         static_sdl: bool,
     },
-    /// Release web build ready to publish (dist/<example>/, with <example>.efapi).
+    /// Release web build ready to publish (dist/<example>/, with <example>.efapi and mods/).
     Dist {
+        example: Option<String>,
+    },
+    /// Pack examples/<example>/mods/*/ into .efmod packages (target/mods/<example>/).
+    /// Mods are packed against the game's API index and against each other, in passes.
+    Mods {
         example: Option<String>,
     },
     /// Serve an existing dist/<example>/ folder without rebuilding.
@@ -174,6 +182,11 @@ fn real_main(cli: Cli) -> Result<()> {
             let out = web::build(&project, &ex, true)?;
             println!("Publish-ready folder: {}", out.display());
             Ok(())
+        }
+        Cmd::Mods { example } => {
+            let project = Project::load()?;
+            let ex = pick_example(&project, example.as_deref())?;
+            mods::mods_cmd(&project, &ex, preflight)
         }
         Cmd::Serve { example, server } => {
             let project = Project::load()?;
@@ -346,6 +359,9 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
         if static_sdl { ", static SDL3" } else { "" }
     );
     if !ex.native_bin {
+        if !mods::mod_folders(ex)?.is_empty() {
+            warn(format!("{}: mods not packed (no 'native' bin to export the API index)", ex.dir));
+        }
         step(format!("{} has no 'native' bin; building the lib", ex.package));
         let mut c = cargo();
         c.args(["build", "-p", &ex.package, "--lib"]).args(&extra);
@@ -364,6 +380,8 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
         }
     })?;
     let scripts = api::after_native_build(project, ex, release)?;
+    let profile = api::profile_dir(project, release);
+    mods::pack_into(project, ex, &profile.join(format!("{}.efapi", ex.dir)), &profile.join("mods"))?;
     if action == Action::Run {
         step(format!("native run: {} ({desc})", ex.package));
         let mut c = cargo();

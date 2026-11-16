@@ -1,7 +1,9 @@
 //! Load-time verification (SPEC.md section 8).
 
 use crate::error::LoadError;
-use crate::module::{ExportKind, Inst, ModuleData};
+use crate::api::interface::crosses_modules;
+use crate::api::{ApiType, Param, StructDesc, is_ident, is_namespace};
+use crate::module::{ExportKind, Inst, Interface, ModuleData, Provide};
 use crate::op::Shape;
 use crate::types::{PAGE_SIZE, ValType};
 use std::collections::HashSet;
@@ -35,11 +37,19 @@ pub enum VerifyError {
     LineIndex,
     /// A namespace in the `api` section (12) that is not a valid namespace name or appears twice.
     ApiNamespace,
+    /// A rule of section 13 `interface` (SPEC.md 9.2). `what` names the provide, struct,
+    /// scratch region or the section (`interface`) for count limits.
+    Interface { what: String, reason: String },
+    /// A rule of section 14 `events` (SPEC.md 9.3). `what` names the event reference
+    /// (`event 3 `game.score``) or the section (`events`) for the count limit.
+    Events { what: String, reason: String },
 }
 
 impl fmt::Display for VerifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
+            VerifyError::Interface { what, reason } => return write!(f, "interface: {what}: {reason}"),
+            VerifyError::Events { what, reason } => return write!(f, "events: {what}: {reason}"),
             VerifyError::TypeIndex => "type index out of range",
             VerifyError::FunctionIndex => "function index out of range",
             VerifyError::GlobalIndex => "global index out of range",
@@ -156,6 +166,212 @@ pub(crate) fn verify(m: &ModuleData) -> Result<(), LoadError> {
         for e in &fl.entries {
             if e.inst as usize >= func.code.len() || e.file as usize >= m.lines.files.len() {
                 return fail(Some(fl.func), Some(e.inst), VerifyError::LineIndex);
+            }
+        }
+    }
+    if let Some(iface) = &m.interface {
+        verify_interface(m, iface).map_err(|error| LoadError::Verify { func: None, inst: None, error })?;
+    }
+    verify_events(m).map_err(|error| LoadError::Verify { func: None, inst: None, error })?;
+    Ok(())
+}
+
+/// Limit of SPEC.md 9.3 rule 1.
+const MAX_EVENT_REFS: usize = 1024;
+
+/// SPEC.md 9.3: at most 1024 references; namespaces are namespace names, event and payload
+/// struct names identifiers; `(namespace, name)` unique.
+fn verify_events(m: &ModuleData) -> Result<(), VerifyError> {
+    let err = |what: String, reason: String| Err(VerifyError::Events { what, reason });
+    if m.events.len() > MAX_EVENT_REFS {
+        return err("events".into(), format!("{} event references, at most {MAX_EVENT_REFS}", m.events.len()));
+    }
+    let mut seen: HashSet<(&str, &str)> = HashSet::with_capacity(m.events.len());
+    for (i, e) in m.events.iter().enumerate() {
+        let what = || format!("event {i} `{}`", e.qualified());
+        if !is_namespace(&e.namespace) {
+            return err(what(), format!("namespace `{}` is not a namespace name", e.namespace));
+        }
+        if !is_ident(&e.name) {
+            return err(what(), "name is not an identifier".into());
+        }
+        if let Some((s, _)) = &e.payload
+            && !is_ident(s)
+        {
+            return err(what(), format!("payload struct name `{s}` is not an identifier"));
+        }
+        if !seen.insert((e.namespace.as_str(), e.name.as_str())) {
+            return err(what(), "duplicate event reference".into());
+        }
+    }
+    Ok(())
+}
+
+/// Limits of SPEC.md 9.2 rule 1 and rule 8.
+const MAX_PROVIDES: usize = 1024;
+const MAX_PROVIDED_EVENTS: usize = 1024;
+const MAX_STRUCTS: usize = 256;
+const MAX_PARAMS: usize = 64;
+const MAX_RESULTS: usize = 16;
+const MAX_FIELDS: usize = 256;
+const MAX_SCRATCH: u32 = 1_048_576;
+
+/// SPEC.md 9.2 rules 1-9. Counts are checked first, so the quadratic uniqueness checks
+/// are bounded.
+fn verify_interface(m: &ModuleData, iface: &Interface) -> Result<(), VerifyError> {
+    let err = |what: String, reason: String| Err(VerifyError::Interface { what, reason });
+    let pname = |p: &Provide| format!("provide `{}`", p.name);
+    let sname = |s: &StructDesc| format!("struct `{}`", s.name);
+
+    // Rule 1: counts.
+    if iface.provides.len() > MAX_PROVIDES {
+        return err("interface".into(), format!("{} provides, at most {MAX_PROVIDES}", iface.provides.len()));
+    }
+    if iface.structs.len() > MAX_STRUCTS {
+        return err("interface".into(), format!("{} structs, at most {MAX_STRUCTS}", iface.structs.len()));
+    }
+    if iface.events.len() > MAX_PROVIDED_EVENTS {
+        return err("interface".into(), format!("{} events, at most {MAX_PROVIDED_EVENTS}", iface.events.len()));
+    }
+    for s in &iface.structs {
+        if s.fields.len() > MAX_FIELDS {
+            return err(sname(s), format!("{} fields, at most {MAX_FIELDS}", s.fields.len()));
+        }
+    }
+    for p in &iface.provides {
+        if p.params.len() > MAX_PARAMS {
+            return err(pname(p), format!("{} parameters, at most {MAX_PARAMS}", p.params.len()));
+        }
+        if p.results.len() > MAX_RESULTS {
+            return err(pname(p), format!("{} results, at most {MAX_RESULTS}", p.results.len()));
+        }
+    }
+
+    // Rule 7: structs.
+    for (i, s) in iface.structs.iter().enumerate() {
+        if let Err(reason) = s.validate() {
+            return err(sname(s), reason);
+        }
+        if iface.structs[..i].iter().any(|o| o.name == s.name) {
+            return err(sname(s), "duplicate struct name".into());
+        }
+        if !s.owner.is_empty() && !is_namespace(&s.owner) {
+            return err(sname(s), format!("owner `{}` is not a namespace name", s.owner));
+        }
+        if s.owner.is_empty() && s.component.is_some() {
+            return err(sname(s), "an own struct (empty owner) cannot have a component id".into());
+        }
+        if let Some(id) = s.component
+            && iface.structs[..i].iter().any(|o| o.component == Some(id))
+        {
+            return err(sname(s), format!("duplicate component id {id}"));
+        }
+    }
+
+    let nimports = m.imports.len() as u64;
+    for (i, p) in iface.provides.iter().enumerate() {
+        // Rule 2: names and doc.
+        if !is_ident(&p.name) {
+            return err(pname(p), "name is not an identifier".into());
+        }
+        if iface.provides[..i].iter().any(|o| o.name == p.name) {
+            return err(pname(p), "duplicate provide name".into());
+        }
+        let all: Vec<&Param> = p.params.iter().chain(&p.results).collect();
+        for (j, a) in all.iter().enumerate() {
+            if !is_ident(&a.name) {
+                return err(pname(p), format!("parameter or result name `{}` is not an identifier", a.name));
+            }
+            if all[..j].iter().any(|o| o.name == a.name) {
+                return err(pname(p), format!("duplicate parameter or result name `{}`", a.name));
+            }
+        }
+        if p.doc.trim().is_empty() {
+            return err(pname(p), "doc is blank".into());
+        }
+        // Rule 3: a defined function.
+        let f = u64::from(p.func);
+        if f < nimports {
+            return err(pname(p), format!("function {f} is an import, not a function of this module"));
+        }
+        if f >= u64::from(m.num_funcs()) {
+            return err(pname(p), format!("function index {f} out of range"));
+        }
+        // Rule 5 (and `ptr`, which has no encoding): types that can cross modules.
+        for a in &all {
+            if !crosses_modules(&a.ty) {
+                return err(pname(p), format!("`{}` is a ptr, which cannot cross modules", a.name));
+            }
+        }
+        if let Some(r) = p.results.iter().find(|r| !r.ty.is_scalar()) {
+            return err(pname(p), format!("result `{}` is {}, results must be scalar", r.name, r.ty));
+        }
+        // Rule 6: struct parameters name a listed struct.
+        for a in &p.params {
+            if let ApiType::Struct(s) = &a.ty
+                && iface.struct_desc(s).is_none()
+            {
+                return err(pname(p), format!("parameter `{}`: struct `{s}` is not listed in the interface", a.name));
+            }
+        }
+        // Rule 4: the lowered signature is the function's type.
+        let want = p.func_type();
+        match m.func_type(p.func) {
+            Some(ty) if *ty == want => {}
+            Some(ty) => {
+                return err(pname(p), format!("signature lowers to {want} but function {f} has type {ty}"));
+            }
+            None => return err(pname(p), format!("function {f} has no valid type")),
+        }
+    }
+
+    // Rule 9: provided events.
+    for (i, e) in iface.events.iter().enumerate() {
+        let what = || format!("event `{}`", e.name);
+        if !is_ident(&e.name) {
+            return err(what(), "name is not an identifier".into());
+        }
+        if iface.events[..i].iter().any(|o| o.name == e.name) {
+            return err(what(), "duplicate event name".into());
+        }
+        if iface.provide(&e.name).is_some() {
+            return err(what(), "a provide has the same name".into());
+        }
+        if e.doc.trim().is_empty() {
+            return err(what(), "doc is blank".into());
+        }
+        if let Some(s) = &e.payload
+            && iface.struct_desc(s).is_none()
+        {
+            return err(what(), format!("payload struct `{s}` is not listed in the interface"));
+        }
+    }
+
+    // Rule 8: scratch.
+    match iface.scratch {
+        None | Some((_, 0)) if iface.needs_scratch() => {
+            let p = iface.provides.iter().find(|p| p.needs_scratch()).map(pname).unwrap_or_default();
+            return err("scratch".into(), format!("{p} has a str, bytes or struct parameter, so a scratch region of at least 1 byte is required"));
+        }
+        None => {}
+        Some((offset, size)) => {
+            if offset % 8 != 0 {
+                return err("scratch".into(), format!("offset {offset} is not a multiple of 8"));
+            }
+            if size > MAX_SCRATCH {
+                return err("scratch".into(), format!("size {size} is larger than {MAX_SCRATCH}"));
+            }
+            let (start, end) = (u128::from(offset), u128::from(offset) + u128::from(size));
+            let mem = u128::from(m.memory.min_pages) * u128::from(PAGE_SIZE);
+            if end > mem {
+                return err("scratch".into(), format!("[{start}, {end}) is outside the initial memory of {mem} bytes"));
+            }
+            for (i, d) in m.data.iter().enumerate() {
+                let (ds, de) = (u128::from(d.offset), u128::from(d.offset) + d.bytes.len() as u128);
+                // Empty ranges (a size-0 scratch, an empty segment) overlap nothing.
+                if start < end && ds < de && start < de && ds < end {
+                    return err("scratch".into(), format!("[{start}, {end}) overlaps data segment {i} at [{ds}, {de})"));
+                }
             }
         }
     }

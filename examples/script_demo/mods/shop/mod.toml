@@ -1,0 +1,14 @@
+[mod]
+id = "shop"
+version = "0.1.0"
+name = "Shop"
+description = "Calls inventory.give and reads the inventory.given event."
+game = "script_demo"
+
+[dependencies]
+inventory = "^1"
+
+# inventory's namespace needs no grant (it is a dependency). engine.events reads the event;
+# game.report hands the results to the test.
+[permissions]
+namespaces = ["engine.events", "game"]

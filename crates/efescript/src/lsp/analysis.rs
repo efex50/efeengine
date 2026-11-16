@@ -152,3 +152,180 @@ pub fn hover_text(ix: Option<&ApiIndex>, word: &str) -> Option<String> {
     let op = Op::ALL.iter().find(|o| o.name() == word)?;
     Some(format!("```\n{} {}\n```\n\ninstruction, opcode 0x{:03X}", op.name(), op.shape().operands(), op.code()))
 }
+
+// ---- other files of a program (`use` aliases) ----
+
+/// The path of the `use` whose alias (the `as` name or the file stem) is `alias`.
+pub fn use_path(m: &Module, alias: &str) -> Option<String> {
+    m.items.iter().find_map(|i| match i {
+        Item::Use(u) => {
+            let path = std::str::from_utf8(&u.path).ok()?;
+            let name = match &u.alias {
+                Some(a) => a.name.clone(),
+                None => path.rsplit('/').next()?.strip_suffix(".efa").unwrap_or(path).to_string(),
+            };
+            (name == alias).then(|| path.to_string())
+        }
+        _ => None,
+    })
+}
+
+fn sig_text(params: &[Param], results: &[TypeRef]) -> String {
+    let p: Vec<String> = params.iter().map(|p| format!("{}: {}", p.name.name, p.ty.ty.name())).collect();
+    let r = match results {
+        [] => String::new(),
+        [one] => format!(" -> {}", one.ty.name()),
+        many => format!(" -> ({})", many.iter().map(|t| t.ty.name()).collect::<Vec<_>>().join(", ")),
+    };
+    format!("({}){}", p.join(", "), r)
+}
+
+/// A public item of a file: (name, completion kind, detail, doc, span of the name, item span).
+pub struct PubItem {
+    pub name: String,
+    pub kind: u32,
+    pub detail: String,
+    pub doc: String,
+    pub name_span: Span,
+    pub item_span: Span,
+}
+
+/// The items other files may use (`pub` or exported): functions, consts, globals, data and
+/// structs, with the derived `NAME.len` of data and `S.size`, `S.align`, `S.field`.
+pub fn public_items(m: &Module) -> Vec<PubItem> {
+    let mut v = Vec::new();
+    for i in &m.items {
+        match i {
+            Item::Func(f) if f.public || f.exported => v.push(PubItem {
+                name: f.name.name.clone(),
+                kind: 3,
+                detail: format!("fn{}", sig_text(&f.params, &f.results)),
+                doc: String::new(),
+                name_span: f.name.span,
+                item_span: f.span,
+            }),
+            Item::Const(c) if c.public => v.push(PubItem {
+                name: c.name.name.clone(),
+                kind: 21,
+                detail: "const".into(),
+                doc: String::new(),
+                name_span: c.name.span,
+                item_span: c.span,
+            }),
+            Item::Global(g) if g.public || g.exported => v.push(PubItem {
+                name: g.name.name.clone(),
+                kind: 6,
+                detail: format!("global: {}", g.ty.ty.name()),
+                doc: String::new(),
+                name_span: g.name.span,
+                item_span: g.span,
+            }),
+            Item::Data(d) if d.public => {
+                let item = |name: String, kind: u32, detail: String| PubItem {
+                    name,
+                    kind,
+                    detail,
+                    doc: String::new(),
+                    name_span: d.name.span,
+                    item_span: d.span,
+                };
+                v.push(item(d.name.name.clone(), 6, format!("data ({})", d.kind.name())));
+                v.push(item(format!("{}.len", d.name.name), 21, "length of data".into()));
+            }
+            Item::Struct(s) if s.public || s.exported => {
+                let doc = s.doc.as_ref().map(|d| String::from_utf8_lossy(d).into_owned()).unwrap_or_default();
+                let item = |name: String, detail: String, doc: String| PubItem {
+                    name,
+                    kind: 22,
+                    detail,
+                    doc,
+                    name_span: s.name.span,
+                    item_span: s.span,
+                };
+                v.push(item(s.name.name.clone(), "struct".into(), doc));
+                v.push(item(format!("{}.size", s.name.name), "size of the struct in bytes".into(), String::new()));
+                v.push(item(format!("{}.align", s.name.name), "alignment of the struct".into(), String::new()));
+                for f in &s.fields {
+                    v.push(item(format!("{}.{}", s.name.name, f.name.name), "field offset".into(), String::new()));
+                }
+            }
+            _ => {}
+        }
+    }
+    v
+}
+
+/// The item `rest` (`square`, `msg.len`, `Point.size`) of another file, public or not.
+pub fn find_item(m: &Module, rest: &str) -> Option<PubItem> {
+    // Private items are found too (the assembler reports the privacy); build the list with
+    // everything marked public.
+    let mut all = m.clone();
+    for i in &mut all.items {
+        match i {
+            Item::Func(f) => f.public = true,
+            Item::Const(c) => c.public = true,
+            Item::Global(g) => g.public = true,
+            Item::Data(d) => d.public = true,
+            Item::Struct(s) => s.public = true,
+            _ => {}
+        }
+    }
+    public_items(&all).into_iter().find(|p| p.name == rest)
+}
+
+// ---- events (efa-syntax 17) ----
+
+fn event_form_text(f: &EventForm) -> String {
+    match f {
+        EventForm::FromIndex => String::new(),
+        EventForm::NoPayload => "()".into(),
+        EventForm::Struct(s, _) => format!("(&{})", s.name),
+    }
+}
+
+fn event_md(ix: Option<&ApiIndex>, qualified: &str, declared: &str) -> String {
+    let (ns, name) = qualified.rsplit_once('.').unwrap_or(("", qualified));
+    if let Some(e) = ix.and_then(|ix| ix.event(ns, name)) {
+        let payload = e.payload.as_ref().map(|p| format!("(&{p})")).unwrap_or_else(|| "()".into());
+        return format!(
+            "```\nevent {qualified}{payload}\n```\n\n{}\n\nid: `{qualified}.id`, owner: `{}`",
+            e.doc, e.owner
+        );
+    }
+    format!("```\nevent {qualified}{declared}\n```\n\nid: `{qualified}.id`")
+}
+
+/// Hover on an event: the name of an `import event` line, `ns.name.id`, or the name of a
+/// `provide event` (payload and doc).
+pub fn event_hover(ix: Option<&ApiIndex>, m: &Module, line: u32, word: &str) -> Option<String> {
+    for i in &m.items {
+        match i {
+            Item::EventImport(d) => {
+                let q = d.qualified.name.as_str();
+                if (d.span.line == line && (word == q || word.strip_suffix(".id") == Some(q)))
+                    || word.strip_suffix(".id") == Some(q)
+                {
+                    return Some(event_md(ix, q, &event_form_text(&d.form)));
+                }
+            }
+            Item::ProvideEvent(p) if p.name.name == word => {
+                let payload = p.payload.as_ref().map(|(s, _)| format!("&{}", s.name)).unwrap_or_default();
+                let doc = String::from_utf8_lossy(&p.doc);
+                return Some(format!("```\nprovide event {}({payload})\n```\n\n{doc}", p.name.name));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Completion candidates after `import event `: (label, detail, doc).
+pub fn event_candidates(ix: &ApiIndex) -> Vec<(String, String, String)> {
+    ix.events
+        .iter()
+        .map(|e| {
+            let payload = e.payload.as_ref().map(|p| format!("&{p}")).unwrap_or_else(|| "no payload".into());
+            (format!("{}.{}", e.namespace, e.name), format!("event ({payload})"), e.doc.clone())
+        })
+        .collect()
+}

@@ -1,0 +1,59 @@
+; shop: frame 1 calls inventory.give with a string and an Item, frame 2 reads the
+; inventory.given event; the numbers go to the game through game.report.
+import inventory.give
+import event inventory.given
+import engine.events.count
+import engine.events.read
+import game.report
+
+name db "sword"
+item resb Item.size
+ev resb Item.size
+global mut phase: i32 = 0
+export global mut last: i64 = 0
+
+provide last_status() -> (v: i64) = get_last, "The status of the last inventory.give call."
+
+fn get_last() -> i64 {
+    reg v
+    global.get v, last
+    ret v
+}
+
+export fn frame(dt: f32) {
+    reg p, tmp, st, status, count, n, got
+    global.get p, phase
+    i32.add tmp, p, 1
+    global.set phase, tmp
+    br_if p, later
+    ; frame 1: give {id 7, count 5} as "sword"
+    const.i32 tmp, 7
+    i32.store tmp, item, Item.id
+    const.i32 tmp, 5
+    i32.store tmp, item, Item.count
+    call inventory.give(name, name.len, item) -> st
+    i64.extend_i32_s status, st
+    global.set last, status
+    call game.report(status)
+    i32.load count, item, Item.count
+    i64.extend_i32_s status, count
+    call game.report(status)
+    ret
+later:
+    ; frame 2: read the event sent during frame 1
+    i32.sub tmp, p, 1
+    br_if tmp, done
+    call engine.events.count(inventory.given.id) -> n
+    i64.extend_i32_s status, n
+    call game.report(status)
+    call engine.events.read(inventory.given.id, 0, ev) -> got
+    br_if got, done
+    i32.load count, ev, Item.id
+    i64.extend_i32_s status, count
+    call game.report(status)
+    i32.load count, ev, Item.count
+    i64.extend_i32_s status, count
+    call game.report(status)
+done:
+    ret
+}

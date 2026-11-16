@@ -1,0 +1,19 @@
+; items.efa: the code of inventory. The only host imports of the package are here.
+use "main.efa" as m
+
+import engine.log.info
+import engine.events.send
+import event inventory.given(&m.Item)
+
+; give(name: str, item: &Item) -> status: i32 = len(name) + old count; item.count += 1.
+pub fn give(name: i64, len: i64, item: i64) -> i32 {
+    reg count, n, status
+    call engine.log.info(name, len)
+    i32.load count, item, m.Item.count
+    i32.wrap_i64 n, len
+    i32.add status, n, count
+    i32.add count, count, 1
+    i32.store count, item, m.Item.count
+    call engine.events.send(inventory.given.id, item)
+    ret status
+}

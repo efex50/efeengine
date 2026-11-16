@@ -24,28 +24,33 @@ crates/efescript
 │   ├── efa-instructions.md  guide to every instruction (efevm mnemonics)
 │   ├── e0-design.md         original design (the removed `.efe` path; history)
 │   ├── e2-design.md         `.efa` assembler and v2 runner
+│   ├── e8-design.md         modules (multi-file `.efa`, linker) and mod packages
 │   └── e3-design.md         host registry, std host, API index, LSP, debugger, engine integration
 ├── examples/            `.efa` programs with their expected output in the header comment:
 │   │                    hello, strings, jumps, recursion, floats, sound (+ ominous_worse.ogg),
 │   │                    exit (std.exit code), echo (std.read_line), write_file (std.fs, needs --fs-root)
 ├── src/
-│   ├── main.rs          CLI: run, build, dis, bundle, api, api-export, lsp, debug (USAGE text is the reference)
+│   ├── main.rs          CLI: run, build (follows `use`; several roots), dis, bundle, api, api-export (std host, or a `.efmod`/`.efvm`), pack, inspect, lsp, debug (USAGE text is the reference)
 │   ├── lib.rs           module list (below)
 │   ├── prelude.rs       common re-exports (StdHost, ...)
 │   ├── host.rs          `Host` trait (output, sound), `StdHost` (process stdio), `CaptureHost` (tests)
 │   ├── host_std.rs      `std_registry(&StdOptions)`: HostRegistry of `std`, `std.time`, `std.fs`; `StdEnv<H>`
 │   ├── run_v2.rs        load (path, bytes, source, with or without `AsmOptions`), `run`/`run_with`, `run_embedded`, trap reports
 │   ├── asm/             the assembler
-│   │   ├── lexer.rs, parser.rs, ast.rs   tokens, syntax tree (ast::ImportDecl has `has_sig`)
+│   │   ├── lexer.rs, parser.rs, ast.rs   tokens, syntax tree (ast::ImportDecl has `has_sig`; `use`, `provide`, `struct`, `scratch` items, `import event` / `provide event` (events, efa-syntax section 17); `pub` flags)
 │   │   ├── diag.rs      diagnostics: file, line, column and a caret under the span
-│   │   ├── lower/       AST to efevm: mod.rs (module, imports, data, struct constants), func.rs (functions, sugar), value.rs (operands, immediates), tests.rs
-│   │   └── mod.rs       `parse`, `assemble`, `assemble_with(src, file, &AsmOptions { api })`
+│   │   ├── source.rs    `FileSource` trait, `MemSource`, `FsSource` (native: canonicalises, refuses escapes and symlinks out of the root)
+│   │   ├── lower/       one file as `asm::Unit` (a `link::Unit`): mod.rs (declare: consts, structs, imports, data sizes, aliases, provides; resolve: indices, `alias.item`, globals, data bytes, table; define: bodies), func.rs (functions, sugar), value.rs (operands, immediates), tests.rs
+│   │   └── mod.rs       `parse`, `assemble`, `assemble_with(src, file, &AsmOptions { api })`, `assemble_program(root, &dyn FileSource, opts)`, `assemble_programs(&[roots], ..)`: use graph, per-file parse, link
+│   ├── link/            the linker (e8-design section 4): mod.rs (`Unit`, `Decls`, `SymbolMap`, `ResolveCx`, `DefineCx`, `link`), layout.rs (phase 1: indices, data, scratch, memory, program-wide checks; section 13), tests.rs (hand-written units)
 │   ├── disasm.rs        `.efvm` (or `.efa`) to `.efa` text; names from the `names` section
+│   ├── pack.rs          mod packaging: `read_mod_toml`, `pack_dir(dir, &[&ApiIndex]) -> Packed` (`.efmod`), `read_api_input` (`.efapi` or `.efmod`), `mod_index`; behind `pack`, `inspect`, `api-export FILE`
 │   ├── bundle.rs        standalone executables: runner plus appended module and trailer
 │   ├── debugger/mod.rs  `Debugger`: the `efescript debug` command set on stdin/stdout
 │   ├── lsp/             `Server::handle(Message) -> Vec<Message>`, `run_stdio`
 │   │   ├── mod.rs       message loop, capabilities, requests (definition, completion, hover)
 │   │   ├── analysis.rs  diagnostics and symbol tables from the last AST that parsed
+│   │   ├── project.rs   multi-file programs: buffer-first `BufSource` (open buffers win over disk), program root from the nearest `mod.toml` `[build] entry`, per-file diagnostics
 │   │   └── text.rs      text and position helpers
 │   ├── bin/runner.rs    `efescript-runner`: runs the module embedded in its own executable
 │   └── compiler/        high-level language front end: lexer and empty AST stubs, not wired to anything
@@ -53,22 +58,26 @@ crates/efescript
 ├── strtohx/             dev tool that emitted push instructions for the removed `.efe` format
 └── tests/
     ├── api_index.rs         std registry: every name has an index entry with a doc; JSON round trip; disasm/asm with `--api`
+    ├── pack.rs              mod folders to `.efmod`: determinism, unknown keys, undeclared imports, merged apis, `.efmod` as `--api`, CLI pack/inspect/api-export
     ├── v2_backtrace.rs      trap backtraces with source lines
     ├── v2_bundle.rs         bundle and embedded run
     ├── v2_cli.rs            CLI options, exit codes, `.efe` rejection
     ├── v2_debugger.rs       debugger commands on scripted stdin
     ├── v2_diagnostics.rs    assembler diagnostics
+    ├── v2_events.rs         `import event` and `provide event` (efa-syntax section 17): checks, section 14 and section 13 output
     ├── v2_examples.rs       every example against its expected output
     ├── v2_lsp.rs            LSP messages (diagnostics, definition, completion, hover, index reload)
+    ├── v2_multifile.rs      multi-file programs: `use`, visibility, imports, layout, names/lines, provides, structs, scratch, reserved words, FsSource
+    ├── v2_multifile_tools.rs  language server (definition, hover, completion, event hover), debugger and `run` on multi-file programs
     ├── v2_never_panics.rs   malformed input gives errors, not panics
     ├── v2_ported.rs         the ported legacy examples (exit, echo, write_file)
     └── v2_roundtrip.rs      `build`, then `dis`, then `build` gives the same bytes
 ```
 
-`lib.rs` exports `asm`, `bundle`, `compiler`, `debugger`, `disasm`, `host`, `host_std`, `lsp`, `prelude`, `run_v2`.
+`lib.rs` exports `asm`, `bundle`, `compiler`, `debugger`, `disasm`, `host`, `host_std`, `link`, `lsp`, `pack`, `prelude`, `run_v2`.
 
 ## Main concepts
-- **Pipeline.** `.efa` text goes through `asm` (lexer, parser, lowering with `efevm::ModuleBuilder`) to an `efevm::Module`. `run_v2` links it against `host_std`'s registry (`Imports::check_module` reports every link problem at once, by name), creates an `Instance` and runs `main` under an instruction budget. `dis` prints a module back as `.efa`.
+- **Pipeline.** `.efa` text goes through `asm` (lexer and parser per file of the use graph, one `asm::Unit` per file) and `link` (two-phase linking into one `efevm::ModuleBuilder`) to an `efevm::Module`. `run_v2` links it against `host_std`'s registry (`Imports::check_module` reports every link problem at once, by name), creates an `Instance` and runs `main` under an instruction budget. `dis` prints a module back as `.efa`.
 - **Host functions.** `efevm::HostRegistry` is the only way to make a host function callable. efescript's registry (`host_std::std_registry`, owner `std`) has:
 
   | Namespace | Functions |
@@ -79,6 +88,7 @@ crates/efescript
 
   `std.fs` is always registered but denied unless a root is given (`--fs-root`, `StdOptions::fs_root`); denied calls return -2. Paths are relative, may not contain `..`, and are resolved under the root after canonicalisation. The engine never links `std`.
 - **API index.** `efescript api FILE.efapi` prints an index; `api-export [-o FILE]` writes the std index. `build` and `run` accept `--api FILE.efapi` (`AsmOptions::api`): imports are checked by name and signature, `import ns.name` may omit the signature, `S.size`, `S.align`, `S.<field>` (and `S.id` for components) are constants, and section 12 of the `.efvm` records the index hash and namespace versions. `run` links against the std host only, so it runs such a module only when it imports nothing else. The index format is in `crates/efevm/API_INDEX.md`.
+- **Mod packages.** `pack DIR` reads `DIR/mod.toml` (unknown keys are errors), assembles `[build] entry` against `--api` plus `[build] api`, runs `efemod::check_module`, adds the `assets/` files and writes a deterministic `.efmod` (default `<id>-<version>.efmod` in the current directory). `inspect` prints a package or bare module; `api-export FILE [--id ID]` writes a mod's index. Any `--api` value may be a `.efmod` (its index is the mod's provides, structs and events). Specified in `crates/efevm/MOD_PACKAGE.md` and `docs/e8-design.md` sections 8 and 10.
 - **Standalone executables.** `bundle` copies the runner and appends the compiled module with a trailer. An executable with an embedded module runs it (with `std.fs` denied) and ignores its arguments.
 - **LSP.** `lsp-server` over stdio, synchronous, no threads. Diagnostics on open and change (with `--api` checks), go to definition and completion for labels, functions, data and constants, hover for host functions and struct constants. The `.efapi` file is reloaded when its mtime or length changes and on `didChangeWatchedFiles`; a failed reload keeps the old index.
 - **Debugger.** `debug FILE [--api] [--fs-root]` reads commands from stdin (`break`, `delete`, `step`, `next`, `continue`, `regs`, `mem`, `bt`, `list`, `quit`). It uses `efevm`'s fiber hooks (`fiber_location`, `fiber_registers`, `fiber_backtrace`, `resume` with budget 1).
