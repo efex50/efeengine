@@ -11,6 +11,36 @@ use efeengine_core::efevm::ValType::{F32, I32, I64};
 use efeengine_core::efevm::*;
 use efeengine_core::prelude::*;
 
+/// Test shim: load one `.efmod` through `load_input`.
+trait LoadPackage {
+    fn load_package(&mut self, bytes: &[u8]) -> Result<ModuleId, ModError>;
+}
+
+impl LoadPackage for Engine {
+    fn load_package(&mut self, bytes: &[u8]) -> Result<ModuleId, ModError> {
+        match self.load_input(LoadInput::Package { label: "test.efmod", bytes }) {
+            Ok(l) => Ok(l.id()),
+            Err(efeengine_core::prelude::LoadError::Mod(e)) => Err(e),
+            Err(efeengine_core::prelude::LoadError::Script(e)) => Err(ModError::Script(e)),
+            Err(e) => panic!("unexpected load error: {e}"),
+        }
+    }
+}
+
+/// A one-shot mod source: hands its items out on the first `list`.
+struct VecSource(Vec<ModItem>);
+
+impl ModSource for VecSource {
+    fn list(&mut self) -> Vec<ModItem> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+fn load_packages(e: &mut Engine, packages: Vec<(String, Vec<u8>)>) -> LoadReport {
+    e.add_mod_source(VecSource(packages.into_iter().map(|(label, b)| ModItem { label, body: ModBody::Package(b) }).collect()));
+    e.load_mods()
+}
+
 type Reports = Arc<Mutex<Vec<i64>>>;
 
 fn engine() -> (Engine, Reports) {
@@ -330,8 +360,8 @@ fn an_id_that_equals_or_prefixes_a_namespace_is_refused_before_the_policy() {
     e.load_package(&pk("arena_x")).unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    // load_packages checks the same, also before the policy
-    let report = e.load_packages(vec![("g".into(), pk("game")), ("ok".into(), pk("fine"))]);
+    // load_mods checks the same, also before the policy
+    let report = load_packages(&mut e, vec![("g".into(), pk("game")), ("ok".into(), pk("fine"))]);
     assert_eq!(report.loaded.len(), 1);
     assert!(matches!(&report.failed[..], [(l, ModError::IdClash { .. })] if l == "g"), "{:?}", report.failed);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -339,7 +369,7 @@ fn an_id_that_equals_or_prefixes_a_namespace_is_refused_before_the_policy() {
     // another mod's namespace
     let a = e.load_package(&a_package("1.0.0")).unwrap();
     assert!(e.scripting().is_loaded(a));
-    assert!(matches!(e.load_package(&a_package("1.0.0")), Err(ModError::Script(ScriptError::NameTaken(n))) if n == "a"));
+    assert!(matches!(e.load_package(&a_package("1.0.0")), Err(ModError::AlreadyLoaded { id, same_contents: true, .. }) if id == "a"));
 
     // reserved ids cannot even be written
     for id in ["engine", "std", "efe"] {
@@ -385,7 +415,7 @@ fn a_missing_or_mismatched_dependency_is_refused_by_name() {
 }
 
 #[test]
-fn load_packages_orders_by_dependencies_skips_dependents_and_reports_duplicates() {
+fn load_mods_orders_by_dependencies_skips_dependents_and_reports_duplicates() {
     let (mut e, _) = engine();
     let with = |id: &str, deps: &[&str]| {
         let mut m = manifest(id, "1.0.0");
@@ -396,7 +426,7 @@ fn load_packages_orders_by_dependencies_skips_dependents_and_reports_duplicates(
     let mut bm = manifest("bad", "1.0.0");
     bm.permissions.namespaces = vec!["engine.log".into()];
     let bad = pack(&bm, &logger(&e, "x"), &[]);
-    let report = e.load_packages(vec![
+    let report = load_packages(&mut e, vec![
         ("c".into(), with("c", &["b"])),
         ("b".into(), with("b", &["a"])),
         ("a".into(), with("a", &[])),
@@ -417,9 +447,10 @@ fn load_packages_orders_by_dependencies_skips_dependents_and_reports_duplicates(
     assert!(matches!(failed["bad"], ModError::NotGranted { .. }));
     assert!(matches!(failed["d"], ModError::Resolve(p) if p.to_string().contains("`bad` failed")), "{}", failed["d"]);
 
-    // loading `a` again: duplicate of a loaded package
-    let r = e.load_packages(vec![("a2".into(), with("a", &[]))]);
-    assert!(matches!(&r.failed[..], [(_, ModError::Resolve(p))] if p.to_string().contains("duplicate")));
+    // loading `a` again with the same contents: skipped, not a failure
+    let r = load_packages(&mut e, vec![("a2".into(), with("a", &[]))]);
+    assert!(r.failed.is_empty() && r.loaded.is_empty(), "{:?}", r.failed);
+    assert!(matches!(&r.skipped[..], [(l, _)] if l == "a2"));
 }
 
 fn with_a_and_b(who: bool) -> (Engine, Reports, ModuleId, ModuleId) {
@@ -606,7 +637,7 @@ mod files {
     }
 
     #[test]
-    fn load_mods_dir_loads_efmod_files_sorted_and_not_recursive() {
+    fn dir_source_loads_efmod_files_sorted_and_not_recursive() {
         let dir = Dir::new("dir");
         let mut m = manifest("b", "1.0.0");
         m.dependencies = vec![dep("a", "^1")];
@@ -619,14 +650,17 @@ mod files {
         std::fs::write(dir.0.join("sub").join("c.efmod"), pack(&manifest("c", "1.0.0"), &empty(), &[])).unwrap();
 
         let (mut e, _) = engine();
-        let report = e.load_mods_dir(&dir.0);
+        e.add_mod_source(DirSource::new(&dir.0));
+        let report = e.load_mods();
         let loaded: Vec<&str> = report.loaded.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(loaded, ["z_a.efmod", "b.efmod"], "dependencies first");
         assert!(matches!(&report.failed[..], [(l, ModError::Package(_))] if l == "broken.efmod"), "{:?}", report.failed);
         assert!(e.scripting().module_id("a").is_some() && e.scripting().module_id("c").is_none());
 
-        let report = e.load_mods_dir(dir.0.join("missing"));
-        assert!(report.loaded.is_empty() && matches!(&report.failed[..], [(_, ModError::Script(ScriptError::Io(_)))]));
+        let (mut e2, _) = engine();
+        e2.add_mod_source(DirSource::new(dir.0.join("missing")));
+        let report = e2.load_mods();
+        assert!(report.loaded.is_empty() && report.failed.is_empty());
     }
 
     /// `p` with `add(x) = x + k` as provide `bump_it` of mod `p`.

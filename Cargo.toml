@@ -10,10 +10,12 @@ members = [
     "crates/efepages/page_size_macro",
     "crates/calc",
     "crates/efevm",
+    "crates/efa",
     "crates/efemod",
     "examples/*",
     "xtask",
 ]
+exclude = ["crates/efa/fuzz"]
 
 [profile.optimize]
 inherits = "release"

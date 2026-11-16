@@ -1,0 +1,34 @@
+; dash_coins: root. A coin is a sprite from dash_core.spawn_sprite whose bookkeeping (entity,
+; base y, phase) lives in this mod's own memory (a mod cannot add components).
+;   coins.efa  spawning a batch, the spin and bob, the pickup test, the autoplay target
+use "coins.efa" as coins
+
+import engine.events.count
+import engine.events.read
+import event dash_core.round_started
+
+ev resb Round.size
+
+export fn init() {
+    call coins.init()
+    ret
+}
+
+export fn frame(dt: f32) {
+    reg n, i, st, want
+    ; round_started events of last frame: spawn that many coins
+    call engine.events.count(dash_core.round_started.id) -> n
+    const.i32 i, 0
+loop:
+    i32.lt_s st, i, n
+    br_ifz st, tick
+    call engine.events.read(dash_core.round_started.id, i, ev) -> st
+    br_if st, tick
+    i32.load want, ev, Round.coins
+    call coins.spawn_batch(want)
+    i32.add i, i, 1
+    jmp loop
+tick:
+    call coins.tick(dt)
+    ret
+}

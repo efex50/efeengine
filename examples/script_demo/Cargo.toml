@@ -19,7 +19,3 @@ dependencies = ["sdl3"]
 
 [dependencies]
 efeengine-core = { path = "../../crates/core" }
-
-[dev-dependencies]
-# Only the end-to-end test assembles .efa sources; the engine and the game never depend on it.
-efescript = { path = "../../crates/efescript" }

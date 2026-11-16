@@ -18,6 +18,10 @@ pub enum EngineCommand {
     SetCursorVisible(bool),
     SetCursorGrab(bool),
     SetTextInput(bool),
+    /// `Engine::reload_mods`, the report is logged.
+    ReloadMods,
+    /// `Engine::unload_mods`, the report is logged.
+    UnloadMods,
 }
 
 /// A queued structural change of the world.
@@ -65,6 +69,15 @@ impl Commands {
 
     // ---- engine control ----
 
+    /// Ask the engine to `reload_mods` (new mods load, changed ones are replaced, removed ones
+    /// unload) and log the report.
+    pub fn reload_mods(&mut self) {
+        self.list.push(EngineCommand::ReloadMods);
+    }
+    /// Ask the engine to `unload_mods` (every mod, dependents first) and log the report.
+    pub fn unload_mods(&mut self) {
+        self.list.push(EngineCommand::UnloadMods);
+    }
     pub fn quit(&mut self) {
         self.list.push(EngineCommand::Quit);
     }

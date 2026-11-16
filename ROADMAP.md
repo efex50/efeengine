@@ -4,9 +4,9 @@ Living document. Tick items off (`- [x]`) as they land and edit freely. Each tas
 lists the main files it touches and how to tell it's done.
 Tags: **[N]** native (SDL3) · **[W]** web (wasm) · **[S]** shared by both.
 
-_Last updated: 2026-11-15_
+_Last updated: 2026-11-16_
 
-**Order:** IO → game systems → hecs world → rendering (wgpu) → UI (Phase 6, last). Scripting (Phase 5) needs only the world, so it can run alongside rendering. UI needs the Phase 4 renderer.
+**Order:** IO → game systems → hecs world → rendering (wgpu: 2D first, then 3D) → UI (Phase 6) → editor and live iteration (Phase 7, last). Scripting (Phase 5) needs only the world, so it can run alongside rendering. UI needs the Phase 4 renderer.
 Rendering is deliberately last: until Phase 4 the current wgpu code stays as a
 **placeholder**. The native triangle keeps working as it does now, and on the web
 nothing is drawn, which is fine. Earlier phases are tested through logs, the
@@ -19,6 +19,7 @@ native window and headless unit tests, not through rendering.
 2. Phase 3 (hecs world, `Commands`, type registry), now that the input system, schedule, fixed-step loop and headless mode (Phases 1–2) are in.
 3. Scripting E3–E5 (host registry, API index, engine bindings, mods) is done, together with 3.1–3.4. Next for Phase 3: 3.5–3.7. Not yet checked by hand: `cargo xtask run script_demo native` (window) and a web dist. See `crates/efescript/ROADMAP.md`.
 4. Scripting modules and `.efmod` mod packages are done (5.9, efescript E8); next for scripting is the language (efescript E6).
+5. Engine loading and caches are done (efescript E10): one `Engine::load` for `.efa`, `.efvm`, `.efmod` and mod folders, a memory and disk `ScriptCache`, pluggable mod sources and asset handlers, and the new `crates/efa` compiler crate.
 
 Input now flows through the engine, not the global message queue, and is polled and applied in the same frame it is used.
 
@@ -51,7 +52,7 @@ Goal: one platform-agnostic window, event and input-state API that behaves the s
   - Web polls the canvas size every frame (CSS size × `devicePixelRatio`; no `ResizeObserver`), and uses `focus`/`blur` and `visibilitychange`.
   - Both send `Resized`, `ScaleFactorChanged`, `Focused` and `CloseRequested`, plus an initial `Resized` at startup. The engine stores the current size and scale.
 
-  Connecting this to `renderer.resize()` is task 4.3. _Files:_ `sdl_backend.rs`, `web_backend.rs`, `engine.rs`. _Done:_ resizing the window or the tab logs correct sizes.
+  Connecting this to `renderer.resize()` is task 4A.4. _Files:_ `sdl_backend.rs`, `web_backend.rs`, `engine.rs`. _Done:_ resizing the window or the tab logs correct sizes.
 
 ### Shared foundation
 - [x] 1.3 **[S] Event types.** _Done: `engine/input/{keys,events}.rs` (`InputEvent` wraps `InputEventKind` with timestamp and `WindowId`); `window/events.rs`, `KeyMod`, `raw: u16` and the aliases are gone._ Add an `InputEvent` enum (sketch below) and the types it uses: `Modifiers`, `ElementState`, a logical `Key` (`Named(NamedKey) | Character(String)`), `WindowId`, and a `timestamp_ns` normalised across platforms. Keep `KeyCode` as the *physical* key only, and add the keys it's missing (IntlBackslash, PrintScreen, ContextMenu, F13–F24, media keys). Remove the SDL-specific `raw: u16` and the unused `WindowEvent` stub. _Files:_ `window/events.rs` (or a new `input/` module).
@@ -155,34 +156,55 @@ The world is designed so that scripts (Phase 5) can use it later without touchin
   - Types can also be registered at runtime (by a mod), not only at compile time.
   - Entities cross any boundary as `u64` (`Entity::to_bits`), so a stale handle fails cleanly.
   - The same registry later feeds scenes (3.7), the scripting host API (5.2) and the API manifest (5.3).
-- [ ] 3.5 **[S] Render extract (data only).** A `RenderExtract` system queries `(&Transform, &MeshHandle)` into a `RenderQueue`. Until Phase 4, a thin adapter feeds the placeholder renderer from the queue, so it never reads the world directly.
-- [ ] 3.6 **[S] Movement system and second example.** Velocity moves the transform in FixedUpdate, giving constant speed at any frame rate (unit-tested).
+- [x] 3.5 **[S] Render extract (data only).** _Done, and replaced: instead of a `RenderQueue`, the `RenderExtract` system builds a `RenderFrame` resource (`engine/render/frame.rs`): the one active camera with ready view/projection matrices, sorted `SpriteInstance`s, `MeshInstance`s, texture-store changes (once each), frame number and time. Also new: components `Camera`, `Sprite`, `TextureHandle`, `Visibility`, `Parent`, `Children`, `GlobalTransform`, the `Textures` store, and transform propagation (`PostUpdate`). Tests: `tests/render.rs`. See `docs/RENDERING.md`._
+- [x] 3.6 **[S] Movement system and second example.** Velocity moves the transform in FixedUpdate, giving constant speed at any frame rate (unit-tested). _Done: `transform::velocity_system` (fixed delta), test `velocity_integrates_with_the_fixed_delta`. Second example: `examples/custom_renderer` (a renderer template)._
 - [ ] 3.7 **[S] Scenes (optional).** Load and save scenes with RON/serde, driven by the type registry from 3.4.
 
-## Phase 4: Rendering with wgpu (last)
+## Phase 4: Rendering with wgpu (2D first, then 3D)
 
-Goal: replace the placeholder. The same scene renders, animates and resizes correctly natively, in Chrome (WebGPU) and in Firefox (WebGL2).
+Goal: a 2D renderer first (4A), then 3D (4B). Each one renders, animates and resizes correctly natively, in Chrome (WebGPU) and in Firefox (WebGL2).
 
-- [ ] 4.1 **[S] One `Renderer` owned by `Engine`.**
-  - It holds Device, Queue, Surface, config and pipeline, and moves out of the window (the window currently owns the `SurfaceManager`).
-  - Delete the dead, half-built `RendererState`.
-  - Fallible `async fn new(target, size) -> Result<Self, RenderError>`.
-  - It consumes the `RenderQueue` from 3.4.
-- [ ] 4.2 **[W] Initialise graphics on web.** Replace `pollster::block_on` with `wasm_bindgen_futures::spawn_local`: build the renderer, store it in the engine, then start rendering in the rAF loop. Use the canvas element from `WebWindow` (1.1), not `getElementById`.
-- [ ] 4.3 **[S] Resize.** Connect the `Resized`/`ScaleFactorChanged` events from 1.2 to `renderer.resize()`. Skip frames while the size is 0.
-- [ ] 4.4 **[S] Per-object drawing.** Today every object writes the *same* uniform buffer before submit, so all objects draw at the last one's position (`renderer/mod.rs` ~365). Use an instance buffer or dynamic offsets. Switch to `TriangleList`.
-- [ ] 4.5 **[S] Vertex buffer.** Add a `Vertex { pos, color }` type, its buffer layout, and a shader that reads vertex attributes. That removes the vertex array hard-coded in WGSL.
-- [ ] 4.6 **[S] Surface errors.**
+### Phase 4A: 2D renderer (first)
+
+- [x] 4A.1 **[S] One `Renderer` owned by `Engine`.** _Done (engine side): the engine owns the GPU (`render::gpu::GpuContext`: instance, adapter, device, queue, surface, configure) and a `Box<dyn Renderer>` set with `Engine::set_renderer` (default `ClearRenderer`). The window no longer owns a surface; `RendererState` and the triangle renderer and shaders are deleted. The renderer consumes the `RenderFrame` (not a `RenderQueue`). Init failure is a logged error, not a panic. Also covers the surface part of 4A.4/4A.5 (resize reconfigure, Lost/Outdated/suboptimal reconfigure, Timeout skip, frames skipped at size 0)._
+  - The game's drawing code is the user's `Renderer` (template: `examples/custom_renderer`). **The drawing tasks 4A.8 and later are for the user's renderer, not the engine crate.**
+- [ ] 4A.2 **[W] Backends.** Enable wgpu's `webgl` feature for wasm (it's off today, so browsers without WebGPU can't render) and use `BROWSER_WEBGPU | GL`. Create the surface *before* the adapter and pass `compatible_surface`. Pick device limits by backend (downlevel limits only on GL).
+- [ ] 4A.3 **[W] Initialise graphics on web.** Replace `pollster::block_on` with `wasm_bindgen_futures::spawn_local`: build the renderer, store it in the engine, then start rendering in the rAF loop. Use the canvas element from `WebWindow` (1.1), not `getElementById`.
+- [ ] 4A.4 **[S] Resize.** Connect the `Resized`/`ScaleFactorChanged` events from 1.2 to `renderer.resize()`. Skip frames while the size is 0.
+- [ ] 4A.5 **[S] Surface errors.**
   - `Lost`/`Outdated`: reconfigure and skip the frame.
   - `Timeout`: skip.
   - `OutOfMemory`: exit.
   - Also reconfigure when the frame is `suboptimal`.
   - Remove the `expect`/`unwrap` calls on adapter, device and surface.
-- [ ] 4.7 **[S] Timing and present mode.** Use the `Time` resource from 2.2 instead of the renderer's `time += 0.005`, which runs once per object per frame. Prefer `Fifo` explicitly instead of `present_modes[0]`, and let vsync pace native frames.
-- [ ] 4.8 **[W] Backends.** Enable wgpu's `webgl` feature for wasm (it's off today, so browsers without WebGPU can't render) and use `BROWSER_WEBGPU | GL`. Create the surface *before* the adapter and pass `compatible_surface`. Pick device limits by backend (downlevel limits only on GL).
-- [ ] 4.9 **[W] Colour format.** Choose the surface format deliberately (sRGB view format or gamma in the shader), so colours match between native, WebGPU and WebGL.
-- [ ] 4.10 **[S] Camera.** A globals/camera uniform with the aspect ratio (no stretching after resize), then an orthographic 2D camera.
-- [ ] 4.11 **[S] Cross-platform check.** Native, Chrome and Firefox all show the identical scene. Window and canvas resize and browser zoom reconfigure without errors. Returning to a background tab doesn't cause a huge delta-time jump.
+- [ ] 4A.6 **[S] Timing and present mode.** Use the `Time` resource from 2.2 instead of the renderer's `time += 0.005`, which runs once per object per frame. Prefer `Fifo` explicitly instead of `present_modes[0]`, and let vsync pace native frames.
+- [ ] 4A.7 **[W] Colour format.** Choose the surface format deliberately (sRGB view format or gamma in the shader), so colours match between native, WebGPU and WebGL.
+- [ ] 4A.8 **[S] Vertex buffer.** Add a `Vertex { pos, color }` type, its buffer layout, and a shader that reads vertex attributes. That removes the vertex array hard-coded in WGSL.
+- [ ] 4A.9 **[S] Per-object drawing.** Today every object writes the *same* uniform buffer before submit, so all objects draw at the last one's position (`renderer/mod.rs` ~365). Use an instance buffer or dynamic offsets. Switch to `TriangleList`.
+- [ ] 4A.10 **[S] Orthographic 2D camera.** A globals/camera uniform with the aspect ratio (no stretching after resize), then an orthographic 2D camera. _Engine side done: the `Camera` component and `CameraView` carry ready column-major `view` / `projection` / `view_projection` matrices that follow the window size (1 world unit = `zoom` pixels, y up). Uploading them to a uniform is the renderer's part._
+- [x] 4A.11 **[S] Textured sprites and texture/asset handle.** _Engine side done: `TextureHandle`, `Sprite`, `Image` and the `Textures` store with exactly-once change delivery; no PNG decoder yet (no pure-Rust `png` crate was available offline), so `Image::new` takes decoded RGBA8._ A `Texture` handle type and sampled quads with a sprite shader. _Done when_ a PNG sprite draws at the right size natively and in both browsers. _Done by the built-in `SpriteRenderer` (opt-in) and a pure-Rust PNG decoder (`Image::from_png`, `Textures::add_png`); `examples/coin_dash` draws PNG sprites. Native verified; browsers not yet checked._
+- [x] 4A.12 **[S] Sprite batching (instancing).** Draw many sprites with one instance buffer per texture, reusing the approach from 4A.9. _Done when_ 10,000 sprites with one texture draw in one call (checked in the debug stats). _Done in `SpriteRenderer`: one instanced draw per run of same-texture sprites (instance data in a vertex buffer). The "10,000 sprites in one call" check and debug stats are not done._
+- [x] 4A.13 **[S] Draw order and alpha blending.** A z/layer sort before submit, and alpha blending with premultiplied alpha. _Done when_ transparent sprites layer correctly over opaque ones. _Done in `SpriteRenderer`: layer sort comes from the extract, straight-alpha blending (not premultiplied)._
+- [x] 4A.14 **[S] Sprite sheets and animation.** Atlas rectangles (UVs) and frame timing from the `Time` resource (2.2). _Done when_ a sheet animates at its set frame rate, whatever the render rate. _Done in `coin_dash`: a 4-frame coin sheet animated by switching `uv_min`/`uv_max` from `Time` (8 fps); no engine-side animation component._
+- [x] 4A.15 **[S] Tilemaps.** A grid of tiles drawn as batched sprites from one atlas. _Done when_ a 100×100 map pans with the camera in one draw call per layer. _Done as a demo in `coin_dash`: a 40x30 grid of tile sprites from one atlas on a low layer (one draw per texture run). No tilemap type or culling; the "100x100 map" check is not done._
+- [ ] 4A.16 **[S] 2D text.** Glyph rendering with `glyphon` or `fontdue` for in-world text. _Done when_ a string draws in the same place natively and in both browsers.
+- [ ] 4A.17 **[S] 2D debug draw.** Lines and rects in world or screen space, drawn over the sprite pass. _Done when_ a bounding box can be drawn over a sprite.
+- [ ] 4A.18 **[S] Cross-platform check.** Native, Chrome and Firefox all show the identical scene. Window and canvas resize and browser zoom reconfigure without errors. Returning to a background tab doesn't cause a huge delta-time jump.
+
+### Phase 4B: 3D renderer (after 4A)
+
+Must keep working on WebGL2 (wasm). WebGL2 has downlevel limits: no storage buffers, no compute, small uniform buffers (16 KB minimum), and smaller texture sizes. Check each task against them.
+
+- [ ] 4B.1 **[S] Perspective camera.** A `Camera` component (view and projection, from `Transform`), with the aspect ratio kept on resize. _Done when_ a rotating cube keeps its shape after a window resize.
+- [ ] 4B.2 **[S] Depth buffer.** A `Depth32Float` target, recreated on resize, with depth test and write in the 3D pipelines. _Done when_ overlapping meshes sort correctly from every angle.
+- [ ] 4B.3 **[S] Mesh assets and glTF loading.** Mesh data in vertex and index buffers behind `MeshHandle`, loaded with the `gltf` crate. _Done when_ a sample `.glb` renders natively and in both browsers.
+- [ ] 4B.4 **[S] Materials: unlit, then PBR metallic-roughness.** Unlit (base colour and texture) first, then metallic-roughness (base colour, metallic, roughness, normal map). _Done when_ the same glTF looks the same natively and in both browsers.
+- [ ] 4B.5 **[S] Lights (directional, point).** Lights in a uniform array with a fixed maximum count, since WebGL2 has no storage buffers. _Done when_ a lit sphere shades correctly with one of each.
+- [ ] 4B.6 **[S] Shadow maps for the directional light.** A depth-only pass from the light, sampled with a comparison sampler and PCF. Keep the shadow map within downlevel texture limits. _Done when_ a cast shadow lines up with its object natively and on WebGL2.
+- [ ] 4B.7 **[S] Frustum culling.** Test each mesh's bounding sphere against the camera frustum before drawing. _Done when_ off-screen meshes are not submitted (counted in the debug stats).
+- [ ] 4B.8 **[S] Render graph or pass list.** Ordered passes (shadow, 3D scene, 2D sprites, UI) so 2D sprites and UI draw on top of 3D. The UI slot is reserved for 6.2. _Done when_ a sprite draws over a 3D scene in the right order.
+- [ ] 4B.9 **[S] Skybox and environment.** A cube-map skybox drawn after the opaque pass at maximum depth. Cube maps work on WebGL2. _Done when_ the sky stays behind geometry and fixed while the camera rotates.
+- [ ] 4B.10 **[S] Skinned meshes (later).** glTF skins with joint matrices. WebGL2 limits uniform size, so cap the joint count or move joints into a texture. _Done when_ a sample animated character plays natively and in both browsers.
 
 ## Phase 5: Scripting with efescript (future)
 
@@ -231,7 +253,7 @@ Today's efescript API is unstable and static (fixed syscall numbers compiled int
   - `Engine::load_package(bytes)` and a `mods/` folder on native; load order from dependencies; the game grants permissions, the package only requests them.
   - A mod's exports are declared in its module, so they reach the index without running it; strings and structs passed between mods are copied between their separate memories.
 
-## Phase 6: UI (editor with egui, game UI with iced) (last)
+## Phase 6: UI (editor with egui, game UI with iced)
 
 Goal: two UI toolkits for two audiences, both optional. **egui** for the people building
 games (editor, inspectors, console, profiler); **iced** for the people playing them (menus,
@@ -239,7 +261,7 @@ settings, inventory, dialogs). The core stays toolkit-agnostic. Full proposal, p
 risks: [`ui-roadmap.md`](ui-roadmap.md); this phase maps it onto the engine as it is.
 
 Depends on Phase 4: both toolkits draw through wgpu, and today the renderer is a placeholder
-that the window owns. Until 4.1 (one `Renderer` owned by `Engine`) and 4.3 (resize) land there
+that the window owns. Until 4A.1 (one `Renderer` owned by `Engine`) and 4A.4 (resize) land there
 is nowhere to put a UI pass. Some editor work (6.4) also needs the type registry from 3.4,
 which is done.
 
@@ -257,15 +279,40 @@ What the engine already decides for this phase (from the code, 2026-11-15):
 - [ ] 6.6 **Script-facing UI.** A small, data-driven UI description (panels, labels, buttons, lists, bound to script state) that scripts and mods build through host functions registered in the API index, rendered by the game UI crate. Mod permissions decide whether a mod may open UI. Decide in 6.5 whether this sits on iced or on a simpler immediate-mode layer.
 - [ ] 6.7 **Escape hatches and docs.** A game can use iced, another toolkit or its own UI without the editor; document how to bypass the built-in game UI; examples for each; platform smoke tests.
 
-Open questions carried from `ui-roadmap.md`: iced maturity on the web and on mobile; text shaping, fonts and localization (shared with the "Text and UI" item below); the editor's own window and lifecycle versus the game's.
+Open questions carried from `ui-roadmap.md`: iced maturity on the web and on mobile; text shaping, fonts and localization (shared with 4A.16, 2D text, above); the editor's own window and lifecycle versus the game's (answered by Phase 7: the game runs in its own process).
+
+## Phase 7: Editor and live iteration (last)
+
+Goal: an editor in the Unreal style, where the user writes normal Rust systems and the editor builds them, with no ABI risk. Rust has no stable ABI, so the editor **never loads game code in its own process**. The game process is the authority in both edit mode and play mode: it holds the world, runs the systems and renders. The editor is a client that only does UI, and it talks to the game over a local socket. This is not a full client-server engine (no world copied every frame, no headless server plus a rendering client); multiplayer may reuse the serialization later, but nothing here depends on it.
+
+Depends on Phase 6 (6.4 egui tools, 6.2 UI pass), Phase 4A (a renderer to show scenes) and the type registry (3.4).
+
+How changes apply:
+
+| Change | How it applies | Restart? |
+|---|---|---|
+| `.efa` scripts, mods | the VM reloads them (`ScriptCache`, `reload_mods`), already in | no |
+| Rust system bodies | Subsecond hot-patches the running game (7.6) | no |
+| Component layouts, new types | rebuild, then restore the scene snapshot (7.7) | yes, made to look seamless |
+
+- [ ] 7.1 **[S] Project layout.** A game project is a normal cargo crate that depends on `efeengine-core` at a pinned version: `Cargo.toml`, `project.toml` (scenes, start scene, targets), `src/` (Rust systems), `scripts/`, `mods/`, `assets/`, `scenes/`. Cargo fetches and builds the engine source; a custom engine fork is selected with `[patch]`, not downloaded by the editor. _Done when_ `efeengine new mygame` creates a project that `cargo run` starts.
+- [ ] 7.2 **[S] Component schema export.** Extend `EFE_API_EXPORT` so the game also writes its component and resource schema (names, fields, types, layout) from the type registry, next to the script API index. The editor reads it to build inspectors without linking game code. _Done when_ script_demo's `Transform` and a game-defined component appear in the exported schema.
+- [ ] 7.3 **[S] Scene format.** Save and load the world (entities plus components) using the schema: a versioned text format for diffs, plus a snapshot API (`Engine::snapshot()` / `restore()`). _Done when_ a scene round-trips byte for byte and a snapshot restores a running world.
+- [ ] 7.4 **[N] Editor protocol.** A local socket between the editor and the game process. Editor → game: set a component field, spawn or despawn, pause, step, play or stop, reload. Game → editor: entity list, component values (polled or as diffs), logs, stats. Built on `Commands`, the engine message queue and field-level reflection, the same layout access scripts use (`Transform.id`, `Transform.position`). _Done when_ an external tool moves an entity in a running script_demo.
+- [ ] 7.5 **[N] Editor app, edit mode and play mode.** A prebuilt egui app (6.4) that runs `cargo build`, shows the errors in a panel and starts the game process.
+  - **Edit mode:** game systems are paused, and only rendering and gizmos run. Edits go to the world and are saved to the scene file.
+  - **Play mode:** snapshot the scene, then run the systems. Values can be changed live. Stop restores the snapshot unless "keep changes" is chosen.
+  - **Viewport:** at first, the game's own window next to the editor. Embedding it is possible on Windows and X11 but not on Wayland or the web; sharing a GPU texture across processes comes later.
+  - **Toolchain:** a doctor step checks the Rust toolchain, like `build.py doctor`.
+  - _Done when_ you can edit a scene, press play, change a value live, press stop and get the scene back.
+- [ ] 7.6 **[N] Hot-patching systems with Subsecond (Dioxus).** Run the scheduler's system calls through `subsecond::HotFn`, so systems registered with `add_system` pick up new code on the next frame. Builds go through `dx` (or its linker shim), driven by `xtask` and the editor. Only function bodies of the game crate can be patched; struct layouts, statics and engine crates cannot. Native first; wasm only if it proves stable. **Start with a small test:** hot-patch one script_demo system and measure the cost per call. _Done when_ editing a system body changes the running game in under a second.
+- [ ] 7.7 **[S] Seamless restart.** When a change cannot be patched (a component layout, a new type), the editor snapshots the scene, rebuilds, restarts the game and restores the snapshot, mapping fields by name through the schema, with added fields set to their defaults. _Done when_ adding a field to a component keeps the scene and the camera position.
 
 ## Later: missing parts
 
 | Area | What | Priority |
 |---|---|---|
-| 2D rendering | Textured sprites, sprite batching, depth or sorting, blending | after Phase 4 |
 | Assets | `AssetServer` with handles; `std::fs` natively, async `fetch` on web; start with `include_bytes!`. The data side can start before Phase 4. | after Phase 3 |
-| Text and UI | Font rendering (`glyphon`/`fontdue`) for in-world text. UI toolkits, the debug overlay and the FPS counter moved to Phase 6. | after sprites |
 | Audio | `kira` or `cpal` (both work natively and on web via WebAudio). Independent of rendering, so it can come earlier if needed. | later |
 | Scripting | Moved to Phase 5. | after Phase 3 |
 | Logging | Use `log` levels (`env_logger` is used as the log-crate logger on native). On a 1-core web build, use a direct logger instead of the worker logger. | soon |

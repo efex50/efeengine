@@ -1,0 +1,16 @@
+; coin_dash_scripts.efa - the root of the coin_dash gameplay scripts.
+;
+; The root only lists the files; each one has one job and its own `pub`/`export` items:
+;   common.efa  constants and helpers (vectors, a tiny log formatter)
+;   player.efa  export fn player_update  movement from the keyboard (or the autoplay bot)
+;   enemy.efa   export fn patrol_update  walk along a lane
+;   coin.efa    export fn coin_update    spin (UV frames) and bob
+;   rules.efa   export fn init / frame   rounds, pickup, score, hits, status line
+; `use` makes them ONE module, named after this file: its log lines start with
+; [coin_dash_scripts], and a function exported from any file can be a `Script` entry.
+; Edit any of them while the game runs and the engine recompiles the module in place.
+use "common.efa"
+use "player.efa"
+use "enemy.efa"
+use "coin.efa"
+use "rules.efa"

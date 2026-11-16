@@ -7,9 +7,9 @@ efescript is the scripting layer of efeengine. A text assembler (`.efa`) lowers 
 |---|---|
 | Path | `crates/efescript` |
 | Kind | library (`efescript`) plus two binaries: `efescript` (`src/main.rs`, the CLI) and `efescript-runner` (`src/bin/runner.rs`, runs an embedded module) |
-| Depends on (workspace) | `efevm` only |
+| Depends on (workspace) | `efevm`, `efa` (assembler and linker, E10), `efemod` (with `write`, for `pack`) |
 | Key external deps | `lsp-server` 0.7 and `lsp-types` 0.97 (LSP), `serde_json` (index and LSP messages), `rodio` (optional, `audio` feature: real sound for `std.play_sound`) |
-| Used by | `examples/script_demo` (dev-dependency, end-to-end test). Nothing else in the workspace |
+| Used by | Nothing in the workspace. `examples/script_demo` no longer dev-depends on it (E10) |
 | Targets | native. The `std` host, the CLI and the LSP are native only; `efevm` itself has no I/O and builds for `wasm32-unknown-unknown` |
 | Features | `audio` (needs ALSA headers on Linux) |
 
@@ -25,6 +25,7 @@ crates/efescript
 │   ├── e0-design.md         original design (the removed `.efe` path; history)
 │   ├── e2-design.md         `.efa` assembler and v2 runner
 │   ├── e8-design.md         modules (multi-file `.efa`, linker) and mod packages
+│   ├── e10-design.md        engine loading API, script cache, mod sources (E10; the assembler is in `crates/efa`)
 │   └── e3-design.md         host registry, std host, API index, LSP, debugger, engine integration
 ├── examples/            `.efa` programs with their expected output in the header comment:
 │   │                    hello, strings, jumps, recursion, floats, sound (+ ominous_worse.ogg),
@@ -36,15 +37,8 @@ crates/efescript
 │   ├── host.rs          `Host` trait (output, sound), `StdHost` (process stdio), `CaptureHost` (tests)
 │   ├── host_std.rs      `std_registry(&StdOptions)`: HostRegistry of `std`, `std.time`, `std.fs`; `StdEnv<H>`
 │   ├── run_v2.rs        load (path, bytes, source, with or without `AsmOptions`), `run`/`run_with`, `run_embedded`, trap reports
-│   ├── asm/             the assembler
-│   │   ├── lexer.rs, parser.rs, ast.rs   tokens, syntax tree (ast::ImportDecl has `has_sig`; `use`, `provide`, `struct`, `scratch` items, `import event` / `provide event` (events, efa-syntax section 17); `pub` flags)
-│   │   ├── diag.rs      diagnostics: file, line, column and a caret under the span
-│   │   ├── source.rs    `FileSource` trait, `MemSource`, `FsSource` (native: canonicalises, refuses escapes and symlinks out of the root)
-│   │   ├── lower/       one file as `asm::Unit` (a `link::Unit`): mod.rs (declare: consts, structs, imports, data sizes, aliases, provides; resolve: indices, `alias.item`, globals, data bytes, table; define: bodies), func.rs (functions, sugar), value.rs (operands, immediates), tests.rs
-│   │   └── mod.rs       `parse`, `assemble`, `assemble_with(src, file, &AsmOptions { api })`, `assemble_program(root, &dyn FileSource, opts)`, `assemble_programs(&[roots], ..)`: use graph, per-file parse, link
-│   ├── link/            the linker (e8-design section 4): mod.rs (`Unit`, `Decls`, `SymbolMap`, `ResolveCx`, `DefineCx`, `link`), layout.rs (phase 1: indices, data, scratch, memory, program-wide checks; section 13), tests.rs (hand-written units)
 │   ├── disasm.rs        `.efvm` (or `.efa`) to `.efa` text; names from the `names` section
-│   ├── pack.rs          mod packaging: `read_mod_toml`, `pack_dir(dir, &[&ApiIndex]) -> Packed` (`.efmod`), `read_api_input` (`.efapi` or `.efmod`), `mod_index`; behind `pack`, `inspect`, `api-export FILE`
+│   ├── pack.rs          mod packaging: `pack_dir(dir, &[&ApiIndex]) -> Packed` (`.efmod`; reads `[build] api`, then `efa::mod_folder::build_mod`), `read_api_input` (`.efapi` or `.efmod`); re-exports `read_mod_toml`, `mod_index`, `BuildToml`, `ModToml` from `efa::mod_folder`; behind `pack`, `inspect`, `api-export FILE`
 │   ├── bundle.rs        standalone executables: runner plus appended module and trailer
 │   ├── debugger/mod.rs  `Debugger`: the `efescript debug` command set on stdin/stdout
 │   ├── lsp/             `Server::handle(Message) -> Vec<Message>`, `run_stdio`
@@ -74,10 +68,10 @@ crates/efescript
     └── v2_roundtrip.rs      `build`, then `dis`, then `build` gives the same bytes
 ```
 
-`lib.rs` exports `asm`, `bundle`, `compiler`, `debugger`, `disasm`, `host`, `host_std`, `link`, `lsp`, `pack`, `prelude`, `run_v2`.
+`lib.rs` exports `asm`, `bundle`, `compiler`, `debugger`, `disasm`, `host`, `host_std`, `link`, `lsp`, `pack`, `prelude`, `run_v2`. `asm` and `link` are `pub use efa::{asm, link}`: the code lives in `crates/efa` (`crates/efa/structure.md`).
 
 ## Main concepts
-- **Pipeline.** `.efa` text goes through `asm` (lexer and parser per file of the use graph, one `asm::Unit` per file) and `link` (two-phase linking into one `efevm::ModuleBuilder`) to an `efevm::Module`. `run_v2` links it against `host_std`'s registry (`Imports::check_module` reports every link problem at once, by name), creates an `Instance` and runs `main` under an instruction budget. `dis` prints a module back as `.efa`.
+- **Pipeline.** `.efa` text goes through `efa::asm` (lexer and parser per file of the use graph, one `asm::Unit` per file) and `efa::link` (two-phase linking into one `efevm::ModuleBuilder`) to an `efevm::Module`. `run_v2` links it against `host_std`'s registry (`Imports::check_module` reports every link problem at once, by name), creates an `Instance` and runs `main` under an instruction budget. `dis` prints a module back as `.efa`.
 - **Host functions.** `efevm::HostRegistry` is the only way to make a host function callable. efescript's registry (`host_std::std_registry`, owner `std`) has:
 
   | Namespace | Functions |
@@ -95,7 +89,7 @@ crates/efescript
 - **Exit codes.** `run`: `main`'s return value or the `std.exit` code. 2: load, assembly or API index error, `.efe` input. 3: trap or exhausted `--budget`.
 
 ## Tests
-`cargo test -p efescript` (library unit tests in `asm/lower/tests.rs` and the integration tests above). The end-to-end test with the engine is `examples/script_demo/tests/e2e.rs` (`cargo test -p script_demo`).
+`cargo test -p efescript` (the integration tests above). The assembler and linker unit tests are in `crates/efa` (`cargo test -p efa`). The end-to-end test with the engine is `examples/script_demo/tests/e2e.rs` (`cargo test -p script_demo`).
 
 ## Known gaps
 - `std.fs.write_file` checks before it writes, so a concurrent symlink swap is not defended against (time-of-check/time-of-use).

@@ -562,7 +562,7 @@ impl Server {
 
     /// A document that is not a file: a program of one in-memory file.
     fn diagnose_single(&self, doc: &Doc, name: &str) -> Vec<Value> {
-        let opts = AsmOptions { api: self.api.index.as_ref() };
+        let opts = AsmOptions { api: self.api.index.as_ref(), ..Default::default() };
         let lines = text::lines(&doc.text);
         match asm::assemble_with(&doc.text, name, &opts) {
             Ok(_) => Vec::new(),
@@ -578,7 +578,7 @@ impl Server {
         let base = root.parent().map(Path::to_path_buf).unwrap_or_default();
         let rel = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let src = project::BufSource { base, bufs: &bufs };
-        let opts = AsmOptions { api: self.api.index.as_ref() };
+        let opts = AsmOptions { api: self.api.index.as_ref(), ..Default::default() };
         let mut by_file: HashMap<PathBuf, Vec<asm::Diagnostic>> = HashMap::new();
         if let Err(ds) = asm::assemble_program(&rel, &src, &opts) {
             for d in ds.0 {

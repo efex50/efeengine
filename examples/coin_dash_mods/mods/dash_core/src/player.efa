@@ -1,0 +1,154 @@
+; player.efa (dash_core): the player. Spawned at init; moved every frame from the keyboard
+; (WASD / arrows) or, with COIN_DASH_AUTOPLAY, towards the target the coins mod reports.
+use "common.efa" as c
+
+import engine.input.key_down
+import engine.world.get
+import engine.world.set
+import engine.world.insert
+import game.texture
+import game.autoplay
+import engine.world.spawn
+
+player_png db "player.png"
+key_w db "W"
+key_a db "A"
+key_s db "S"
+key_d db "D"
+key_up db "Up"
+key_left db "Left"
+key_down db "Down"
+key_right db "Right"
+
+tbuf resb Transform.size
+vbuf resb Velocity.size
+sbuf resb Sprite.size
+
+global mut player: i64 = 0
+global mut pos_x: f32 = 0.0
+global mut pos_y: f32 = 0.0
+global mut target_x: f32 = 0.0
+global mut target_y: f32 = 0.0
+global mut has_target: i32 = 0
+
+; The player: a Sprite of its own asset (a 16x16 player.png), layer 4, at the start.
+pub fn spawn() {
+    reg ent, status, tex, p
+    call game.texture(player_png, player_png.len) -> tex
+    call c.vec2_store(tbuf, Transform.position, 0.0, 0.0)
+    call c.f32_store(tbuf, Transform.rotation, 0.0)
+    call c.vec2_store(tbuf, Transform.scale, 1.0, 1.0)
+    i32.store tex, sbuf, Sprite.texture
+    call c.vec2_store(sbuf, Sprite.color, 1.0, 1.0)
+    i64.add p, sbuf, 8
+    call c.vec2_store(p, Sprite.color, 1.0, 1.0)
+    call c.vec2_store(sbuf, c.SPRITE_SIZE_AT, 16.0, 16.0)
+    call c.vec2_store(sbuf, Sprite.uv_min, 0.0, 0.0)
+    call c.vec2_store(sbuf, Sprite.uv_max, 1.0, 1.0)
+    i32.store 4, sbuf, Sprite.layer
+    i32.store 0, sbuf, Sprite.flip
+    call c.vec2_store(vbuf, Velocity.linear, 0.0, 0.0)
+    call c.f32_store(vbuf, Velocity.angular, 0.0)
+    call engine.world.spawn() -> ent
+    call engine.world.insert(ent, Transform.id, tbuf) -> status
+    call engine.world.insert(ent, Velocity.id, vbuf) -> status
+    call engine.world.insert(ent, Sprite.id, sbuf) -> status
+    global.set player, ent
+    ret
+}
+
+pub fn pos() -> (f32, f32) {
+    reg x, y
+    global.get x, pos_x
+    global.get y, pos_y
+    ret (x, y)
+}
+
+pub fn set_target(x: f32, y: f32, found: i32) {
+    global.set target_x, x
+    global.set target_y, y
+    global.set has_target, found
+    ret
+}
+
+; Put the player back at the start, standing still.
+pub fn respawn() {
+    reg ent, status
+    global.get ent, player
+    call c.vec2_store(tbuf, Transform.position, 0.0, 0.0)
+    call c.f32_store(tbuf, Transform.rotation, 0.0)
+    call c.vec2_store(tbuf, Transform.scale, 1.0, 1.0)
+    call engine.world.set(ent, Transform.id, tbuf) -> status
+    call c.vec2_store(vbuf, Velocity.linear, 0.0, 0.0)
+    call engine.world.set(ent, Velocity.id, vbuf) -> status
+    global.set pos_x, 0.0
+    global.set pos_y, 0.0
+    ret
+}
+
+fn either(name: i64, nlen: i64, alt: i64, alen: i64) -> i32 {
+    reg a, b
+    call engine.input.key_down(name, nlen) -> a
+    call engine.input.key_down(alt, alen) -> b
+    i32.or a, a, b
+    ret a
+}
+
+pub fn update(dt: f32) {
+    reg ent, status, auto, r, l, u, d, dx, dy, len, px, py, vx, vy, f, tx, ty
+    global.get ent, player
+    call engine.world.get(ent, Transform.id, tbuf) -> status
+    br_if status, done                ; not alive yet (it comes alive after the frame it spawned in)
+    call c.vec2_load(tbuf, Transform.position) -> (px, py)
+    global.set pos_x, px
+    global.set pos_y, py
+
+    call either(key_d, key_d.len, key_right, key_right.len) -> r
+    call either(key_a, key_a.len, key_left, key_left.len) -> l
+    call either(key_w, key_w.len, key_up, key_up.len) -> u
+    call either(key_s, key_s.len, key_down, key_down.len) -> d
+    i32.sub r, r, l
+    i32.sub u, u, d
+    f32.convert_i32_s dx, r
+    f32.convert_i32_s dy, u
+
+    call game.autoplay() -> auto
+    br_ifz auto, steer
+    global.get f, has_target
+    br_ifz f, steer
+    global.get tx, target_x
+    global.get ty, target_y
+    f32.sub dx, tx, px
+    f32.sub dy, ty, py
+steer:
+    f32.mul len, dx, dx
+    f32.mul f, dy, dy
+    f32.add len, len, f
+    f32.sqrt len, len
+    f32.gt f, len, 0.0
+    br_ifz f, still
+    f32.div dx, dx, len
+    f32.div dy, dy, len
+still:
+    f32.mul vx, dx, c.PLAYER_SPEED
+    f32.mul vy, dy, c.PLAYER_SPEED
+    call c.vec2_store(vbuf, Velocity.linear, vx, vy)
+    call c.f32_store(vbuf, Velocity.angular, 0.0)
+    call engine.world.set(ent, Velocity.id, vbuf) -> status
+
+    ; stay inside the 640 x 480 arena
+    call c.clamp(px, -312.0, 312.0) -> px
+    call c.clamp(py, -232.0, 232.0) -> py
+    call c.vec2_store(tbuf, Transform.position, px, py)
+    call engine.world.set(ent, Transform.id, tbuf) -> status
+
+    f32.eq f, dx, 0.0
+    br_if f, done
+    call engine.world.get(ent, Sprite.id, sbuf) -> status
+    br_if status, done
+    f32.lt f, dx, 0.0
+    i32.store f, sbuf, Sprite.flip
+    call engine.world.set(ent, Sprite.id, sbuf) -> status
+done:
+    ret
+}

@@ -12,6 +12,22 @@ use efeengine_core::efevm::ValType::{F32, I32};
 use efeengine_core::efevm::*;
 use efeengine_core::prelude::*;
 
+/// Test shim: load one `.efmod` through `load_input`.
+trait LoadPackage {
+    fn load_package(&mut self, bytes: &[u8]) -> Result<ModuleId, ModError>;
+}
+
+impl LoadPackage for Engine {
+    fn load_package(&mut self, bytes: &[u8]) -> Result<ModuleId, ModError> {
+        match self.load_input(LoadInput::Package { label: "test.efmod", bytes }) {
+            Ok(l) => Ok(l.id()),
+            Err(efeengine_core::prelude::LoadError::Mod(e)) => Err(e),
+            Err(efeengine_core::prelude::LoadError::Script(e)) => Err(ModError::Script(e)),
+            Err(e) => panic!("unexpected load error: {e}"),
+        }
+    }
+}
+
 type Reports = Arc<Mutex<Vec<i64>>>;
 
 /// A headless engine with the namespaces `test` (`report(v: i64)`) and `game`, the struct

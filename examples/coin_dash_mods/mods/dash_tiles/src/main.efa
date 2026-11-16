@@ -1,0 +1,88 @@
+; dash_tiles: the ground. assets/map.txt is a 40 x 30 grid of characters (one line per row, top row
+; first): '.' and ',' are grass, '*' flowers, '+' the stone cross; tiles.png is a 5-frame atlas
+; (grass, grass, flowers, cross, shadow). One row of tiles is spawned per frame.
+use "common.efa" as c
+
+import dash_core.spawn_sprite
+import engine.mods.asset_read
+import engine.log.info
+import game.texture
+
+map_name db "map.txt"
+tiles_png db "tiles.png"
+msg_rows db "tilemap rows drawn: "
+msg_missing db "map.txt is missing: no ground"
+map resb 1300                     ; 30 rows of 40 characters and a newline
+global mut map_len: i64 = 0
+global mut tex: i32 = 0
+global mut row: i32 = 0           ; the next row to spawn
+
+export fn init() {
+    reg n, t
+    call engine.mods.asset_read(map_name, map_name.len, map, map.len) -> n
+    global.set map_len, n
+    call game.texture(tiles_png, tiles_png.len) -> t
+    global.set tex, t
+    i64.ge_s n, n, 0
+    br_if n, ok
+    call engine.log.info(msg_missing, msg_missing.len)
+ok:
+    ret
+}
+
+export fn frame(dt: f32) {
+    reg r, n, t, x, ch, frame, fx, fy, y, off, e, p, more
+    global.get n, map_len
+    br_ifz n, done                     ; no map (or empty)
+    global.get r, row
+    i32.lt_s more, r, 30
+    br_ifz more, finished
+    global.get t, tex
+    ; row r of the file starts at r * 41
+    i32.mul off, r, 41
+    const.i32 x, 0
+col:
+    i32.lt_s more, x, 40
+    br_ifz more, row_done
+    i32.add p, off, x
+    i64.extend_i32_u p, p
+    i64.load8_u ch, p, map
+    ; frame: '.' 0, ',' 1, '*' 2, '+' 3
+    const.i32 frame, 0
+    i64.eq more, ch, ','
+    br_ifz more, not_comma
+    const.i32 frame, 1
+not_comma:
+    i64.eq more, ch, '*'
+    br_ifz more, not_flower
+    const.i32 frame, 2
+not_flower:
+    i64.eq more, ch, '+'
+    br_ifz more, place
+    const.i32 frame, 3
+place:
+    ; centre of tile (x, 29 - r) in world units: (x + 0.5) * 16 - 320, (29 - r + 0.5) * 16 - 240
+    f32.convert_i32_s fx, x
+    f32.add fx, fx, 0.5
+    f32.mul fx, fx, 16.0
+    f32.sub fx, fx, 320.0
+    i32.sub y, 29, r
+    f32.convert_i32_s fy, y
+    f32.add fy, fy, 0.5
+    f32.mul fy, fy, 16.0
+    f32.sub fy, fy, 240.0
+    call dash_core.spawn_sprite(t, fx, fy, 16.0, -10, frame, 5) -> e
+    i32.add x, x, 1
+    jmp col
+row_done:
+    i32.add r, r, 1
+    global.set row, r
+    i32.eq more, r, 30
+    br_ifz more, done
+    i64.extend_i32_s e, r
+    call c.log_num(msg_rows, msg_rows.len, e)
+    jmp done
+finished:
+done:
+    ret
+}

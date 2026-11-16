@@ -15,7 +15,6 @@ pub mod headless;
 use crate::engine::config::EngineConfig;
 use crate::engine::error::EngineError;
 use crate::engine::input::{GamepadState, InputEvent};
-use crate::engine::renderer::SurfaceManager;
 
 /// Platform window. Deliberately not `Send`/`Sync`: native (SDL) windows and the
 /// event pump must stay on the main thread.
@@ -66,10 +65,6 @@ pub trait WindowManager{
     fn poll_gamepads(&mut self, state: &mut GamepadState);
 }
 pub struct GameWindowManager{
-    // NOTE: field order matters. Fields drop in declaration order, and the
-    // surface was created from `inner`'s raw window handle, so it must be
-    // dropped before the window it renders to.
-    pub surface_manager: Option<SurfaceManager>,
     inner: Box<dyn InnerWindow>,
     injected: VecDeque<InputEvent>,
     headless: bool,
@@ -87,7 +82,6 @@ impl GameWindowManager {
             { Box::new(sdl_backend::SdlWindowManager::new(&cfg.title, cfg.size)?) }
         };
         Ok(Self {
-            surface_manager: None, // Başlangıçta yok
             inner,
             injected: VecDeque::new(),
             headless: cfg.headless,

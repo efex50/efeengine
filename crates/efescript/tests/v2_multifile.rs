@@ -447,13 +447,13 @@ fn game_index() -> ApiIndex {
 fn index_structs_are_copied_with_their_owner() {
     let ix = game_index();
     let text = "export struct Own {\n    a: i32\n}\nprovide mv(t: &Transform, o: &Own), \"Move.\"\nfn mv(t: i64, o: i64) {\n    ret\n}\n";
-    let m = assemble_with(text, "t.efa", &AsmOptions { api: Some(&ix) }).unwrap();
+    let m = assemble_with(text, "t.efa", &AsmOptions { api: Some(&ix), ..Default::default() }).unwrap();
     let iface = m.data().interface.as_ref().unwrap();
     let names: Vec<(&str, &str)> = iface.structs.iter().map(|s| (s.name.as_str(), s.owner.as_str())).collect();
     assert_eq!(names, vec![("Own", ""), ("Transform", "engine")]);
     assert_eq!(iface.struct_desc("Transform").unwrap().component, Some(3));
     // A local struct may not shadow an index struct.
-    let d = assemble_with("struct Transform {\n    a: u8\n}\n", "t.efa", &AsmOptions { api: Some(&ix) }).unwrap_err().0;
+    let d = assemble_with("struct Transform {\n    a: u8\n}\n", "t.efa", &AsmOptions { api: Some(&ix), ..Default::default() }).unwrap_err().0;
     assert!(d[0].message.contains("same name as a struct of the API index"));
 }
 

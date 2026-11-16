@@ -1,0 +1,25 @@
+[package]
+name = "coin_dash_mods"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "native"
+path = "src/lib.rs"
+
+
+[package.metadata.vcpkg]
+git = "https://github.com/microsoft/vcpkg"
+rev = "4c1db68"
+dependencies = ["sdl3"]
+
+
+[dependencies]
+efeengine-core = { path = "../../crates/core" }
+
+[dev-dependencies]
+# the tests pack the mod folders into .efmod files (the writer is behind this feature)
+efemod = { path = "../../crates/efemod", features = ["write"] }

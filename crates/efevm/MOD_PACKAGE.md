@@ -1,6 +1,7 @@
 # Mod packages (`.efmod`), format version 1
 
 Status: implemented (E8), 2026-11-16 (container changed from ZIP to 7z).
+How the engine loads, reloads and caches mods: [`docs/MOD_LOADING.md`](../../docs/MOD_LOADING.md).
 Design and rationale: `crates/efescript/docs/e8-design.md`. Roadmap: E8.6–E8.11 in
 `crates/efescript/ROADMAP.md`.
 
@@ -135,6 +136,7 @@ omitted.
 | `permissions.namespaces` | array of strings | no | at most 64 namespace prefixes (`is_namespace`), unique. These are **requests**: the game's policy decides what is granted |
 | `permissions.budget` | integer | no | requested VM units per frame, `1 ..= 10^12`; default: the engine default (1 000 000) |
 | `permissions.memory_pages` | integer | no | requested maximum memory in 64 KiB pages, `1 ..= 65536`; default: the engine default (1024) |
+| `meta` | object | no | free-form data for the game (tags, display data, limits). The engine stores it and never reads it. Must be a JSON object; at most 64 KiB of canonical JSON (no spaces, keys in the order written); nesting depth at most 16 (the object itself is depth 1). Written last |
 
 Rules checked against the module by the reader (`PackageError::Manifest`):
 - every namespace the module imports must match a requested prefix (the prefix rule of
@@ -185,15 +187,30 @@ memory_pages = 64           # optional
 
 [build]                     # optional, not copied into the package
 entry = "src/main.efa"      # default "src/main.efa"
-api = ["../game.efapi"]     # default --api inputs, relative to this file; `.efapi` or `.efmod`
+api = ["game.efapi"]        # default --api inputs (`.efapi` or `.efmod`), relative to this file
 assets = "assets"           # default "assets"; every file below it becomes `assets/<path>`
+
+[meta]                      # optional, free-form; becomes the manifest's `meta` object
+tags = ["items", "shop"]
+max_stack = 99
 ```
 
 `[mod]` maps to the top-level keys of `manifest.json`, `[dependencies]` to the
-`dependencies` array (sorted by id), `[permissions]` to `permissions`; the validation rules
-are those of section 3. `[build]` paths must stay inside the mod folder except `api` entries.
+`dependencies` array (sorted by id), `[permissions]` to `permissions`, `[meta]` to `meta`; the
+validation rules are those of section 3. `[meta]` values convert as follows: string → string,
+integer and finite float → number, bool → bool, datetime → its TOML text as a string, array →
+array, table → object (keys in TOML order). NaN and infinities are refused.
+
+`[build]` paths (`entry`, `assets`, `api`) must stay inside the mod folder: an absolute path or
+a `..` component is an error. `efescript pack` reads the `api` files and merges them with
+`--api`. The engine ignores `[build] api` at runtime (it checks the paths, then compiles the
+folder against the index the game supplies), so a mod folder loaded by the engine needs no
+index file. The engine builds folder mods with these limits: 32 MiB of files read in total,
+1024 files, `use` depth 64, nesting 128.
+
 Asset files are taken in sorted order; names must satisfy the entry-name rules (2); symbolic
-links are not followed.
+links are not followed. Asset names (relative to `assets/`) may not be `manifest.json`,
+`module.efvm`, `engine` or anything under `engine/`; the build refuses them.
 
 ## 5. Versions and ranges
 

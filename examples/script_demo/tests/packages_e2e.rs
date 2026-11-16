@@ -1,6 +1,6 @@
-//! E8 end to end: two real mod folders (`mods/inventory`, `mods/shop`) packed with
-//! `efescript::pack::pack_dir` against the game's index (and, for the shop, the inventory
-//! package's index too), loaded as `.efmod` packages and run headless.
+//! E8/E10 end to end: two real mod folders (`mods/inventory`, `mods/shop`) loaded as folders
+//! with `Engine::load` (compiled against the engine's registry index, which holds the
+//! inventory's provides once it is loaded) and run headless.
 //!
 //! Grants: besides `engine.log` (the import in the NON-root file `items.efa`), the engine
 //! needs `engine.events` for any package that uses `engine.events.*`, and the shop reports
@@ -9,19 +9,30 @@
 
 use std::path::{Path, PathBuf};
 
-use efeengine_core::efemod::{Package, ReadLimits};
-use efeengine_core::efevm::ApiIndex;
+use efeengine_core::efa::asm::FsSource;
+use efeengine_core::efa::mod_folder::{BuildLimits, build_mod, list_assets, read_mod_toml};
 use efeengine_core::prelude::*;
-use efescript::pack::{Packed, pack_dir, read_api_input};
 use script_demo::{Score, setup};
+
+fn mod_err(e: efeengine_core::prelude::LoadError) -> ModError {
+    match e {
+        efeengine_core::prelude::LoadError::Mod(m) => m,
+        other => panic!("expected a mod error, got: {other}"),
+    }
+}
 
 fn mods() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("mods")
 }
 
 fn engine() -> (Engine, Score) {
-    let mut e = Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, ..EngineConfig::headless() })
-        .expect("headless engine");
+    // never the platform cache directory
+    let cfg = EngineConfig {
+        fixed_dt: 1.0 / 60.0,
+        script_cache: CacheConfig { disk: CacheDir::Off, ..Default::default() },
+        ..EngineConfig::headless()
+    };
+    let mut e = Engine::with_config(cfg).expect("headless engine");
     let score = setup(&mut e);
     (e, score)
 }
@@ -52,49 +63,40 @@ fn temp_dir(name: &str) -> PathBuf {
     d
 }
 
-/// Pack both mods: inventory against the game index, shop against the game index and the
-/// written inventory `.efmod` (two `--api` inputs).
-fn build(game: &ApiIndex) -> (Packed, Packed) {
-    let inv = pack_dir(&mods().join("inventory"), &[game]).unwrap_or_else(|e| panic!("inventory: {e}"));
-    let dir = temp_dir("inv");
-    let file = dir.join(&inv.file_name);
-    std::fs::write(&file, &inv.bytes).unwrap();
-    let inv_index = read_api_input(&file).expect("inventory index from the .efmod");
-    let _ = std::fs::remove_dir_all(&dir);
-    let shop = pack_dir(&mods().join("shop"), &[game, &inv_index]).unwrap_or_else(|e| panic!("shop: {e}"));
-    (inv, shop)
-}
-
-fn loaded() -> (Engine, Score, ModuleId, ModuleId, Packed, Packed) {
+fn loaded() -> (Engine, Score, ModuleId, ModuleId) {
     let (mut e, score) = engine();
-    let game = e.api_index();
-    let (inv, shop) = build(&game);
     e.set_mod_policy(policy);
-    let i = e.load_package(&inv.bytes).expect("load inventory");
-    let s = e.load_package(&shop.bytes).expect("load shop");
-    (e, score, i, s, inv, shop)
+    let i = e.load(mods().join("inventory")).unwrap_or_else(|err| panic!("inventory: {err}")).id();
+    let s = e.load(mods().join("shop")).unwrap_or_else(|err| panic!("shop: {err}")).id();
+    (e, score, i, s)
 }
 
 #[test]
 fn a_use_makes_a_multi_file_module_with_qualified_names() {
     let (e, _) = engine();
-    let (inv, shop) = build(&e.api_index());
-    let data = inv.module.data();
+    let dir = mods().join("inventory");
+    let assets = list_assets(&dir).expect("assets");
+    let built = build_mod(&FsSource::new(&dir), Some(&e.api_index()), &assets, &BuildLimits::default()).unwrap_or_else(|err| panic!("inventory: {err}"));
+    let data = built.module.data();
     assert!(data.lines.files.len() > 1, "{:?}", data.lines.files);
     assert!(data.lines.files.iter().any(|f| f.ends_with("items.efa")), "{:?}", data.lines.files);
     assert!(data.names.funcs.iter().any(|(_, n)| n == "items.give"), "{:?}", data.names.funcs);
-    assert_eq!(inv.manifest.id, "inventory");
-    assert_eq!(inv.file_name, "inventory-1.0.0.efmod");
+    assert_eq!(built.manifest.id, "inventory");
     // the asset travels in the package
-    let pkg = Package::read(&inv.bytes, &ReadLimits::default()).unwrap();
-    assert!(pkg.asset("items.json").is_some_and(|a| a.starts_with(b"{")));
+    assert!(built.assets.get("items.json").is_some_and(|a| a.starts_with(b"{")));
     // the shop depends on inventory
+    let shop = read_mod_toml(&std::fs::read_to_string(mods().join("shop/mod.toml")).unwrap()).unwrap();
     assert_eq!(shop.manifest.dependencies.len(), 1);
+    // the loaded folder keeps its assets in the package info
+    let (mut e2, _) = engine();
+    e2.set_mod_policy(policy);
+    let id = e2.load(&dir).unwrap().id();
+    assert!(e2.package_asset(id, "items.json").is_some_and(|a| a.starts_with(b"{")));
 }
 
 #[test]
 fn the_grant_covers_the_whole_package_and_the_mods_run() {
-    let (mut e, score, i, s, _, _) = loaded();
+    let (mut e, score, i, s) = loaded();
     // b: the grant for inventory holds engine.log (import lives in items.efa) and not `game`
     let g = &e.package(i).unwrap().grant;
     assert!(g.namespaces.iter().any(|n| n == "engine.log"), "{g:?}");
@@ -123,7 +125,7 @@ fn the_grant_covers_the_whole_package_and_the_mods_run() {
 
 #[test]
 fn unloading_a_needed_mod_is_refused_and_the_cascade_removes_both() {
-    let (mut e, _, i, s, _, _) = loaded();
+    let (mut e, _, i, s) = loaded();
     let base = {
         let (fresh, _) = engine();
         fresh.api_index()
@@ -150,11 +152,10 @@ fn unloading_a_needed_mod_is_refused_and_the_cascade_removes_both() {
 
 #[test]
 fn the_default_policy_refuses_the_whole_package_over_the_import_in_items_efa() {
-    let (e, _) = engine();
-    let (inv, _) = build(&e.api_index());
+    let inv = mods().join("inventory");
     // f: a fresh engine, no set_mod_policy
     let (mut fresh, _) = engine();
-    match fresh.load_package(&inv.bytes).unwrap_err() {
+    match mod_err(fresh.load(&inv).unwrap_err()) {
         ModError::NotGranted { id, namespaces } => {
             assert_eq!(id, "inventory");
             assert!(namespaces.iter().any(|n| n == "engine.log"), "{namespaces:?}");
@@ -164,7 +165,7 @@ fn the_default_policy_refuses_the_whole_package_over_the_import_in_items_efa() {
     // a policy that grants engine.log only still refuses: engine.events is imported too
     let (mut half, _) = engine();
     half.set_mod_policy(|_: &ModRequest<'_>| Ok(grant(&["engine.log"])));
-    match half.load_package(&inv.bytes).unwrap_err() {
+    match mod_err(half.load(&inv).unwrap_err()) {
         ModError::NotGranted { namespaces, .. } => assert_eq!(namespaces, ["engine.events"]),
         other => panic!("{other:?}"),
     }
@@ -177,10 +178,10 @@ fn a_mod_id_equal_to_the_game_namespace_is_refused() {
     std::fs::write(dir.join("mod.toml"), "[mod]\nid = \"game\"\nversion = \"1.0.0\"\n").unwrap();
     std::fs::write(dir.join("src/main.efa"), "export fn frame(dt: f32) {\n    ret\n}\n").unwrap();
     let (mut e, _) = engine();
-    let p = pack_dir(&dir, &[&e.api_index()]).unwrap_or_else(|err| panic!("{err}"));
-    let _ = std::fs::remove_dir_all(&dir);
     e.set_mod_policy(policy);
-    match e.load_package(&p.bytes).unwrap_err() {
+    let r = e.load(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    match mod_err(r.unwrap_err()) {
         ModError::IdClash { id, namespace, owner } => {
             assert_eq!((id.as_str(), namespace.as_str(), owner.as_str()), ("game", "game", script_demo::GAME))
         }

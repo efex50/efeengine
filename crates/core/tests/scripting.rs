@@ -481,7 +481,7 @@ fn hot_reload_swaps_the_module_and_resets_script_state() {
     let path = dir.join("hot.efvm");
     let mut e = engine();
     std::fs::write(&path, mover(&e, 1.0).encode()).unwrap();
-    let id = e.load_module_file(&path).unwrap();
+    let id = e.load(&path).unwrap().id();
     assert_eq!(e.scripting().module_id("hot"), Some(id));
     e.watch_module(id, &path).unwrap();
     let ent = e.world_mut().spawn((Transform::default(), Script::new(id, "update")));

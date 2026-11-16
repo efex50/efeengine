@@ -1,0 +1,17 @@
+[mod]
+id = "dash_core"
+version = "1.0.0"
+name = "Dash Core"
+description = "The player, the score and the rounds. Provides the functions the other dash mods call."
+game = "coin_dash_mods"
+
+# What the mod asks for; the game's policy decides what it gets (the grant covers every file of
+# the package). The game gives dash_core all of these.
+[permissions]
+namespaces = ["engine.world", "engine.input", "engine.log", "engine.time", "engine.events", "game"]
+
+[meta]
+category = "core"
+start_coins = 5
+coins_per_round = 3
+max_coins = 30

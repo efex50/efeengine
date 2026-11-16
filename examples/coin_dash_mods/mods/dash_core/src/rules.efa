@@ -1,0 +1,129 @@
+; rules.efa (dash_core): score, rounds and hits.
+;
+; The coins and enemies live in other mods and call `pickup` / `hit` (provided in main.efa).
+; Rounds are announced with the event `dash_core.round_started`, which dash_coins reads.
+use "common.efa" as c
+use "player.efa" as player
+
+import engine.world.despawn
+import engine.events.send
+import engine.log.info
+import game.score_add
+import game.score
+import game.score_reset
+
+export struct Round, "A round begins." {
+    n: i32
+    coins: i32
+}
+
+provide event round_started(&Round), "A round begins: its number and how many coins it has."
+import event dash_core.round_started(&Round)
+
+s_score db "score "
+s_round db "round "
+s_hit db "hit by enemy, score reset, lost "
+s_coins db "round coins "
+
+global mut round: i32 = 1
+global mut coins_left: i32 = 0
+global mut invuln: f32 = 0.0
+roundbuf resb Round.size
+
+; 5 coins in round 1, 3 more each round, at most 30.
+fn coins_in_round(r: i32) -> i32 {
+    reg n, small
+    i32.sub n, r, 1
+    i32.mul n, n, 3
+    i32.add n, n, 5
+    i32.lt_s small, n, 30
+    br_if small, ok
+    const.i32 n, 30
+ok:
+    ret n
+}
+
+; Send the event for round `r` and remember how many coins it needs.
+fn announce(r: i32) {
+    reg n
+    call coins_in_round(r) -> n
+    global.set coins_left, n
+    i32.store r, roundbuf, Round.n
+    i32.store n, roundbuf, Round.coins
+    call engine.events.send(dash_core.round_started.id, roundbuf)
+    ret
+}
+
+pub fn start() {
+    reg r
+    global.get r, round
+    call announce(r)
+    ret
+}
+
+pub fn round_number() -> i32 {
+    reg r
+    global.get r, round
+    ret r
+}
+
+pub fn score() -> i64 {
+    reg v
+    call game.score() -> v
+    ret v
+}
+
+pub fn tick(dt: f32) {
+    reg inv
+    global.get inv, invuln
+    f32.sub inv, inv, dt
+    f32.max inv, inv, 0.0
+    global.set invuln, inv
+    ret
+}
+
+pub fn pickup(e: i64, points: i32) -> i64 {
+    reg status, total, left, r, p64
+    call engine.world.despawn(e) -> status
+    i64.extend_i32_s p64, points
+    call game.score_add(p64) -> total
+    call c.fmt_begin()
+    call c.fmt_str(s_score, s_score.len)
+    call c.fmt_num(total)
+    call c.fmt_log()
+    global.get left, coins_left
+    i32.sub left, left, 1
+    global.set coins_left, left
+    br_if left, out
+    ; the last coin: next round
+    global.get r, round
+    i32.add r, r, 1
+    global.set round, r
+    call c.fmt_begin()
+    call c.fmt_str(s_round, s_round.len)
+    i64.extend_i32_s p64, r
+    call c.fmt_num(p64)
+    call c.fmt_log()
+    call announce(r)
+out:
+    ret total
+}
+
+pub fn hit() -> i64 {
+    reg inv, lost, immune
+    global.get inv, invuln
+    f32.gt immune, inv, 0.0
+    br_ifz immune, go
+    const.i64 lost, -1
+    ret lost
+go:
+    call game.score() -> lost
+    call game.score_reset()
+    global.set invuln, c.INVULN
+    call player.respawn()
+    call c.fmt_begin()
+    call c.fmt_str(s_hit, s_hit.len)
+    call c.fmt_num(lost)
+    call c.fmt_log()
+    ret lost
+}

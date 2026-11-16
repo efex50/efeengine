@@ -51,12 +51,18 @@ pub(crate) fn register_engine_api(r: &mut HostRegistry<ScriptHost>) -> Result<()
     }
     // Version 2: `export` is gone. A mod's functions are declared in its module (section 13);
     // this namespace is how a mod reads the assets of its own package.
-    r.define_namespace("engine.mods", 2, OWNER, "Mod support. A mod declares what it provides in its module (section 13), so no function is needed to share one; `asset_len` and `asset_read` read the assets of the calling mod's own package.")?;
+    r.define_namespace("engine.mods", 2, OWNER, "Mod support. A mod declares what it provides in its module (section 13), so no function is needed to share one; `asset_len` and `asset_read` read the assets of the calling mod's own package, `meta_f64` a number of its `[meta]` table.")?;
     // Version 2: events are typed. A module lists the events it uses in its events section and
     // passes their ids; the payload is the registered struct (the string-named, raw-bytes
     // `send`/`count`/`read` of version 1 are gone).
     r.define_namespace("engine.events", 2, OWNER, "Typed script events. A module lists the events it sends or reads in its events section (an event's id is its index there); `send`, `count` and `read` take that id, and the payload is the event's registered struct. Events sent in one frame are readable during the next.")?;
+    r.define_namespace("engine.script", 1, OWNER, "Per-entity scripts. The `Script` component is Rust-only, so this is how a script attaches one of its own entry functions to an entity.")?;
+    r.define_namespace("engine.random", 1, OWNER, "Pseudo-random numbers (xorshift64*), one stream shared by all scripts. Not for security. The stream starts the same every run; `seed` changes it.")?;
+    r.define_namespace("engine.math", 1, OWNER, "Math the instruction set lacks (it has sqrt, abs, floor and friends, but no trigonometry).")?;
     world_api(r)?;
+    script_api(r)?;
+    random_api(r)?;
+    math_api(r)?;
     input_api(r)?;
     time_api(r)?;
     events_api(r)?;
@@ -265,6 +271,97 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             let name = read_name(c, a.str(0)?)?;
             let id = c.host().types.by_name(&name).filter(|t| t.is_component()).map_or(-1, |t| t.id() as i32);
             res.set_i32(0, id)?;
+            Ok(HostOk::Continue)
+        },
+    )?;
+    Ok(())
+}
+
+fn script_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
+    const NS: &str = "engine.script";
+    r.register(
+        HostFn::new(NS, "attach")
+            .doc("Queue attaching a `Script` to `entity`: every frame the engine calls the calling module's exported function `entry(entity: i64, dt: f32, state: i64) -> i64` for it, the result being the next `state` (0 at first). Applied after the stage, replaces an existing `Script`. Status: 0 ok, 1 stale entity, 2 the module has no export `entry` of that signature, 3 no module is running.")
+            .param("entity", T::Entity)
+            .param("entry", T::Str)
+            .result("status", T::I32),
+        |c, a, res| {
+            let (bits, name) = (a.entity(0)?, read_name(c, a.str(1)?)?);
+            let h = c.host();
+            let Some(e) = alive(&h.world, bits) else { return status(res, STALE) };
+            let Some(id) = h.current else { return status(res, 3) };
+            let ok = h.modules.get(id.0 as usize).is_some_and(|m| {
+                m.module.export_func(&name).and_then(|f| m.module.func_type(f)).is_some_and(|t| {
+                    *t == efevm::FuncType::new([efevm::ValType::I64, efevm::ValType::F32, efevm::ValType::I64], [efevm::ValType::I64])
+                })
+            });
+            if !ok {
+                return status(res, 2);
+            }
+            h.commands.insert(e, super::Script::new(id, name));
+            status(res, OK)
+        },
+    )?;
+    Ok(())
+}
+
+fn random_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
+    const NS: &str = "engine.random";
+    r.register(
+        HostFn::new(NS, "f32").doc("A pseudo-random number in `0.0 <= x < 1.0`.").result("x", T::F32),
+        |c, _a, res| {
+            let bits = c.host().next_random() >> 40; // 24 bits: exact in an f32
+            res.set_f32(0, bits as f32 / (1u32 << 24) as f32)?;
+            Ok(HostOk::Continue)
+        },
+    )?;
+    r.register(
+        HostFn::new(NS, "range")
+            .doc("A pseudo-random integer in `0 <= x < n` (0 when `n <= 0`).")
+            .param("n", T::I64)
+            .result("x", T::I64),
+        |c, a, res| {
+            let n = a.i64(0)?;
+            let x = if n <= 0 { 0 } else { (c.host().next_random() % n as u64) as i64 };
+            res.set_i64(0, x)?;
+            Ok(HostOk::Continue)
+        },
+    )?;
+    r.register(
+        HostFn::new(NS, "seed").doc("Restart the stream from `seed` (the same seed gives the same numbers).").param("seed", T::I64),
+        |c, a, _res| {
+            let seed = a.i64(0)? as u64;
+            c.host().seed_random(seed);
+            Ok(HostOk::Continue)
+        },
+    )?;
+    Ok(())
+}
+
+fn math_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
+    const NS: &str = "engine.math";
+    r.register(
+        HostFn::new(NS, "sin").doc("Sine of `x` (radians).").param("x", T::F32).result("y", T::F32),
+        |_c, a, res| {
+            res.set_f32(0, a.f32(0)?.sin())?;
+            Ok(HostOk::Continue)
+        },
+    )?;
+    r.register(
+        HostFn::new(NS, "cos").doc("Cosine of `x` (radians).").param("x", T::F32).result("y", T::F32),
+        |_c, a, res| {
+            res.set_f32(0, a.f32(0)?.cos())?;
+            Ok(HostOk::Continue)
+        },
+    )?;
+    r.register(
+        HostFn::new(NS, "atan2")
+            .doc("The angle in radians of the vector (`x`, `y`), in `-pi ..= pi`.")
+            .param("y", T::F32)
+            .param("x", T::F32)
+            .result("angle", T::F32),
+        |_c, a, res| {
+            res.set_f32(0, a.f32(0)?.atan2(a.f32(1)?))?;
             Ok(HostOk::Continue)
         },
     )?;
@@ -506,6 +603,30 @@ fn mods_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             let path = read_name(c, a.str(0)?)?;
             let len = own_asset(c.host(), &path).map_or(-1, |d| d.len() as i64);
             res.set_i64(0, len)?;
+            Ok(HostOk::Continue)
+        },
+    )?;
+    r.register(
+        HostFn::new(NS, "meta_f64")
+            .doc("A number from the `[meta]` table of the calling mod's own manifest: `key` is a dotted path (`difficulty.speed`); returns `default` if the caller is not a package, the key is missing, or the value is not a number (a boolean is 1 or 0).")
+            .param("key", T::Str)
+            .param("default", T::F64)
+            .result("value", T::F64),
+        |c, a, res| {
+            let key = read_name(c, a.str(0)?)?;
+            let default = a.f64(1)?;
+            let h = c.host();
+            let meta = h.current.and_then(|id| h.modules.get(id.0 as usize)).and_then(|m| m.package.as_ref()).and_then(|p| p.manifest.meta.as_ref());
+            let mut v = meta;
+            for part in key.split('.') {
+                v = v.and_then(|v| v.get(part));
+            }
+            let value = match v {
+                Some(efevm::api::json::Value::Num(n)) => n.parse::<f64>().unwrap_or(default),
+                Some(efevm::api::json::Value::Bool(b)) => f64::from(*b),
+                _ => default,
+            };
+            res.set_f64(0, value)?;
             Ok(HostOk::Continue)
         },
     )?;

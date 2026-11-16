@@ -1,0 +1,123 @@
+; player.efa - movement of the player from the keyboard (WASD / arrows), or from the bot.
+;
+; player_update(entity, dt, state) -> state is the `Script` entry Rust attaches to the player.
+; It sets the player's Velocity (the engine's velocity system moves it), keeps it inside the
+; playfield and mirrors the sprite when walking left.
+use "common.efa" as c
+
+import engine.input.key_down
+import engine.world.get
+import engine.world.set
+import engine.world.query
+import game.autoplay
+
+key_w db "W"
+key_a db "A"
+key_s db "S"
+key_d db "D"
+key_up db "Up"
+key_left db "Left"
+key_down db "Down"
+key_right db "Right"
+
+tbuf resb Transform.size
+vbuf resb Velocity.size
+sbuf resb Sprite.size
+coins resb 256                    ; entity handles of the coins (8 bytes each)
+
+; 1 while `name` or `alt` is held.
+fn either(name: i64, nlen: i64, alt: i64, alen: i64) -> i32 {
+    reg a, b
+    call engine.input.key_down(name, nlen) -> a
+    call engine.input.key_down(alt, alen) -> b
+    i32.or a, a, b
+    ret a
+}
+
+; Direction to the nearest coin: (dx, dy), (0, 0) when there is none.
+fn nearest_coin(px: f32, py: f32) -> (f32, f32) {
+    reg n, i, ent, status, x, y, dx, dy, d2, best, bx, by, less
+    call engine.world.query(Coin.id, coins, 32) -> n
+    const.f32 best, 1e30
+    const.f32 bx, 0.0
+    const.f32 by, 0.0
+    const.i64 i, 0
+loop:
+    i64.lt_s less, i, n
+    br_ifz less, done
+    i64.shl ent, i, 3
+    i64.load ent, ent, coins          ; the handle at coins[i]
+    call engine.world.get(ent, Transform.id, tbuf) -> status
+    br_if status, next                ; gone already
+    call c.vec2_load(tbuf, Transform.position) -> (x, y)
+    f32.sub dx, x, px
+    f32.sub dy, y, py
+    f32.mul d2, dx, dx
+    f32.mul less, dy, dy
+    f32.add d2, d2, less
+    f32.lt less, d2, best
+    br_ifz less, next
+    mov best, d2
+    mov bx, dx
+    mov by, dy
+next:
+    i64.add i, i, 1
+    jmp loop
+done:
+    ret (bx, by)
+}
+
+export fn player_update(entity: i64, dt: f32, state: i64) -> i64 {
+    reg status, auto, r, l, u, d, dx, dy, len, px, py, vx, vy, flip, f
+    call engine.world.get(entity, Transform.id, tbuf) -> status
+    br_if status, done
+    call c.vec2_load(tbuf, Transform.position) -> (px, py)
+
+    ; keyboard: right - left, up - down
+    call either(key_d, key_d.len, key_right, key_right.len) -> r
+    call either(key_a, key_a.len, key_left, key_left.len) -> l
+    call either(key_w, key_w.len, key_up, key_up.len) -> u
+    call either(key_s, key_s.len, key_down, key_down.len) -> d
+    i32.sub r, r, l
+    i32.sub u, u, d
+    f32.convert_i32_s dx, r
+    f32.convert_i32_s dy, u
+
+    call game.autoplay() -> auto
+    br_ifz auto, steer
+    call nearest_coin(px, py) -> (dx, dy)
+steer:
+    ; normalise (diagonals are not faster) and scale to the speed
+    f32.mul len, dx, dx
+    f32.mul f, dy, dy
+    f32.add len, len, f
+    f32.sqrt len, len
+    f32.gt f, len, 0.0
+    br_ifz f, still
+    f32.div dx, dx, len
+    f32.div dy, dy, len
+still:
+    f32.mul vx, dx, c.PLAYER_SPEED
+    f32.mul vy, dy, c.PLAYER_SPEED
+    call c.vec2_store(vbuf, Velocity.linear, vx, vy)
+    f32.store 0.0, vbuf, Velocity.angular
+    call engine.world.set(entity, Velocity.id, vbuf) -> status
+
+    ; stay inside the playfield
+    call c.clamp(px, -312.0, 312.0) -> px
+    call c.clamp(py, -232.0, 232.0) -> py
+    call c.vec2_store(tbuf, Transform.position, px, py)
+    call engine.world.set(entity, Transform.id, tbuf) -> status
+
+    ; face the walking direction
+    f32.eq f, dx, 0.0
+    br_if f, done
+    call engine.world.get(entity, Sprite.id, sbuf) -> status
+    br_if status, done
+    f32.lt f, dx, 0.0
+    i32.store f, sbuf, Sprite.flip     ; 1 = FLIP_X
+    call engine.world.set(entity, Sprite.id, sbuf) -> status
+done:
+    i64.add state, state, 1
+    ret state
+}

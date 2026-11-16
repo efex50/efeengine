@@ -153,7 +153,7 @@ fn v2_run(args: &[String]) -> ! {
     let a = v2_args(args, Allow { budget: true, api: true, fs_root: true, ..Allow::default() });
     let Some(file) = a.file else { v2_fail("error: run needs a file (.efa or .efvm)") };
     let index = read_indices(&a.api);
-    let prog = run_v2::load_path_with(&file, &AsmOptions { api: index.as_ref() }).unwrap_or_else(|e| v2_fail(e));
+    let prog = run_v2::load_path_with(&file, &AsmOptions { api: index.as_ref(), ..Default::default() }).unwrap_or_else(|e| v2_fail(e));
     let opts = StdOptions { fs_root: a.fs_root.map(Into::into) };
     let mut env = StdEnv::with_stdin(StdHost);
     let outcome = run_v2::run_with(&prog, &mut env, a.budget, &opts);
@@ -174,7 +174,7 @@ fn v2_debug(args: &[String]) -> ! {
     let a = v2_args(args, Allow { api: true, fs_root: true, ..Allow::default() });
     let Some(file) = a.file else { v2_fail("error: debug needs a file (.efa or .efvm)") };
     let index = read_indices(&a.api);
-    let prog = run_v2::load_path_with(&file, &AsmOptions { api: index.as_ref() }).unwrap_or_else(|e| v2_fail(e));
+    let prog = run_v2::load_path_with(&file, &AsmOptions { api: index.as_ref(), ..Default::default() }).unwrap_or_else(|e| v2_fail(e));
     let opts = StdOptions { fs_root: a.fs_root.map(Into::into) };
     let reg = std_registry::<StdHost>(&opts);
     // Show host calls by their index names: the given index, else the std one.
@@ -199,7 +199,7 @@ fn v2_build(args: &[String]) -> ! {
     let Some(file) = a.file else { v2_fail("error: build needs a .efa file") };
     let Some(out) = a.out else { v2_fail("error: build needs -o <out.efvm>") };
     let index = read_indices(&a.api);
-    let opts = AsmOptions { api: index.as_ref() };
+    let opts = AsmOptions { api: index.as_ref(), ..Default::default() };
     let module = if file.ends_with(".efa") {
         // Follow `use` below the root file's directory; more roots must lie there too.
         let (src, root) = efescript::asm::FsSource::for_file(&file);

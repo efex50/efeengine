@@ -20,8 +20,13 @@ pub struct Permissions {
     pub memory_pages: Option<u32>,
 }
 
+/// Largest canonical JSON text of [`Manifest::meta`], in bytes.
+pub const MAX_META_BYTES: usize = 64 * 1024;
+/// Deepest nesting of [`Manifest::meta`]; the object itself is depth 1.
+pub const MAX_META_DEPTH: usize = 16;
+
 /// The parsed and validated `manifest.json`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Manifest {
     pub id: String,
     pub version: Version,
@@ -33,6 +38,9 @@ pub struct Manifest {
     pub api_version: u32,
     pub dependencies: Vec<Dependency>,
     pub permissions: Permissions,
+    /// Free-form package metadata (`"meta"` in `manifest.json`, `[meta]` in `mod.toml`).
+    /// Must be a JSON object within [`MAX_META_BYTES`] and [`MAX_META_DEPTH`].
+    pub meta: Option<Value>,
 }
 
 const MAX_DEPS: usize = 64;
@@ -103,6 +111,7 @@ impl Manifest {
             api_version: 1,
             dependencies: Vec::new(),
             permissions: Permissions::default(),
+            meta: None,
         }
     }
 
@@ -161,6 +170,9 @@ impl Manifest {
             if !seen.insert(d.id.as_str()) {
                 return err(format!("dependencies[{i}].id: `{}` is listed twice", d.id));
             }
+        }
+        if let Some(meta) = &self.meta {
+            check_meta(meta)?;
         }
         let p = &self.permissions;
         if p.namespaces.len() > MAX_NAMESPACES {
@@ -293,6 +305,7 @@ impl Manifest {
                 m.permissions.memory_pages = Some(n as u32);
             }
         }
+        m.meta = root.get("meta").cloned();
         m.validate()?;
         Ok(m)
     }
@@ -350,7 +363,75 @@ impl Manifest {
         if !pf.is_empty() {
             kv("permissions", format!("{{\n{}\n  }}", pf.join(",\n")));
         }
+        if let Some(meta) = &self.meta {
+            kv("meta", canonical(meta));
+        }
         format!("{{\n{}\n}}\n", fields.join(",\n"))
+    }
+}
+
+/// The rules of `meta`: an object, nesting at most [`MAX_META_DEPTH`], canonical text at
+/// most [`MAX_META_BYTES`].
+fn check_meta(meta: &Value) -> Result<(), PackageError> {
+    if meta.entries().is_none() {
+        return err("meta: must be a JSON object");
+    }
+    let depth = depth(meta);
+    if depth > MAX_META_DEPTH {
+        return err(format!("meta: nesting depth {depth} is more than {MAX_META_DEPTH}"));
+    }
+    let n = canonical(meta).len();
+    if n > MAX_META_BYTES {
+        return err(format!("meta: {n} bytes of JSON (at most {MAX_META_BYTES})"));
+    }
+    Ok(())
+}
+
+/// Nesting depth: a scalar is 0, an array or object is 1 + its deepest element.
+fn depth(v: &Value) -> usize {
+    match v {
+        Value::Arr(a) => 1 + a.iter().map(depth).max().unwrap_or(0),
+        Value::Obj(o) => 1 + o.iter().map(|(_, x)| depth(x)).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Canonical JSON text of `v`: no whitespace, object keys in stored order, strings as
+/// [`quote`] writes them. Numbers are written as stored (they are already valid JSON).
+pub(crate) fn canonical(v: &Value) -> String {
+    let mut out = String::new();
+    write_canonical(v, &mut out);
+    out
+}
+
+fn write_canonical(v: &Value, out: &mut String) {
+    match v {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Num(n) => out.push_str(n),
+        Value::Str(s) => out.push_str(&quote(s)),
+        Value::Arr(a) => {
+            out.push('[');
+            for (i, x) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical(x, out);
+            }
+            out.push(']');
+        }
+        Value::Obj(o) => {
+            out.push('{');
+            for (i, (k, x)) in o.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&quote(k));
+                out.push(':');
+                write_canonical(x, out);
+            }
+            out.push('}');
+        }
     }
 }
 

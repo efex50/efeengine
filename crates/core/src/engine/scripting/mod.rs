@@ -12,23 +12,30 @@
 //! - `system.rs`: the [`Script`] component and the script system.
 
 mod api_engine;
+mod cache;
 mod host;
+mod load;
 mod mods;
 mod packages;
 mod provides;
+mod reload;
 mod system;
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 
 use efevm::{
-    Caller, HostFn, HostOk, HostRegistry, LinkError, LoadError, EventDesc, RegistryError, Results, StructDesc, Args, Trap,
+    Caller, HostFn, HostOk, HostRegistry, LinkError, LoadError as VmLoadError, EventDesc, RegistryError, Results, StructDesc, Args, Trap,
 };
 use hecs::World;
 
+pub use cache::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT};
 pub use host::{LogLevel, LogLine, ScriptHost};
+#[cfg(not(target_family = "wasm"))]
+pub use load::DirSource;
+pub use load::{AssetHandler, LoadError, LoadInput, Loaded, ModBody, ModItem, ModSource};
 pub use mods::ModOptions;
-pub use packages::{DefaultPolicy, Grant, LoadReport, ModError, ModPolicy, ModRequest, PackageInfo};
+pub use packages::{DefaultPolicy, Grant, LoadReport, ModError, ModPolicy, ModRequest, PackageInfo, Reloaded, UnloadReport};
 pub use system::Script;
 pub(crate) use system::script_system;
 
@@ -86,7 +93,7 @@ impl std::error::Error for ScriptEventError {}
 /// Why loading, unloading or reloading a module failed.
 #[derive(Debug)]
 pub enum ScriptError {
-    Load(LoadError),
+    Load(VmLoadError),
     /// Every problem `Imports::check_module` found.
     Link { module: String, errors: Vec<LinkError> },
     /// The module imports namespaces, or refers to events of namespaces, that its
@@ -182,14 +189,19 @@ pub struct Scripting {
     history: VecDeque<LogLine>,
     pub(crate) policy: Box<dyn ModPolicy>,
     pub(crate) warned: HashSet<String>,
+    pub(crate) cache: ScriptCache,
+    pub(crate) handlers: Vec<Box<dyn AssetHandler>>,
+    /// `(module, handler index)` of every handler that committed assets for a module.
+    pub(crate) committed: Vec<(ModuleId, usize)>,
+    pub(crate) sources: Vec<Box<dyn ModSource>>,
+    pub(crate) origins: Vec<packages::Origin>,
     /// Script events dropped (over the per-frame cap) in the most recent run of scripts.
     dropped_last: usize,
-    #[cfg(not(target_family = "wasm"))]
     pub(crate) next_watch_check: f64,
 }
 
 impl Scripting {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(cache: CacheConfig) -> Self {
         let mut registry = HostRegistry::new();
         api_engine::register_engine_api(&mut registry).expect("the engine API registers");
         Scripting {
@@ -198,8 +210,12 @@ impl Scripting {
             history: VecDeque::new(),
             policy: Box::new(DefaultPolicy),
             warned: HashSet::new(),
+            cache: ScriptCache::new(cache),
+            handlers: Vec::new(),
+            committed: Vec::new(),
+            sources: Vec::new(),
+            origins: Vec::new(),
             dropped_last: 0,
-            #[cfg(not(target_family = "wasm"))]
             next_watch_check: 0.0,
         }
     }

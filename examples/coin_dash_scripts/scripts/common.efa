@@ -1,0 +1,121 @@
+; common.efa - what the other files share: constants, vector helpers, a tiny log formatter.
+; Everything the others use is `pub`; imports are per file, so each file declares its own.
+
+import engine.log.info
+
+; ---- the playfield (world units; 1 tile = 16) ----
+; `Sprite.size` is the size in bytes of the whole struct (a struct constant named `size` wins over a
+; field named `size`), so the field `size` of Sprite is reached by its offset.
+pub const SPRITE_SIZE_AT = 20
+pub const HALF_X = 320.0
+pub const HALF_Y = 240.0
+pub const MARGIN = 8.0           ; the player stays this far from the edge
+pub const PLAYER_SPEED = 110.0
+pub const COIN_PICK2 = 121.0     ; (player radius 5 + coin radius 6) squared
+pub const ENEMY_HIT2 = 121.0     ; (5 + 6) squared
+pub const INVULN = 1.0           ; seconds of immunity after a hit
+pub const LAYER_COIN = 1
+pub const MAX_COINS = 30
+
+; ---- vectors in memory: an (x, y) pair of f32 at base + off ----
+pub fn vec2_load(base: i64, off: i64) -> (f32, f32) {
+    reg p, x, y
+    i64.add p, base, off
+    f32.load x, p
+    f32.load y, p, 4
+    ret (x, y)
+}
+
+pub fn vec2_store(base: i64, off: i64, x: f32, y: f32) {
+    reg p
+    i64.add p, base, off
+    f32.store x, p
+    f32.store y, p, 4
+    ret
+}
+
+pub fn f32_load(base: i64, off: i64) -> f32 {
+    reg p, v
+    i64.add p, base, off
+    f32.load v, p
+    ret v
+}
+
+pub fn f32_store(base: i64, off: i64, v: f32) {
+    reg p
+    i64.add p, base, off
+    f32.store v, p
+    ret
+}
+
+pub fn clamp(v: f32, lo: f32, hi: f32) -> f32 {
+    f32.max v, v, lo
+    f32.min v, v, hi
+    ret v
+}
+
+; ---- logging with numbers: engine.log.info only takes one string ----
+; fmt_begin(); fmt_str(..); fmt_num(..); fmt_str(..); fmt_log()
+fmtbuf resb 192
+global mut fmt_len: i64 = 0
+
+pub fn fmt_begin() {
+    global.set fmt_len, 0
+    ret
+}
+
+pub fn fmt_str(ptr: i64, len: i64) {
+    reg at
+    global.get at, fmt_len
+    i64.add at, at, fmtbuf
+    memory.copy at, ptr, len
+    global.get at, fmt_len
+    i64.add at, at, len
+    global.set fmt_len, at
+    ret
+}
+
+; Append the decimal digits of `v` (with a leading '-' when negative).
+pub fn fmt_num(v: i64) {
+    reg start, pos, neg, digit, lo, hi, a, b, n
+    global.get n, fmt_len
+    i64.add start, n, fmtbuf
+    mov pos, start
+    i64.lt_s neg, v, 0
+    br_ifz neg, digits
+    i64.store8 '-', pos
+    i64.add pos, pos, 1
+    i64.add start, start, 1
+    i64.sub v, 0, v
+digits:
+    i64.rem_u digit, v, 10
+    i64.add digit, digit, 48
+    i64.store8 digit, pos
+    i64.add pos, pos, 1
+    i64.div_u v, v, 10
+    br_if v, digits
+    ; the digits came out backwards: swap them in place
+    mov lo, start
+    i64.sub hi, pos, 1
+swap:
+    i64.lt_u a, lo, hi
+    br_ifz a, done
+    i64.load8_u a, lo
+    i64.load8_u b, hi
+    i64.store8 b, lo
+    i64.store8 a, hi
+    i64.add lo, lo, 1
+    i64.sub hi, hi, 1
+    jmp swap
+done:
+    i64.sub n, pos, fmtbuf
+    global.set fmt_len, n
+    ret
+}
+
+pub fn fmt_log() {
+    reg n
+    global.get n, fmt_len
+    call engine.log.info(fmtbuf, n)
+    ret
+}

@@ -1,0 +1,79 @@
+; dash_core: root file. Declares the interface other mods use; the code is in the other files.
+;   common.efa   constants, vector helpers, a log formatter
+;   sprites.efa  spawn_sprite: an entity with a Transform and a Sprite
+;   player.efa   the player: spawn, keyboard / bot movement, position
+;   rules.efa    score, rounds, hits; the round_started event
+use "common.efa" as c
+use "sprites.efa" as sprites
+use "player.efa" as player
+use "rules.efa" as rules
+
+import engine.time.elapsed
+
+provide player_pos() -> (x: f32, y: f32) = player.pos,
+    "Where the player is: (x, y) in world units."
+provide set_target(x: f32, y: f32, found: bool) = player.set_target,
+    "Tell the autoplay bot where to walk: the nearest coin, or `found` = false when there is none."
+provide spawn_sprite(tex: i32, x: f32, y: f32, size: f32, layer: i32, frame: i32, frames: i32) -> (e: entity) = sprites.spawn_sprite,
+    "Spawn a square sprite of `size` at (x, y) showing frame `frame` of an atlas of `frames` frames side by side (1 = the whole texture); returns the entity."
+provide pickup(e: entity, points: i32) -> (total: i64) = rules.pickup,
+    "A coin was taken: despawn `e`, add `points` to the score and return the total; the last coin starts the next round."
+provide hit() -> (lost: i64) = rules.hit,
+    "An enemy touched the player: the score is lost and the player goes back to the start. Returns the lost score, or -1 while the player is immune."
+provide round() -> (n: i32) = rules.round_number,
+    "The number of the current round, starting at 1."
+provide format_i64(v: i64, out: bytes) -> (len: i64) = c.format_i64,
+    "Write the decimal digits of `v` into `out` (24 bytes are enough) and return how many were written; scripts have no number formatting of their own."
+
+s_t db "t="
+s_pos db "s pos=("
+s_comma db ", "
+s_score db ") score="
+s_round db " round="
+global mut next_status: f64 = 0.0
+
+export fn init() {
+    call rules.start()
+    call player.spawn()
+    ret
+}
+
+export fn frame(dt: f32) {
+    call player.update(dt)
+    call rules.tick(dt)
+    call status_line()
+    ret
+}
+
+; Once a second: "t=3s pos=(12, -40) score=2 round=1".
+fn status_line() {
+    reg t, next, ge, v, x, y
+    call engine.time.elapsed() -> t
+    global.get next, next_status
+    f64.ge ge, t, next
+    br_ifz ge, out
+    f64.floor next, t
+    f64.add next, next, 1.0
+    global.set next_status, next
+    call player.pos() -> (x, y)
+    call c.fmt_begin()
+    call c.fmt_str(s_t, s_t.len)
+    i64.trunc_sat_f64_s v, t
+    call c.fmt_num(v)
+    call c.fmt_str(s_pos, s_pos.len)
+    i64.trunc_sat_f32_s v, x
+    call c.fmt_num(v)
+    call c.fmt_str(s_comma, s_comma.len)
+    i64.trunc_sat_f32_s v, y
+    call c.fmt_num(v)
+    call c.fmt_str(s_score, s_score.len)
+    call rules.score() -> v
+    call c.fmt_num(v)
+    call c.fmt_str(s_round, s_round.len)
+    call rules.round_number() -> v
+    i64.extend_i32_s v, v
+    call c.fmt_num(v)
+    call c.fmt_log()
+out:
+    ret
+}

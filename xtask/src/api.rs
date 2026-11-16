@@ -1,13 +1,15 @@
-//! API index (`.efapi`) export and script assembly.
+//! API index (`.efapi`) export and script checks.
 //!
 //! * `cargo xtask api-export <example> [-o FILE]` builds the example natively and runs its
 //!   `native` binary with `EFE_API_EXPORT=<file>`: the engine then runs headless, the game
 //!   registers its functions, and `Engine::game_loop` writes the index and returns.
-//! * `build`/`run` (native) write `<example>.efapi` next to the binary and assemble
-//!   `examples/<example>/scripts/*.efa` against it into `<profile dir>/scripts/NAME.efvm`
-//!   with the efescript CLI. A script whose leading comment block has a line
+//! * `build`/`run` (native) write `<example>.efapi` next to the binary (for the language
+//!   server) and copy `examples/<example>/scripts/*.efa` into `<profile dir>/scripts/`. The
+//!   game compiles them at run time through its cache; nothing is assembled here.
+//! * `check-scripts <example>` exports the index and assembles every script against it in
+//!   process, failing with all diagnostics. A script whose leading comment block has a line
 //!   `; needs-mod: NAME` is skipped: it imports functions a mod registers at run time, so it
-//!   can only be assembled against an index exported after that mod is loaded.
+//!   can only be checked against an index exported after that mod is loaded.
 //! * `dist` copies the `.efapi` into `dist/<example>/`.
 
 use std::path::{Path, PathBuf};
@@ -112,40 +114,73 @@ pub fn api_export(project: &Project, ex: &Example, output: Option<PathBuf>, rele
     Ok(())
 }
 
-/// After a native build: write `<example>.efapi` next to the binary and assemble the scripts.
-/// Returns the directory with the assembled scripts when there are any.
+/// After a native build: write `<example>.efapi` next to the binary and copy the script sources
+/// into `<profile dir>/scripts/`. Returns that directory when there are scripts. A missing index
+/// is a warning: the game does not need it to run.
 pub fn after_native_build(project: &Project, ex: &Example, release: bool) -> Result<Option<PathBuf>> {
-    let src_dir = root().join("examples").join(&ex.dir).join("scripts");
-    let sources = script_sources(&src_dir)?;
+    let sources = script_sources(&root().join("examples").join(&ex.dir).join("scripts"))?;
     let efapi = profile_dir(project, release).join(format!("{}.efapi", ex.dir));
     step(format!("writing {}", efapi.display()));
     if let Err(e) = run_export(&native_bin(project, release), &efapi) {
-        if sources.is_empty() {
-            warn(format!("no .efapi written: {e:#}"));
-            return Ok(None);
-        }
-        return Err(e.context("scripts need the API index"));
+        warn(format!("no .efapi written: {e:#}"));
     }
     if sources.is_empty() {
         return Ok(None);
     }
     let out_dir = profile_dir(project, release).join("scripts");
-    if !dry_run() {
-        std::fs::create_dir_all(&out_dir)?;
+    step(format!("copying {} script(s) to {}", sources.len(), out_dir.display()));
+    if dry_run() {
+        return Ok(Some(out_dir));
+    }
+    std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    // assembled modules from before scripts were copied as source
+    for e in std::fs::read_dir(&out_dir).with_context(|| format!("reading {}", out_dir.display()))? {
+        let path = e?.path();
+        if path.extension().is_some_and(|x| x == "efvm") {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
     }
     for src in &sources {
-        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("script");
-        if let Some(m) = needs_mod(&std::fs::read_to_string(src).unwrap_or_default()) {
-            step(format!("skipping {stem}.efa (needs mod `{m}`; assemble it against an index exported with the mod loaded)"));
-            continue;
-        }
-        let out = out_dir.join(format!("{stem}.efvm"));
-        step(format!("assembling {} -> {}", src.display(), out.display()));
-        let mut c = cargo();
-        c.args(["run", "-q", "-p", "efescript", "--", "build"]).arg(src).arg("--api").arg(&efapi).arg("-o").arg(&out);
-        run(c)?;
+        let dest = out_dir.join(src.file_name().unwrap_or_default());
+        std::fs::copy(src, &dest).with_context(|| format!("copying to {}", dest.display()))?;
     }
     Ok(Some(out_dir))
+}
+
+/// `cargo xtask check-scripts <example>`: export the game index, then assemble every
+/// `examples/<example>/scripts/*.efa` (except `needs-mod` ones) against it. Fails listing the
+/// diagnostics of every script that does not assemble.
+pub fn check_scripts(project: &Project, ex: &Example) -> Result<()> {
+    let sources = script_sources(&root().join("examples").join(&ex.dir).join("scripts"))?;
+    if sources.is_empty() {
+        println!("{}: no scripts to check", ex.dir);
+        return Ok(());
+    }
+    let index_path = project.target_dir.join("efapi").join(format!("{}.efapi", ex.dir));
+    api_export(project, ex, Some(index_path.clone()), false, false)?;
+    let index = efescript::pack::read_api_input(&index_path).map_err(anyhow::Error::msg)?;
+    let opts = efescript::asm::AsmOptions { api: Some(&index), ..Default::default() };
+
+    let mut failures = vec![];
+    let mut checked = 0;
+    for src in &sources {
+        let text = std::fs::read_to_string(src).with_context(|| format!("reading {}", src.display()))?;
+        if let Some(m) = needs_mod(&text) {
+            step(format!("skipping {} (needs mod `{m}`)", src.display()));
+            continue;
+        }
+        checked += 1;
+        let (files, root_name) = efescript::asm::FsSource::for_file(&src.display().to_string());
+        match efescript::asm::assemble_program(&root_name, &files, &opts) {
+            Ok(_) => println!("  ok: {}", src.display()),
+            Err(d) => failures.push(format!("{}:\n{d}", src.display())),
+        }
+    }
+    if !failures.is_empty() {
+        bail!("{} of {checked} script(s) do not assemble:\n{}", failures.len(), failures.join("\n"));
+    }
+    println!("{checked} script(s) assembled against {}", index_path.display());
+    Ok(())
 }
 
 /// `dist` (web): build the native binary, export the index and copy it into `dist/<example>/`.

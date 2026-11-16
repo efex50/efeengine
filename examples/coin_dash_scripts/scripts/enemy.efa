@@ -1,0 +1,65 @@
+; enemy.efa - patrol: walk along the lane stored in the Patrol component, turn at both ends.
+;
+; patrol_update(entity, dt, state) -> state is the `Script` entry Rust attaches to each enemy.
+; Reads Transform and Patrol, writes Velocity (the engine moves it), Patrol.dir and the sprite flip.
+use "common.efa" as c
+
+import engine.world.get
+import engine.world.set
+
+tbuf resb Transform.size
+pbuf resb Patrol.size
+vbuf resb Velocity.size
+sbuf resb Sprite.size
+
+export fn patrol_update(entity: i64, dt: f32, state: i64) -> i64 {
+    reg status, px, py, ox, oy, ax, ay, range, speed, dir, along, f, vx, vy, flip, neg
+    call engine.world.get(entity, Transform.id, tbuf) -> status
+    br_if status, done
+    call engine.world.get(entity, Patrol.id, pbuf) -> status
+    br_if status, done
+    call c.vec2_load(tbuf, Transform.position) -> (px, py)
+    call c.vec2_load(pbuf, Patrol.origin) -> (ox, oy)
+    call c.vec2_load(pbuf, Patrol.axis) -> (ax, ay)
+    call c.f32_load(pbuf, Patrol.range) -> range
+    call c.f32_load(pbuf, Patrol.speed) -> speed
+    call c.f32_load(pbuf, Patrol.dir) -> dir
+
+    ; how far along the lane: dot(position - origin, axis)
+    f32.sub px, px, ox
+    f32.sub py, py, oy
+    f32.mul px, px, ax
+    f32.mul py, py, ay
+    f32.add along, px, py
+    f32.gt f, along, range
+    br_if f, turn_back
+    f32.neg neg, range
+    f32.lt f, along, neg
+    br_ifz f, go
+    const.f32 dir, 1.0
+    jmp go
+turn_back:
+    const.f32 dir, -1.0
+go:
+    f32.mul vx, ax, dir
+    f32.mul vx, vx, speed
+    f32.mul vy, ay, dir
+    f32.mul vy, vy, speed
+    call c.vec2_store(vbuf, Velocity.linear, vx, vy)
+    f32.store 0.0, vbuf, Velocity.angular
+    call engine.world.set(entity, Velocity.id, vbuf) -> status
+    call c.f32_store(pbuf, Patrol.dir, dir)
+    call engine.world.set(entity, Patrol.id, pbuf) -> status
+
+    ; lanes along x mirror the sprite with the direction
+    f32.eq f, ax, 0.0
+    br_if f, done
+    call engine.world.get(entity, Sprite.id, sbuf) -> status
+    br_if status, done
+    f32.lt f, dir, 0.0
+    i32.store f, sbuf, Sprite.flip
+    call engine.world.set(entity, Sprite.id, sbuf) -> status
+done:
+    i64.add state, state, 1
+    ret state
+}

@@ -1,0 +1,17 @@
+; common.efa (dash_coins): logging a line with a number. engine.log.info takes one string, so the digits
+; come from dash_core.format_i64 (a `bytes` argument: written in dash_core's memory, copied back here).
+import dash_core.format_i64
+import engine.log.info
+
+line resb 96
+
+; Log `msg` followed by the number `v`: "<msg><digits>".
+pub fn log_num(msg: i64, len: i64, v: i64) {
+    reg at, n
+    memory.copy line, msg, len
+    i64.add at, line, len
+    call dash_core.format_i64(v, at, 24) -> n
+    i64.add n, n, len
+    call engine.log.info(line, n)
+    ret
+}

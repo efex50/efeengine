@@ -1,0 +1,38 @@
+; sprites.efa (dash_core): spawn_sprite, the function every other dash mod draws with.
+use "common.efa" as c
+
+import engine.world.spawn
+import engine.world.insert
+
+tbuf resb Transform.size
+sbuf resb Sprite.size
+
+; An entity at (x, y) with a square Sprite of `size`, showing frame `frame` of `frames`.
+pub fn spawn_sprite(tex: i32, x: f32, y: f32, size: f32, layer: i32, frame: i32, frames: i32) -> i64 {
+    reg ent, status, u0, u1, f, n, p
+    call c.vec2_store(tbuf, Transform.position, x, y)
+    call c.f32_store(tbuf, Transform.rotation, 0.0)
+    call c.vec2_store(tbuf, Transform.scale, 1.0, 1.0)
+
+    i32.store tex, sbuf, Sprite.texture
+    call c.vec2_store(sbuf, Sprite.color, 1.0, 1.0)
+    i64.add p, sbuf, 8
+    call c.vec2_store(p, Sprite.color, 1.0, 1.0)
+    call c.vec2_store(sbuf, c.SPRITE_SIZE_AT, size, size)
+    ; uv x range of the frame: frame/frames .. (frame+1)/frames
+    f32.convert_i32_s f, frame
+    f32.convert_i32_s n, frames
+    f32.div u0, f, n
+    i32.add frame, frame, 1
+    f32.convert_i32_s f, frame
+    f32.div u1, f, n
+    call c.vec2_store(sbuf, Sprite.uv_min, u0, 0.0)
+    call c.vec2_store(sbuf, Sprite.uv_max, u1, 1.0)
+    i32.store layer, sbuf, Sprite.layer
+    i32.store 0, sbuf, Sprite.flip
+
+    call engine.world.spawn() -> ent
+    call engine.world.insert(ent, Transform.id, tbuf) -> status
+    call engine.world.insert(ent, Sprite.id, sbuf) -> status
+    ret ent
+}

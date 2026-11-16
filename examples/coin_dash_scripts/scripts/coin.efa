@@ -1,0 +1,56 @@
+; coin.efa - a coin spins and bobs.
+;
+; coin_update(entity, dt, state) -> state is the `Script` entry rules.efa attaches (with
+; engine.script.attach) to every coin it spawns. The spin switches UV frames of the 4-frame
+; sheet (8 frames per second): uv x = frame/4 .. (frame+1)/4. The bob is a sine around Coin.base_y.
+use "common.efa" as c
+
+import engine.world.get
+import engine.world.set
+import engine.time.elapsed
+import engine.math.sin
+
+tbuf resb Transform.size
+cbuf resb Coin.size
+sbuf resb Sprite.size
+
+export fn coin_update(entity: i64, dt: f32, state: i64) -> i64 {
+    reg status, t64, t, base_y, phase, a, frame, x0, x1, y, x
+    call engine.world.get(entity, Coin.id, cbuf) -> status
+    br_if status, done
+    call engine.world.get(entity, Transform.id, tbuf) -> status
+    br_if status, done
+    call engine.world.get(entity, Sprite.id, sbuf) -> status
+    br_if status, done
+    call engine.time.elapsed() -> t64
+    f32.demote_f64 t, t64
+    call c.f32_load(cbuf, Coin.base_y) -> base_y
+    call c.f32_load(cbuf, Coin.phase) -> phase
+
+    ; spin: frame = floor(t * 8 + phase * 4) mod 4
+    f32.mul a, t, 8.0
+    f32.mul frame, phase, 4.0
+    f32.add a, a, frame
+    i32.trunc_sat_f32_u frame, a
+    i32.and frame, frame, 3
+    f32.convert_i32_u x0, frame
+    f32.mul x0, x0, 0.25
+    f32.add x1, x0, 0.25
+    call c.f32_store(sbuf, Sprite.uv_min, x0)
+    call c.f32_store(sbuf, Sprite.uv_max, x1)
+    call engine.world.set(entity, Sprite.id, sbuf) -> status
+
+    ; bob: base_y + sin(t * 3 + phase * 6) * 2
+    f32.mul a, t, 3.0
+    f32.mul x, phase, 6.0
+    f32.add a, a, x
+    call engine.math.sin(a) -> a
+    f32.mul a, a, 2.0
+    f32.add y, base_y, a
+    call c.vec2_load(tbuf, Transform.position) -> (x, a)
+    call c.vec2_store(tbuf, Transform.position, x, y)
+    call engine.world.set(entity, Transform.id, tbuf) -> status
+done:
+    i64.add state, state, 1
+    ret state
+}

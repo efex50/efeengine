@@ -84,6 +84,8 @@ pub struct EngineConfig {
     pub canvas_id: Option<String>,
     /// No window, no graphics, no global message queue: for tests and tools.
     pub headless: bool,
+    /// The script cache (memory and disk) of the engine.
+    pub script_cache: crate::engine::scripting::CacheConfig,
 }
 
 impl Default for EngineConfig {
@@ -97,6 +99,7 @@ impl Default for EngineConfig {
             threads: None,
             canvas_id: None,
             headless: false,
+            script_cache: Default::default(),
         }
     }
 }

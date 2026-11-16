@@ -1,0 +1,20 @@
+[mod]
+id = "dash_coins"
+version = "1.1.0"
+name = "Dash Coins"
+description = "Spinning, bobbing coins. A round event from dash_core brings a new batch."
+game = "coin_dash_mods"
+
+[dependencies]
+dash_core = "^1"
+
+# engine.events: reads dash_core's round_started; engine.random places the coins; engine.math.sin bobs them.
+[permissions]
+namespaces = ["engine.world", "engine.random", "engine.math", "engine.time", "engine.events", "engine.log", "game"]
+
+[meta]
+category = "pickups"
+author = "someone else"
+
+[meta.coins]
+value = 1

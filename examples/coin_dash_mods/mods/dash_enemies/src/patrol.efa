@@ -1,0 +1,147 @@
+; patrol.efa (dash_enemies): lanes, spawning and the per-frame patrol.
+import dash_core.spawn_sprite
+import dash_core.player_pos
+import dash_core.hit
+import engine.world.get
+import engine.world.set
+import engine.world.insert
+import game.texture
+
+enemy_png db "enemy.png"
+
+; One lane = 7 f32 (28 bytes): origin x, origin y, axis x, axis y, range, speed, direction.
+lanes dd 0.0, 70.0, 1.0, 0.0, 140.0, 55.0, 1.0,
+         -60.0, -80.0, 1.0, 0.0, 100.0, 75.0, 1.0,
+         110.0, 0.0, 0.0, 1.0, 100.0, 45.0, 1.0
+handles resb 24                   ; the entity of each lane, 8 bytes each
+tbuf resb Transform.size
+vbuf resb Velocity.size
+sbuf resb Sprite.size
+global mut count: i64 = 0
+global mut speed_mul: f32 = 1.0
+
+fn lane_addr(i: i64) -> i64 {
+    reg a
+    i64.mul a, i, 28
+    i64.add a, a, lanes
+    ret a
+}
+
+fn f32_at(base: i64, off: i64) -> f32 {
+    reg p, v
+    i64.add p, base, off
+    f32.load v, p
+    ret v
+}
+
+; Spawn the first `n` lanes' enemies; every lane's speed is scaled by `mul`.
+pub fn spawn(n: i64, mul: f64) {
+    reg i, more, tex, lane, ox, oy, e, off, m32, status
+    f32.demote_f64 m32, mul
+    global.set speed_mul, m32
+    i64.lt_s more, n, 3
+    br_if more, clamped
+    const.i64 n, 3
+clamped:
+    global.set count, n
+    call game.texture(enemy_png, enemy_png.len) -> tex
+    const.i64 i, 0
+loop:
+    i64.lt_s more, i, n
+    br_ifz more, done
+    call lane_addr(i) -> lane
+    call f32_at(lane, 0) -> ox
+    call f32_at(lane, 4) -> oy
+    call dash_core.spawn_sprite(tex, ox, oy, 16.0, 2, 0, 1) -> e
+    ; spawn_sprite only draws; the Velocity that the engine integrates is this mod's own
+    f32.store 0.0, vbuf, Velocity.linear
+    f32.store 0.0, vbuf, Velocity.angular
+    i64.add off, vbuf, 4
+    f32.store 0.0, off, Velocity.linear
+    call engine.world.insert(e, Velocity.id, vbuf) -> status
+    i64.shl off, i, 3
+    i64.store e, off, handles
+    i64.add i, i, 1
+    jmp loop
+done:
+    ret
+}
+
+pub fn tick(dt: f32) {
+    reg n, i, more, e, off, lane, status, px, py, x, y, ox, oy, ax, ay, range, speed, dir, along, f, vx, vy, neg, mul, d2, lost
+    global.get n, count
+    br_ifz n, out
+    global.get mul, speed_mul
+    call dash_core.player_pos() -> (px, py)
+    const.i64 i, 0
+loop:
+    i64.lt_s more, i, n
+    br_ifz more, out
+    i64.shl off, i, 3
+    i64.load e, off, handles
+    call lane_addr(i) -> lane
+    call engine.world.get(e, Transform.id, tbuf) -> status
+    br_if status, next                ; not alive yet
+    f32.load x, tbuf, Transform.position
+    i64.add off, tbuf, 4
+    f32.load y, off, Transform.position
+    call f32_at(lane, 0) -> ox
+    call f32_at(lane, 4) -> oy
+    call f32_at(lane, 8) -> ax
+    call f32_at(lane, 12) -> ay
+    call f32_at(lane, 16) -> range
+    call f32_at(lane, 20) -> speed
+    call f32_at(lane, 24) -> dir
+
+    ; turn around at the ends of the lane
+    f32.sub vx, x, ox
+    f32.sub vy, y, oy
+    f32.mul vx, vx, ax
+    f32.mul vy, vy, ay
+    f32.add along, vx, vy
+    f32.gt f, along, range
+    br_if f, turn_back
+    f32.neg neg, range
+    f32.lt f, along, neg
+    br_ifz f, go
+    const.f32 dir, 1.0
+    jmp go
+turn_back:
+    const.f32 dir, -1.0
+go:
+    i64.add off, lane, 24
+    f32.store dir, off
+    f32.mul speed, speed, mul
+    f32.mul vx, ax, dir
+    f32.mul vx, vx, speed
+    f32.mul vy, ay, dir
+    f32.mul vy, vy, speed
+    f32.store vx, vbuf, Velocity.linear
+    i64.add off, vbuf, 4
+    f32.store vy, off, Velocity.linear
+    f32.store 0.0, vbuf, Velocity.angular
+    call engine.world.set(e, Velocity.id, vbuf) -> status
+
+    ; mirror lanes along x with the direction
+    f32.eq f, ax, 0.0
+    br_if f, check_hit
+    call engine.world.get(e, Sprite.id, sbuf) -> status
+    br_if status, check_hit
+    f32.lt f, dir, 0.0
+    i32.store f, sbuf, Sprite.flip
+    call engine.world.set(e, Sprite.id, sbuf) -> status
+check_hit:
+    f32.sub x, x, px
+    f32.sub y, y, py
+    f32.mul x, x, x
+    f32.mul y, y, y
+    f32.add d2, x, y
+    f32.lt f, d2, 121.0               ; (player radius 5 + enemy radius 6) squared
+    br_ifz f, next
+    call dash_core.hit() -> lost
+next:
+    i64.add i, i, 1
+    jmp loop
+out:
+    ret
+}

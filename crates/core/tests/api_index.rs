@@ -5,6 +5,22 @@ use std::collections::BTreeSet;
 use efeengine_core::efevm::*;
 use efeengine_core::prelude::*;
 
+/// Test shim: load one `.efmod` through `load_input`.
+trait LoadPackage {
+    fn load_package(&mut self, bytes: &[u8]) -> Result<ModuleId, ModError>;
+}
+
+impl LoadPackage for Engine {
+    fn load_package(&mut self, bytes: &[u8]) -> Result<ModuleId, ModError> {
+        match self.load_input(LoadInput::Package { label: "test.efmod", bytes }) {
+            Ok(l) => Ok(l.id()),
+            Err(efeengine_core::prelude::LoadError::Mod(e)) => Err(e),
+            Err(efeengine_core::prelude::LoadError::Script(e)) => Err(ModError::Script(e)),
+            Err(e) => panic!("unexpected load error: {e}"),
+        }
+    }
+}
+
 fn engine() -> Engine {
     Engine::with_config(EngineConfig { title: "index_game".into(), ..EngineConfig::headless() }).expect("headless engine")
 }
@@ -65,7 +81,10 @@ fn engine_namespaces_and_functions_are_exactly_the_documented_ones() {
         "engine.time.delta", "engine.time.elapsed", "engine.time.frame", "engine.time.fixed_delta",
         "engine.events.send", "engine.events.count", "engine.events.read",
         "engine.log.info", "engine.log.warn", "engine.log.error",
-        "engine.mods.asset_len", "engine.mods.asset_read",
+        "engine.mods.asset_len", "engine.mods.asset_read", "engine.mods.meta_f64",
+        "engine.script.attach",
+        "engine.random.f32", "engine.random.range", "engine.random.seed",
+        "engine.math.sin", "engine.math.cos", "engine.math.atan2",
     ];
     assert_eq!(names, expected.iter().map(|s| s.to_string()).collect());
     for ns in &idx.namespaces {
@@ -115,7 +134,7 @@ fn every_registered_component_is_in_the_index_with_its_layout() {
     e.register_struct(desc).unwrap();
 
     let idx = e.api_index();
-    assert_eq!(e.types().entries().len(), 5);
+    assert_eq!(e.types().entries().len(), 11); // 9 built-ins + Follow + ModStat
     for entry in e.types().entries() {
         let t = idx.struct_type(entry.name()).unwrap_or_else(|| panic!("{} is registered but not in the index", entry.name()));
         assert_eq!(t, entry.desc());
@@ -147,7 +166,7 @@ fn every_registered_component_is_in_the_index_with_its_layout() {
     assert_eq!(idx.struct_type("ModStat").unwrap().owner, "somemod");
     // a duplicate does not leave a half-registered type behind
     assert!(e.register_component::<Follow>().is_err());
-    assert_eq!(e.api_index().types.len(), 5);
+    assert_eq!(e.api_index().types.len(), 11);
 }
 
 #[test]

@@ -1,0 +1,21 @@
+[mod]
+id = "dash_enemies"
+version = "1.2.0"
+name = "Dash Enemies"
+description = "Enemies that patrol along lanes; touching one resets the score."
+game = "coin_dash_mods"
+
+[dependencies]
+dash_core = "^1"
+
+[permissions]
+namespaces = ["engine.world", "engine.log", "engine.mods", "game"]
+
+# Free-form: the game logs it, and the mod reads the numbers back with engine.mods.meta_f64.
+[meta]
+category = "hazards"
+author = "someone else"
+
+[meta.difficulty]
+enemy_count = 3
+enemy_speed = 1.0

@@ -1,0 +1,279 @@
+; rules.efa - the rules of coin_dash: rounds, pickup, score, hits, a status line.
+;
+; `init` runs when the module loads (and again after a hot reload).
+; `frame(dt)` runs every frame before the entities' own scripts. Entities are found with
+; engine.world.query on the component ids Player.id / Coin.id / Patrol.id (the components are
+; registered by Rust; the ids are constants the compiler takes from the game's API index).
+use "common.efa" as c
+
+import engine.world.spawn
+import engine.world.despawn
+import engine.world.insert
+import engine.world.get
+import engine.world.set
+import engine.world.query
+import engine.script.attach
+import engine.random.f32
+import engine.random.seed
+import engine.time.elapsed
+import engine.log.info
+import game.texture
+import game.score_add
+import game.score
+import game.score_reset
+
+coin_tex db "coin_sheet"
+coin_entry db "coin_update"
+s_score db "score "
+s_round db "round "
+s_adopt db "reloaded, keeping the coins on the field: "
+s_hit db "hit by enemy, score reset"
+s_t db "t="
+s_pos db "s pos=("
+s_comma db ", "
+s_score_eq db ") score="
+s_left db " coins left="
+s_round_eq db " round="
+
+global mut round: i64 = 1
+global mut coins_left: i64 = 0
+global mut next_status: f64 = 0.0
+
+tbuf resb Transform.size          ; a coin's / an enemy's Transform
+ptbuf resb Transform.size         ; the player's Transform
+sbuf resb Sprite.size
+cbuf resb Coin.size
+plbuf resb Player.size
+vbuf resb Velocity.size
+ids resb 256                      ; entity handles from engine.world.query (8 bytes each)
+one resb 8
+
+; 5 coins in round 1, 3 more each round, at most 30.
+fn coins_in_round(r: i64) -> i64 {
+    reg n, more
+    i64.sub n, r, 1
+    i64.mul n, n, 3
+    i64.add n, n, 5
+    i64.lt_s more, n, 30
+    br_if more, small
+    const.i64 n, 30
+small:
+    ret n
+}
+
+; One coin at a random spot away from the start: components, then its Script entry.
+fn spawn_coin() {
+    reg x, y, d2, t, ent, status, tex, phase, p
+retry:
+    call engine.random.f32() -> x
+    f32.sub x, x, 0.5
+    f32.mul x, x, 600.0
+    call engine.random.f32() -> y
+    f32.sub y, y, 0.5
+    f32.mul y, y, 440.0
+    f32.mul d2, x, x
+    f32.mul t, y, y
+    f32.add d2, d2, t
+    f32.lt t, d2, 1600.0              ; closer than 40 to the start: pick again
+    br_if t, retry
+    call engine.random.f32() -> phase
+
+    call c.vec2_store(tbuf, Transform.position, x, y)
+    call c.f32_store(tbuf, Transform.rotation, 0.0)
+    call c.vec2_store(tbuf, Transform.scale, 1.0, 1.0)
+
+    call game.texture(coin_tex, coin_tex.len) -> tex
+    i32.store tex, sbuf, Sprite.texture
+    call c.vec2_store(sbuf, Sprite.color, 1.0, 1.0)
+    i64.add p, sbuf, 8
+    call c.vec2_store(p, Sprite.color, 1.0, 1.0)
+    call c.vec2_store(sbuf, c.SPRITE_SIZE_AT, 16.0, 16.0)
+    call c.vec2_store(sbuf, Sprite.uv_min, 0.0, 0.0)
+    call c.vec2_store(sbuf, Sprite.uv_max, 0.25, 1.0)
+    i32.store c.LAYER_COIN, sbuf, Sprite.layer
+    i32.store 0, sbuf, Sprite.flip
+
+    call c.f32_store(cbuf, Coin.base_y, y)
+    call c.f32_store(cbuf, Coin.phase, phase)
+
+    call engine.world.spawn() -> ent
+    call engine.world.insert(ent, Transform.id, tbuf) -> status
+    call engine.world.insert(ent, Sprite.id, sbuf) -> status
+    call engine.world.insert(ent, Coin.id, cbuf) -> status
+    call engine.script.attach(ent, coin_entry, coin_entry.len) -> status
+    ret
+}
+
+fn spawn_round(r: i64) {
+    reg n, i, more
+    call coins_in_round(r) -> n
+    global.set coins_left, n
+    const.i64 i, 0
+loop:
+    i64.lt_s more, i, n
+    br_ifz more, done
+    call spawn_coin()
+    i64.add i, i, 1
+    jmp loop
+done:
+    ret
+}
+
+; `init` runs when the module loads and again after every hot reload, but the entities stay (module
+; memory does not: the round number starts again). So `init` adopts the coins that exist.
+export fn init() {
+    reg r, n
+    call engine.random.seed(2545)
+    call engine.world.query(Coin.id, ids, 32) -> n
+    br_ifz n, fresh
+    global.set coins_left, n
+    call c.fmt_begin()
+    call c.fmt_str(s_adopt, s_adopt.len)
+    call c.fmt_num(n)
+    call c.fmt_log()
+    ret
+fresh:
+    global.get r, round
+    call spawn_round(r)
+    call c.fmt_begin()
+    call c.fmt_str(s_round, s_round.len)
+    call c.fmt_num(r)
+    call c.fmt_log()
+    ret
+}
+
+export fn frame(dt: f32) {
+    reg n, ent, status, px, py, x, y, dx, dy, d2, i, more, inv, total, left, r
+    ; the player: position and the immunity timer
+    call engine.world.query(Player.id, ids, 1) -> n
+    br_ifz n, done
+    i64.load ent, ids
+    call engine.world.get(ent, Transform.id, ptbuf) -> status
+    br_if status, done
+    call engine.world.get(ent, Player.id, plbuf) -> status
+    br_if status, done
+    call c.vec2_load(ptbuf, Transform.position) -> (px, py)
+    call c.f32_load(plbuf, Player.invulnerable) -> inv
+    f32.sub inv, inv, dt
+    f32.max inv, inv, 0.0
+
+    ; coins: pick up the ones within reach
+    call engine.world.query(Coin.id, ids, 32) -> n
+    const.i64 i, 0
+coin_loop:
+    i64.lt_s more, i, n
+    br_ifz more, coins_done
+    i64.shl d2, i, 3
+    i64.load d2, d2, ids
+    mov dx, d2                        ; (the handle, kept in dx while d2 is reused)
+    call engine.world.get(dx, Transform.id, tbuf) -> status
+    br_if status, next_coin
+    call c.vec2_load(tbuf, Transform.position) -> (x, y)
+    f32.sub x, x, px
+    f32.sub y, y, py
+    f32.mul x, x, x
+    f32.mul y, y, y
+    f32.add d2, x, y
+    f32.lt more, d2, c.COIN_PICK2
+    br_ifz more, next_coin
+    call engine.world.despawn(dx) -> status
+    call game.score_add(1) -> total
+    call c.fmt_begin()
+    call c.fmt_str(s_score, s_score.len)
+    call c.fmt_num(total)
+    call c.fmt_log()
+    global.get left, coins_left
+    i64.sub left, left, 1
+    global.set coins_left, left
+next_coin:
+    i64.add i, i, 1
+    jmp coin_loop
+coins_done:
+    ; every coin taken: the next round has more of them
+    global.get left, coins_left
+    i64.gt_s more, left, 0
+    br_if more, enemies
+    global.get r, round
+    i64.add r, r, 1
+    global.set round, r
+    call c.fmt_begin()
+    call c.fmt_str(s_round, s_round.len)
+    call c.fmt_num(r)
+    call c.fmt_log()
+    call spawn_round(r)
+
+enemies:
+    f32.gt more, inv, 0.0
+    br_if more, save
+    call engine.world.query(Patrol.id, ids, 8) -> n
+    const.i64 i, 0
+enemy_loop:
+    i64.lt_s more, i, n
+    br_ifz more, save
+    i64.shl d2, i, 3
+    i64.load dx, d2, ids
+    call engine.world.get(dx, Transform.id, tbuf) -> status
+    br_if status, next_enemy
+    call c.vec2_load(tbuf, Transform.position) -> (x, y)
+    f32.sub x, x, px
+    f32.sub y, y, py
+    f32.mul x, x, x
+    f32.mul y, y, y
+    f32.add d2, x, y
+    f32.lt more, d2, c.ENEMY_HIT2
+    br_ifz more, next_enemy
+    ; hit: the score is lost, the player goes back to the start and is immune for a second
+    call game.score_reset()
+    const.f32 inv, c.INVULN
+    call c.vec2_store(ptbuf, Transform.position, 0.0, 0.0)
+    call engine.world.set(ent, Transform.id, ptbuf) -> status
+    call c.vec2_store(vbuf, Velocity.linear, 0.0, 0.0)
+    call c.f32_store(vbuf, Velocity.angular, 0.0)
+    call engine.world.set(ent, Velocity.id, vbuf) -> status
+    call engine.log.info(s_hit, s_hit.len)
+    jmp save
+next_enemy:
+    i64.add i, i, 1
+    jmp enemy_loop
+
+save:
+    call c.f32_store(plbuf, Player.invulnerable, inv)
+    call engine.world.set(ent, Player.id, plbuf) -> status
+    call status_line(px, py)
+done:
+    ret
+}
+
+; Once a second: "t=3s pos=(12, -40) score=2 coins left=4 round=1".
+fn status_line(px: f32, py: f32) {
+    reg t, next, ge, v
+    call engine.time.elapsed() -> t
+    global.get next, next_status
+    f64.ge ge, t, next
+    br_ifz ge, out
+    f64.floor next, t
+    f64.add next, next, 1.0
+    global.set next_status, next
+    call c.fmt_begin()
+    call c.fmt_str(s_t, s_t.len)
+    i64.trunc_sat_f64_s v, t
+    call c.fmt_num(v)
+    call c.fmt_str(s_pos, s_pos.len)
+    i64.trunc_sat_f32_s v, px
+    call c.fmt_num(v)
+    call c.fmt_str(s_comma, s_comma.len)
+    i64.trunc_sat_f32_s v, py
+    call c.fmt_num(v)
+    call c.fmt_str(s_score_eq, s_score_eq.len)
+    call game.score() -> v
+    call c.fmt_num(v)
+    call c.fmt_str(s_left, s_left.len)
+    global.get v, coins_left
+    call c.fmt_num(v)
+    call c.fmt_str(s_round_eq, s_round_eq.len)
+    global.get v, round
+    call c.fmt_num(v)
+    call c.fmt_log()
+out:
+    ret
+}

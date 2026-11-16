@@ -1,0 +1,30 @@
+; dash_enemies: root. Patrolling enemies on three lanes; the number of enemies and their speed
+; come from `[meta.difficulty]` of mod.toml, read back with engine.mods.meta_f64.
+;   patrol.efa  the lane table, spawning, the per-frame walk, flip and hit test
+use "common.efa" as c
+use "patrol.efa" as patrol
+
+import engine.mods.meta_f64
+
+k_count db "difficulty.enemy_count"
+k_speed db "difficulty.enemy_speed"
+msg_spawned db "enemies spawned: "
+msg_speed db "enemy speed percent: "
+
+export fn init() {
+    reg count, speed, n, pct, tmp
+    call engine.mods.meta_f64(k_count, k_count.len, 3.0) -> count
+    call engine.mods.meta_f64(k_speed, k_speed.len, 1.0) -> speed
+    i64.trunc_sat_f64_s n, count
+    f64.mul count, speed, 100.0
+    i64.trunc_sat_f64_s pct, count
+    call patrol.spawn(n, speed)
+    call c.log_num(msg_spawned, msg_spawned.len, n)
+    call c.log_num(msg_speed, msg_speed.len, pct)
+    ret
+}
+
+export fn frame(dt: f32) {
+    call patrol.tick(dt)
+    ret
+}

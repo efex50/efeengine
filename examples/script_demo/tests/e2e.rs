@@ -5,12 +5,16 @@ use std::path::{Path, PathBuf};
 
 use efeengine_core::efevm::{ApiIndex, ApiType, FuncType, FunctionBuilder, Interface, Module, ModuleBuilder, Op, Param, Provide, ValType};
 use efeengine_core::prelude::*;
-use efescript::asm::{AsmOptions, assemble_with};
+use efeengine_core::efa::asm::{AsmOptions, FsSource, assemble_program};
 use script_demo::{Modules, Score, setup, spawn_world};
 
 fn engine() -> (Engine, Score) {
-    let mut e = Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, ..EngineConfig::headless() })
-        .expect("headless engine");
+    let cfg = EngineConfig {
+        fixed_dt: 1.0 / 60.0,
+        script_cache: CacheConfig { disk: CacheDir::Off, ..Default::default() },
+        ..EngineConfig::headless()
+    };
+    let mut e = Engine::with_config(cfg).expect("headless engine");
     let score = setup(&mut e);
     (e, score)
 }
@@ -30,10 +34,15 @@ fn exported_index(e: &Engine, name: &str) -> ApiIndex {
     ApiIndex::from_json(&text).unwrap_or_else(|err| panic!("the exported index does not parse: {err}"))
 }
 
+fn script_path(script: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts").join(script)
+}
+
+/// A bare module of `script`, assembled against `index` (for checking what the assembler records).
 fn assemble(script: &str, index: &ApiIndex) -> efeengine_core::efevm::Module {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts").join(script);
-    let src = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
-    assemble_with(&src, script, &AsmOptions { api: Some(index) }).unwrap_or_else(|d| panic!("{script}: {d}"))
+    let path = script_path(script);
+    let (files, root) = FsSource::for_file(&path.display().to_string());
+    assemble_program(&root, &files, &AsmOptions { api: Some(index), ..Default::default() }).unwrap_or_else(|d| panic!("{script}: {d}"))
 }
 
 fn errors(e: &Engine) -> Vec<String> {
@@ -51,7 +60,9 @@ fn mover_script_assembled_against_the_exported_index_moves_entities() {
     // section 12 records the index the module was built against
     assert_eq!(module.data().api.as_ref().expect("section 12").hash, index.hash());
 
-    let id = e.load_module("mover", &module.encode()).expect("load mover");
+    // the engine compiles the same file itself, against its own registry index
+    let id = e.load(script_path("mover.efa")).expect("load mover").id();
+    assert_eq!(e.scripting().module_id("mover"), Some(id));
     spawn_world(&mut e, &Modules { mover: Some(id) });
     let before: Vec<f32> = e.world().query::<&Transform>().iter().map(|t| t.position.x).collect();
     assert_eq!(before.len(), 3);
@@ -109,9 +120,10 @@ fn a_mod_provides_a_function_that_another_script_calls() {
     assert_eq!(f.signature_text(), "(a: i64, b: i64) -> (sum: i64)");
     assert_ne!(with_mod.hash(), base.hash());
 
-    // a script that imports it can only be assembled against the new index
+    // a script that imports it can only be assembled against the new index (the engine's own)
     let user = assemble("mod_user.efa", &with_mod);
-    let user_id = e.load_module("user", &user.encode()).expect("load mod_user");
+    assert_eq!(user.data().api.as_ref().expect("section 12").hash, with_mod.hash());
+    let user_id = e.load(script_path("mod_user.efa")).expect("load mod_user").id();
     let ent = e.world_mut().spawn((Transform::default(), Script::new(user_id, "update")));
     e.run_frames(3, 1.0 / 60.0);
     assert!(errors(&e).is_empty(), "{:?}", errors(&e));
@@ -120,7 +132,7 @@ fn a_mod_provides_a_function_that_another_script_calls() {
 
     // the mod cannot be unloaded while the script that imports it is loaded ...
     match e.unload_module(adder_id) {
-        Err(ScriptError::Needed { module, by }) => assert_eq!((module.as_str(), by.as_slice()), ("adder", ["user".to_string()].as_slice())),
+        Err(ScriptError::Needed { module, by }) => assert_eq!((module.as_str(), by.as_slice()), ("adder", ["mod_user".to_string()].as_slice())),
         other => panic!("{other:?}"),
     }
     // ... unless the dependents go with it

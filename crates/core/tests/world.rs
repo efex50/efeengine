@@ -206,7 +206,7 @@ fn registry_has_builtin_components_with_valid_layouts() {
     let tr = t.by_name("Transform").unwrap().desc();
     assert_eq!(tr.field_named("scale").unwrap().offset as usize, std::mem::offset_of!(Transform, scale));
     assert_eq!(tr.field_named("scale").unwrap().ty, Prim::F32);
-    assert_eq!(t.entries().len(), 3);
+    assert_eq!(t.entries().len(), 9);
 }
 
 #[test]

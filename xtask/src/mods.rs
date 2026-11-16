@@ -2,8 +2,9 @@
 //! `.efmod` files with `efescript::pack::pack_dir`.
 //!
 //! * `cargo xtask mods <example>` packs them into `target/mods/<example>/`.
-//! * `build` and `dist` (web and native) pack them too and copy the packages into `mods/`
-//!   next to the built game: `dist/<example>/mods/` and `<profile dir>/mods/`.
+//! * `build` (native) packs them as a check and copies the mod *folders* into `<profile dir>/mods/`
+//!   (the game compiles them at run time). `dist` (web) copies the packed `.efmod` files into
+//!   `dist/<example>/mods/`.
 //!
 //! The game index the mods are packed against is the `.efapi` the `api` step writes. A mod
 //! that imports functions of another mod is packed after it: packing repeats in passes, each
@@ -135,7 +136,62 @@ pub fn mods_cmd(project: &Project, ex: &Example, preflight: bool) -> Result<()> 
     Ok(())
 }
 
-/// For `build` and `dist`: packs the mods of `ex` against the game index at `index` and copies
+/// For native `build`: packs the mods of `ex` against the game index at `index` (a check, into
+/// `target/mods/<example>/`), removes every `*.efmod` in `dest` and copies each mod folder into
+/// `dest/<name>/`, replacing an existing one. The game compiles the folders at run time.
+pub fn install_native(project: &Project, ex: &Example, index: &Path, dest: &Path) -> Result<()> {
+    let mods = mod_folders(ex)?;
+    if dry_run() {
+        println!("[dry-run] copy {} mod folder(s) of {} into {}", mods.len(), ex.dir, dest.display());
+        return Ok(());
+    }
+    if !mods.is_empty() {
+        if !index.is_file() {
+            bail!(
+                "the mods of {} are packed against the game's API index, which is missing: {}",
+                ex.dir,
+                index.display()
+            );
+        }
+        step(format!("checking {} mod(s) of {}", mods.len(), ex.dir));
+        pack_all(index, &mods, &project.target_dir.join("mods").join(&ex.dir))?;
+    }
+    std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    for e in std::fs::read_dir(dest).with_context(|| format!("reading {}", dest.display()))? {
+        let path = e?.path();
+        if path.is_file() && path.extension().is_some_and(|x| x == "efmod") {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+    }
+    for dir in &mods {
+        let to = dest.join(folder_name(dir));
+        if to.exists() {
+            std::fs::remove_dir_all(&to).with_context(|| format!("removing {}", to.display()))?;
+        }
+        copy_dir(dir, &to)?;
+    }
+    if !mods.is_empty() {
+        println!("mod folders: {}", dest.display());
+    }
+    Ok(())
+}
+
+/// Recursively copies the folder `from` to `to` (which must not exist yet).
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+    for e in std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
+        let e = e?;
+        let dest = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir(&e.path(), &dest)?;
+        } else {
+            std::fs::copy(e.path(), &dest).with_context(|| format!("copying to {}", dest.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// For `dist` (web): packs the mods of `ex` against the game index at `index` and copies
 /// the packages into `dest`. Does nothing when the example has no mods.
 pub fn pack_into(project: &Project, ex: &Example, index: &Path, dest: &Path) -> Result<()> {
     let mods = mod_folders(ex)?;

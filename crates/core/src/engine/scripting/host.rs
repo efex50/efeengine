@@ -34,6 +34,9 @@ pub(crate) const MAX_EVENTS: usize = 4096;
 pub(crate) struct Watch {
     /// The file is a `.efmod` package (else a bare `.efvm` module).
     pub package: bool,
+    /// `path` is a `.efa` source: the watch covers every `.efa` file in its directory tree, and
+    /// a change recompiles it through the cache.
+    pub source: bool,
     pub path: std::path::PathBuf,
     pub mtime: Option<std::time::SystemTime>,
 }
@@ -135,6 +138,8 @@ pub struct ScriptHost {
     pub(crate) logs: Vec<LogLine>,
     pub(crate) modules: Vec<ModuleSlot>,
     pub(crate) current: Option<ModuleId>,
+    /// State of `engine.random` (xorshift64*).
+    pub(crate) rng: u64,
 }
 
 impl ScriptHost {
@@ -152,7 +157,23 @@ impl ScriptHost {
             logs: Vec::new(),
             modules: Vec::new(),
             current: None,
+            rng: 0x2545_F491_4F6C_DD1D,
         }
+    }
+
+    /// The next pseudo-random 64 bits (xorshift64*; never 0 internally).
+    pub(crate) fn next_random(&mut self) -> u64 {
+        let mut x = self.rng;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rng = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// Reseed `engine.random`. Seed 0 is mapped to a fixed non-zero value.
+    pub(crate) fn seed_random(&mut self, seed: u64) {
+        self.rng = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
     }
 
     /// The world (only while scripts run; empty otherwise).

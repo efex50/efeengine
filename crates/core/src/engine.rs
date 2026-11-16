@@ -4,13 +4,15 @@ use once_cell::sync::{Lazy, OnceCell};
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::{debug_info, engine::{config::EngineConfig, error::EngineError, events::EventRegistry, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::Resources, schedule::{Ctx, EngineCommand, Commands, Schedule, Stage}, scripting::{LoadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, renderer::GraphicsContext, window::WindowManager};
-use crate::engine::components::{MeshHandle, Transform, Velocity};
+use crate::{debug_info, engine::{config::EngineConfig, error::EngineError, events::EventRegistry, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::Resources, schedule::{Ctx, EngineCommand, Commands, Schedule, Stage}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, window::WindowManager};
+use crate::engine::components::{Camera, GlobalTransform, MeshHandle, Parent, Sprite, TextureHandle, Transform, Velocity, Visibility};
+use crate::engine::render::{self as rendering, gpu::GpuContext, ClearRenderer, RenderFrame, Renderer, Textures};
 use crate::{global_info, thread_pool::{init_global_pool, init_global_pool_auto}};
 pub mod window;
 pub mod messages;
 pub mod log;
-pub mod renderer;
+pub mod render;
+pub mod transform;
 pub mod flags;
 pub mod commands;
 pub mod components;
@@ -89,10 +91,14 @@ pub struct EngineState{
 }
 
 pub struct Engine{
+    // NOTE: field order matters. Fields drop in declaration order, and the surface inside
+    // `gpu` was created from `windows`' raw window handle, so `renderer` and `gpu` must be
+    // declared (and so dropped) before `windows`.
+    renderer: Box<dyn Renderer>,
+    gpu: Option<GpuContext>,
     pub windows:GameWindowManager,
     status:EngineStatus,
     pub logger:Box<dyn Logger>,
-    pub graphics_context: Option<GraphicsContext>,
     pub state:EngineState,
     /// Input events of the current tick; reused every tick.
     event_buf: Vec<InputEvent>,
@@ -169,7 +175,7 @@ impl Engine {
             Box::new(NewDefaultLogger())
         };
 
-        let mut scripting = Scripting::new();
+        let mut scripting = Scripting::new(cfg.script_cache.clone());
         scripting.set_game(&cfg.title);
 
         let state = EngineState{
@@ -182,16 +188,25 @@ impl Engine {
             resources: Resources::new(),
             scripting,
         };
+        let mut state = state;
+        state.resources.insert(Textures::new());
+        state.resources.insert(RenderFrame::default());
+        state.resources.insert(rendering::RenderWarnings::default());
         let (msg_tx, msg_rx) = flume::unbounded();
         let mut schedule = Schedule::new();
         // The script system runs first in `Update`; game systems added later run after it.
         schedule.add(Stage::Update, Box::new(scripting::script_system));
+        // Built-in systems: motion, hierarchy, render extract.
+        schedule.add(Stage::FixedUpdate, Box::new(transform::velocity_system));
+        schedule.add(Stage::PostUpdate, Box::new(transform::propagate_transforms));
+        schedule.add(Stage::RenderExtract, Box::new(rendering::render_extract));
 
         let mut engine = Self {
+            renderer: Box::new(ClearRenderer),
+            gpu: None,
             windows: w,
             status:EngineStatus::Uninitialized,
             logger,
-            graphics_context:None,
             state,
             event_buf: Vec::new(),
             max_fps: cfg.max_fps.and_then(sanitize_fps),
@@ -212,6 +227,12 @@ impl Engine {
         engine.register_component::<Transform>().expect("built-in components register");
         engine.register_component::<Velocity>().expect("built-in components register");
         engine.register_component::<MeshHandle>().expect("built-in components register");
+        engine.register_component::<TextureHandle>().expect("built-in components register");
+        engine.register_component::<Camera>().expect("built-in components register");
+        engine.register_component::<Sprite>().expect("built-in components register");
+        engine.register_component::<Visibility>().expect("built-in components register");
+        engine.register_component::<Parent>().expect("built-in components register");
+        engine.register_component::<GlobalTransform>().expect("built-in components register");
         Ok(engine)
     }
 
@@ -330,20 +351,13 @@ impl Engine {
         Ok(id)
     }
 
-    /// Load a game module from a file (named after the file stem); runs its `init` at once.
-    #[cfg(not(target_family = "wasm"))]
-    pub fn load_module_file(&mut self, path: impl AsRef<std::path::Path>) -> Result<ModuleId, ScriptError> {
-        let id = self.state.scripting.load_module_file(path)?;
-        self.run_script_inits();
-        Ok(id)
-    }
-
     /// Unload a module: its instance is dropped and its namespace, functions and types leave
     /// the index. Refused with [`ScriptError::Needed`] while another loaded module imports
     /// from its namespaces or copies its structs; see
     /// [`unload_module_and_dependents`](Self::unload_module_and_dependents).
     pub fn unload_module(&mut self, id: ModuleId) -> Result<(), ScriptError> {
         let name = self.state.scripting.unload(id)?;
+        self.state.scripting.release_module(id, &mut self.state.resources);
         self.state.types.remove_owner(&name);
         Ok(())
     }
@@ -352,7 +366,8 @@ impl Engine {
     /// (the latest loaded first). Returns the unloaded modules in that order, `id` last.
     pub fn unload_module_and_dependents(&mut self, id: ModuleId) -> Result<Vec<ModuleId>, ScriptError> {
         let removed = self.state.scripting.unload_cascade(id)?;
-        for (_, name) in &removed {
+        for (id, name) in &removed {
+            self.state.scripting.release_module(*id, &mut self.state.resources);
             self.state.types.remove_owner(name);
         }
         Ok(removed.into_iter().map(|(id, _)| id).collect())
@@ -366,96 +381,190 @@ impl Engine {
         self.state.scripting.set_mod_policy(policy);
     }
 
-    /// Load one `.efmod` package (read, game check, id clash, policy, link, register, `init`).
-    /// Its dependencies must already be loaded packages. See `scripting/packages.rs`.
-    pub fn load_package(&mut self, bytes: &[u8]) -> Result<ModuleId, ModError> {
-        let pkg = efemod::Package::read(bytes, &efemod::ReadLimits::default())?;
-        let id = self.state.scripting.load_package_parsed(pkg)?;
-        self.run_script_inits();
-        Ok(id)
+    /// Install an asset handler: it takes over the assets of packages and mod folders that it
+    /// `matches` (see [`AssetHandler`]). The first matching handler owns an asset.
+    pub fn add_asset_handler(&mut self, h: impl AssetHandler + 'static) {
+        self.state.scripting.add_asset_handler(h);
     }
 
-    /// Load a set of packages `(label, bytes)`: the dependencies are resolved over the set and
-    /// the packages already loaded, packages load in dependency order (ties by id), and the
-    /// dependents of a package that fails are skipped (`ResolveProblem::DependencyFailed`).
-    pub fn load_packages(&mut self, packages: Vec<(String, Vec<u8>)>) -> LoadReport {
-        let mut report = LoadReport::default();
-        let mut read: Vec<(String, efemod::Package)> = Vec::new();
-        for (label, bytes) in packages {
-            match efemod::Package::read(&bytes, &efemod::ReadLimits::default()) {
-                Ok(p) => read.push((label, p)),
-                Err(e) => report.failed.push((label, ModError::Package(e))),
-            }
-        }
-        let loaded = self.state.scripting.loaded_packages();
-        let loaded_refs: Vec<(&str, &efemod::Version)> = loaded.iter().map(|(i, v)| (i.as_str(), v)).collect();
-        let cands: Vec<efemod::Candidate<'_>> = read
-            .iter()
-            .map(|(_, p)| efemod::Candidate { id: &p.manifest.id, version: &p.manifest.version, dependencies: &p.manifest.dependencies })
-            .collect();
-        let resolution = efemod::resolve(&cands, &loaded_refs);
-        drop(cands);
-        let mut slots: Vec<Option<(String, efemod::Package)>> = read.into_iter().map(Some).collect();
-        for (i, problem) in resolution.problems {
-            if let Some((label, _)) = slots[i].take() {
-                report.failed.push((label, ModError::Resolve(problem)));
-            }
-        }
-        let mut failed_ids: Vec<String> = Vec::new();
-        for i in resolution.order {
-            let Some((label, pkg)) = slots[i].take() else { continue };
-            if let Some(dep) = pkg.manifest.dependencies.iter().find(|d| failed_ids.contains(&d.id)) {
-                failed_ids.push(pkg.manifest.id.clone());
-                report.failed.push((label, ModError::Resolve(efemod::ResolveProblem::DependencyFailed { dep: dep.id.clone() })));
-                continue;
-            }
-            let pid = pkg.manifest.id.clone();
-            match self.state.scripting.load_package_parsed(pkg) {
-                Ok(id) => {
-                    self.run_script_inits();
-                    report.loaded.push((label, id));
-                }
-                Err(e) => {
-                    failed_ids.push(pid);
-                    report.failed.push((label, e));
-                }
-            }
-        }
-        report
+    /// Register a source of mods for [`load_mods`](Self::load_mods) and hot reload.
+    pub fn add_mod_source(&mut self, s: impl ModSource + 'static) {
+        self.state.scripting.add_mod_source(s);
     }
 
-    /// Load every `*.efmod` file directly in `dir` (not recursive, sorted by file name) with
-    /// [`load_packages`](Self::load_packages); labels are the file names. An unreadable
-    /// directory or file is a failed entry.
-    #[cfg(not(target_family = "wasm"))]
-    pub fn load_mods_dir(&mut self, dir: impl AsRef<std::path::Path>) -> LoadReport {
-        let dir = dir.as_ref();
-        let io = |what: String, e: std::io::Error| ModError::Script(ScriptError::Io(format!("{what}: {e}")));
-        let mut report = LoadReport::default();
-        let entries = match std::fs::read_dir(dir) {
-            Ok(rd) => rd,
-            Err(e) => {
-                report.failed.push((dir.display().to_string(), io(dir.display().to_string(), e)));
-                return report;
+    /// The engine's compile and decode cache.
+    pub fn cache(&mut self) -> &mut ScriptCache {
+        &mut self.state.scripting.cache
+    }
+
+    /// Load one input (see [`LoadInput`]); runs `init` at once. `Efa` and `Efvm` are game
+    /// code (no policy); `Package` and `Folder` go through the mod pipeline (game check, id
+    /// clash, dependencies, policy, asset check, link, asset commit). See `scripting/packages.rs`.
+    pub fn load_input(&mut self, input: LoadInput<'_>) -> Result<Loaded, LoadError> {
+        let loaded = match input {
+            #[cfg(feature = "efa")]
+            LoadInput::Efa { name, files, root } => {
+                let scripting = &mut self.state.scripting;
+                let index = scripting.registry().index();
+                let game = scripting.registry().game().to_string();
+                let (module, _) = scripting
+                    .cache
+                    .compile(&game, root, files, &index, &efa::asm::AsmOptions::default())
+                    .map_err(LoadError::Compile)?;
+                Loaded::Module(scripting.load_module_decoded(name, module)?)
+            }
+            LoadInput::Efvm { name, bytes } => Loaded::Module(self.state.scripting.load_module(name, bytes)?),
+            LoadInput::Package { label, bytes } => {
+                let b = self.state.scripting.read_built(label, bytes)?;
+                Loaded::Package(self.state.scripting.load_package_item(b, &mut self.state.resources)?)
+            }
+            #[cfg(feature = "efa")]
+            LoadInput::Folder { label, files, assets } => {
+                let b = self.state.scripting.build_folder(label, files, assets, None)?;
+                Loaded::Package(self.state.scripting.load_package_item(b, &mut self.state.resources)?)
             }
         };
-        let mut files: Vec<std::path::PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("efmod")))
-            .collect();
-        files.sort();
-        let mut set = Vec::new();
-        for p in files {
-            let label = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            match std::fs::read(&p) {
-                Ok(bytes) => set.push((label, bytes)),
-                Err(e) => report.failed.push((label, io(p.display().to_string(), e))),
+        self.run_script_inits();
+        Ok(loaded)
+    }
+
+    /// Load a file or folder: a mod folder (has `mod.toml`), `.efa`, `.efvm` (game modules named
+    /// after the file stem) or `.efmod`. A mod whose id is already loaded fails with
+    /// [`ModError::AlreadyLoaded`]; see [`reload_mod`](Self::reload_mod).
+    #[cfg(not(target_family = "wasm"))]
+    pub fn load(&mut self, path: impl AsRef<std::path::Path>) -> Result<Loaded, LoadError> {
+        self.with_path_input(path.as_ref(), Self::load_input)
+    }
+
+    /// Reload the mod at `path` (an `.efmod` file or a mod folder): see
+    /// [`reload_mod_input`](Self::reload_mod_input).
+    #[cfg(not(target_family = "wasm"))]
+    pub fn reload_mod(&mut self, path: impl AsRef<std::path::Path>) -> Result<Reloaded, LoadError> {
+        self.with_path_input(path.as_ref(), Self::reload_mod_input)
+    }
+
+    /// Read `path` into the [`LoadInput`] its kind calls for and hand it to `f`.
+    #[cfg(not(target_family = "wasm"))]
+    fn with_path_input<T>(
+        &mut self,
+        path: &std::path::Path,
+        f: impl for<'a> FnOnce(&mut Engine, LoadInput<'a>) -> Result<T, LoadError>,
+    ) -> Result<T, LoadError> {
+        let io = |e: std::io::Error| LoadError::Io(format!("{}: {e}", path.display()));
+        let display = path.display().to_string();
+        let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if path.is_dir() {
+            if !path.join("mod.toml").is_file() {
+                return Err(LoadError::UnknownKind(display));
             }
+            #[cfg(feature = "efa")]
+            {
+                let assets = efa::mod_folder::list_assets(path).map_err(LoadError::Io)?;
+                let files = efa::asm::FsSource::with_prefix(path, display);
+                return f(self, LoadInput::Folder { label: &file_name, files: &files, assets: &assets });
+            }
+            #[cfg(not(feature = "efa"))]
+            return Err(LoadError::CompilerDisabled);
         }
-        let mut r = self.load_packages(set);
-        report.loaded.append(&mut r.loaded);
-        report.failed.append(&mut r.failed);
+        let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        match ext.as_str() {
+            "efa" => {
+                #[cfg(feature = "efa")]
+                {
+                    let (files, root) = efa::asm::FsSource::for_file(&display);
+                    if !path.is_file() {
+                        return Err(LoadError::Io(format!("{display}: not a file")));
+                    }
+                    f(self, LoadInput::Efa { name: &stem, files: &files, root: &root })
+                }
+                #[cfg(not(feature = "efa"))]
+                Err(LoadError::CompilerDisabled)
+            }
+            "efvm" => {
+                let bytes = std::fs::read(path).map_err(io)?;
+                f(self, LoadInput::Efvm { name: &stem, bytes: &bytes })
+            }
+            "efmod" => {
+                let bytes = std::fs::read(path).map_err(io)?;
+                f(self, LoadInput::Package { label: &file_name, bytes: &bytes })
+            }
+            _ => Err(LoadError::UnknownKind(display)),
+        }
+    }
+
+    /// Replace a loaded mod by a new version of it (`Package` or `Folder`; a game module is
+    /// [`LoadError::NotAMod`]). The loaded mod is the one with the same manifest id:
+    ///
+    /// - none loaded: it is loaded like [`load_input`](Self::load_input) ([`Reloaded::Loaded`]);
+    /// - same content hash: nothing happens ([`Reloaded::Unchanged`]);
+    /// - otherwise the mod and its loaded dependents are unloaded (asset handlers get
+    ///   `unload`), the new version loads, and the dependents load again against it (folder
+    ///   dependents are recompiled). If any step fails, everything is unloaded again and the
+    ///   previous versions are loaded back; the error is [`ModError::ReloadFailed`] with
+    ///   `restored` telling whether that worked. A game module that depends on the mod makes
+    ///   the reload fail up front, nothing changed.
+    ///
+    /// Module ids change (an id is never reused) and `init` runs again for every module that
+    /// was loaded again.
+    pub fn reload_mod_input(&mut self, input: LoadInput<'_>) -> Result<Reloaded, LoadError> {
+        let EngineState { scripting, resources, types, .. } = &mut self.state;
+        let reloaded = match input {
+            #[cfg(feature = "efa")]
+            LoadInput::Efa { name, .. } => return Err(LoadError::NotAMod(name.to_string())),
+            LoadInput::Efvm { name, .. } => return Err(LoadError::NotAMod(name.to_string())),
+            LoadInput::Package { label, bytes } => {
+                let b = scripting.read_built(label, bytes)?;
+                let (manifest, hash) = (b.pkg.manifest.clone(), b.hash.clone());
+                scripting.reload_one(&manifest, &hash, label, Box::new(move |_| Ok((b, None))), resources, types)
+            }
+            #[cfg(feature = "efa")]
+            LoadInput::Folder { label, files, assets } => {
+                let (manifest, hash) = Scripting::peek_folder(files)?;
+                let (l, h) = (label.to_string(), hash.clone());
+                let build = Box::new(move |s: &mut Scripting| s.build_folder(&l, files, assets, Some(h)).map(|b| (b, None)));
+                scripting.reload_one(&manifest, &hash, label, build, resources, types)
+            }
+        };
+        // Also after a failure: a restored version runs its `init` again.
+        self.run_script_inits();
+        Ok(reloaded?)
+    }
+
+    /// Load the mods of every registered source ([`add_mod_source`](Self::add_mod_source)):
+    /// every source is listed, the manifests are read, the dependencies are resolved over all
+    /// items and the loaded packages, items load in dependency order (ties by id) and the
+    /// dependents of an item that fails are skipped (`ResolveProblem::DependencyFailed`).
+    /// `init`s run after all loads. With no source the report is empty.
+    ///
+    /// A mod whose id is already loaded with the same contents is listed in `skipped`; with
+    /// other contents it fails with [`ModError::AlreadyLoaded`] (use
+    /// [`reload_mods`](Self::reload_mods)).
+    pub fn load_mods(&mut self) -> LoadReport {
+        let EngineState { scripting, resources, types, .. } = &mut self.state;
+        let report = scripting.load_mods(resources, types, false);
+        self.run_script_inits();
         report
+    }
+
+    /// Bring the loaded mods in line with the registered sources, with one dependency
+    /// resolve: new mods load, mods whose content hash changed are replaced (the rules of
+    /// [`reload_mod_input`](Self::reload_mod_input), all changed mods swapped together so
+    /// that mods can change in step), unchanged mods are `skipped`, and mods that came from a
+    /// source that no longer lists them are unloaded (`unloaded`, dependents included).
+    pub fn reload_mods(&mut self) -> LoadReport {
+        let EngineState { scripting, resources, types, .. } = &mut self.state;
+        let report = scripting.load_mods(resources, types, true);
+        self.run_script_inits();
+        report
+    }
+
+    /// Unload every mod (packages and folders, however they were loaded), dependents before
+    /// their dependencies, calling the asset handlers' `unload`. Game modules stay loaded; a
+    /// mod that a game module still depends on stays too and is listed in `failed`.
+    pub fn unload_mods(&mut self) -> UnloadReport {
+        let EngineState { scripting, resources, types, .. } = &mut self.state;
+        scripting.unload_mods(resources, types)
     }
 
     /// Hot reload the package `id` from `path` (see `Scripting::watch_package`).
@@ -472,6 +581,12 @@ impl Engine {
     /// An asset of the package behind `id` (path without `assets/`).
     pub fn package_asset(&self, id: ModuleId, path: &str) -> Option<&[u8]> {
         self.state.scripting.package_asset(id, path)
+    }
+
+    /// Hot reload the game script `id` from its `.efa` source `path` (see [`Scripting::watch_source`]).
+    #[cfg(all(not(target_family = "wasm"), feature = "efa"))]
+    pub fn watch_source(&mut self, id: ModuleId, path: impl AsRef<std::path::Path>) -> Result<(), ScriptError> {
+        self.state.scripting.watch_source(id, path)
     }
 
     /// Hot reload `id` from `path` (see [`Scripting::watch`]).
@@ -495,6 +610,26 @@ impl Engine {
         }
         self.apply_commands();
         self.flush_script_logs();
+    }
+
+    /// One line per outcome of a `load_mods` / `reload_mods` through the engine logger.
+    fn log_load_report(&mut self, r: &LoadReport) {
+        self.logger.info(&format!(
+            "mods: {} loaded, {} reloaded, {} unchanged, {} unloaded, {} failed",
+            r.loaded.len(), r.reloaded.len(), r.skipped.len(), r.unloaded.len(), r.failed.len()
+        ));
+        for (label, _) in &r.reloaded {
+            self.logger.info(&format!("mods: reloaded {label}"));
+        }
+        for (label, _) in &r.loaded {
+            self.logger.info(&format!("mods: loaded {label}"));
+        }
+        for id in &r.unloaded {
+            self.logger.info(&format!("mods: unloaded {id}"));
+        }
+        for (label, e) in &r.failed {
+            self.logger.error(&format!("mods: {label}: {e}"));
+        }
     }
 
     /// Send the log lines scripts produced through the engine logger.
@@ -565,6 +700,29 @@ impl Engine {
 
     pub fn resources_mut(&mut self) -> &mut Resources {
         &mut self.state.resources
+    }
+
+    /// The texture store. Changes made here reach the renderer through `RenderFrame::textures`.
+    pub fn textures(&self) -> &Textures {
+        self.state.resources.get::<Textures>().expect("Textures resource")
+    }
+
+    pub fn textures_mut(&mut self) -> &mut Textures {
+        self.state.resources.get_mut::<Textures>().expect("Textures resource")
+    }
+
+    /// The last built [`RenderFrame`] (rebuilt every frame in `Stage::RenderExtract`).
+    pub fn render_frame(&self) -> &RenderFrame {
+        self.state.resources.get::<RenderFrame>().expect("RenderFrame resource")
+    }
+
+    /// Install the game's renderer (replaces the default [`ClearRenderer`]). If the GPU is
+    /// already up, `init` runs at once; otherwise when it comes up.
+    pub fn set_renderer(&mut self, renderer: impl Renderer) {
+        self.renderer = Box::new(renderer);
+        if let Some(gpu) = &self.gpu {
+            self.renderer.init(&gpu.gpu());
+        }
     }
 
     pub fn time(&self) -> &Time {
@@ -688,6 +846,20 @@ impl Engine {
                 EngineCommand::SetCursorVisible(v) => self.windows.set_cursor_visible(v),
                 EngineCommand::SetCursorGrab(g) => self.windows.set_cursor_grab(g),
                 EngineCommand::SetTextInput(on) => self.windows.set_text_input(on),
+                EngineCommand::ReloadMods => {
+                    let report = self.reload_mods();
+                    self.log_load_report(&report);
+                }
+                EngineCommand::UnloadMods => {
+                    let report = self.unload_mods();
+                    self.logger.info(&format!("mods: {} unloaded, {} could not be unloaded", report.unloaded.len(), report.failed.len()));
+                    for id in &report.unloaded {
+                        self.logger.info(&format!("mods: unloaded {id}"));
+                    }
+                    for (id, e) in &report.failed {
+                        self.logger.warn(&format!("mods: {id} stays loaded: {e}"));
+                    }
+                }
             }
         }
     }
@@ -710,35 +882,68 @@ impl Engine {
         self.state.time.set_in_fixed(false);
     }
 
-    // YENİ: Async Grafik Bağlamı Başlatıcı
+    /// Create the GPU context and the surface, then `init` the renderer. Without a window
+    /// (headless) there is nothing to do; a failure is logged and the engine keeps ticking
+    /// without rendering.
     pub async fn init_graphics(&mut self) {
         self.logger.info("Initializing Graphics Context...");
-        match GraphicsContext::new(&self.windows).await {
-            Ok((graphics_context, surface_manager)) => {
-                self.graphics_context = Some(graphics_context);
-                self.windows.surface_manager = Some(surface_manager);
+        match GpuContext::new(&self.windows).await {
+            Ok(gpu) => {
+                self.renderer.init(&gpu.gpu());
+                self.gpu = Some(gpu);
                 self.logger.info("Graphics Context Initialized!");
             }
-            // The engine keeps ticking (messages, input) without rendering.
             Err(e) => self.logger.error(&format!("graphics init failed: {e}")),
         }
     }
-    pub fn render(&mut self){
-        
+
+    /// Reconfigure the surface and tell the renderer.
+    fn resize_surface(&mut self, size: (u32, u32)) {
+        if let Some(gpu) = &mut self.gpu {
+            if gpu.resize(size) {
+                self.renderer.resize(&gpu.gpu());
+            }
+        }
     }
 
-    /// Reconfigure the window surface to `size` (physical pixels).
-    /// No-op without a graphics context/surface, or for a 0x0 (minimized) size.
-    fn resize_surface(&mut self, size: (u32, u32)) {
-        if size.0 == 0 || size.1 == 0 {
-            return;
+    /// Acquire the surface, let the renderer draw the frame, present. Skipped without a GPU
+    /// (headless, failed init). If the frame could not be drawn, its texture changes are put
+    /// back so the renderer still sees them once.
+    fn render_frame_to_surface(&mut self) {
+        let Engine { renderer, gpu, state, logger, .. } = self;
+        let Some(gpu) = gpu else { return };
+        let Some(frame) = state.resources.get::<RenderFrame>() else { return };
+        let mut drawn = false;
+        let size = (gpu.config.width, gpu.config.height);
+        if size.0 > 0 && size.1 > 0 {
+            match gpu.surface.get_current_texture() {
+                Ok(output) => {
+                    let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    renderer.render(&gpu.gpu(), &view, frame);
+                    drawn = true;
+                    let suboptimal = output.suboptimal;
+                    output.present();
+                    if suboptimal {
+                        gpu.reconfigure();
+                    }
+                }
+                // Surface no longer matches the window: reconfigure, next frame renders.
+                Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
+                    gpu.reconfigure();
+                    renderer.resize(&gpu.gpu());
+                }
+                Err(wgpu::SurfaceError::Timeout) => {}
+                Err(e) => logger.error(&format!("Render error: {e:?}")),
+            }
         }
-        if let (Some(context), Some(sm)) = (&self.graphics_context, &mut self.windows.surface_manager) {
-            sm.resize(size, &context.device);
+        if !drawn {
+            let changes = state.resources.get_mut::<RenderFrame>().map(|f| std::mem::take(&mut f.textures));
+            if let (Some(changes), Some(t)) = (changes, state.resources.get_mut::<Textures>()) {
+                t.requeue(changes);
+            }
         }
     }
-    
-    /// Engine-side handling of window events (state, surface, close).
+
     fn handle_window_event(&mut self, ev: &InputEvent) {
         let InputEventKind::Window(w) = &ev.kind else { return };
         match *w {
@@ -818,22 +1023,7 @@ impl Engine {
             }
         }
 
-        // Çizim Mantığı:
-        let mut render_result = Ok(());
-        if let Some(ref context) = self.graphics_context {
-            if let Some(ref mut sm) = self.windows.surface_manager {
-                render_result = sm.render(&context.device, &context.queue,&self.state);
-            }
-        }
-        match render_result {
-            Ok(()) => {}
-            // Surface no longer matches the window: reconfigure, next frame renders.
-            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
-                let size = self.windows.size();
-                self.resize_surface(size);
-            }
-            Err(e) => self.logger.error(&format!("Render error: {:?}", e)),
-        }
+        self.render_frame_to_surface();
     }
 
     /// Run `n` frames with a synthetic clock advancing `dt` seconds per frame (continuing

@@ -16,6 +16,19 @@ This document holds the decisions with their reasons (2), the design of each par
 and the implementation plan (11). Where it and a normative document differ, the normative
 document wins.
 
+**Superseded in part by E10** (`docs/e10-design.md`, `crates/efescript/ROADMAP.md`). The
+runtime loading API described in sections 9.2 and 10 changed:
+- Removed: `load_module_file`, `load_mods_dir`, `load_packages` and the public `load_package`.
+  Use `Engine::load(path)` (a `.efa`, `.efvm`, `.efmod` file or a mod folder),
+  `Engine::load_input(LoadInput)`, or `add_mod_source` (a `ModSource`, e.g. `DirSource`) and
+  `load_mods()`. Mod sources are never installed automatically.
+- Folder mods (`mod.toml` with sources, section 4 of `MOD_PACKAGE.md`) are also compiled at
+  runtime by the engine, through `ScriptCache` (memory and disk). `efescript pack` still builds
+  `.efmod` files. Mods can carry `meta` and asset handlers (`AssetHandler`).
+- Native `cargo xtask build` copies mod folders next to the game; web builds keep `.efmod` files.
+
+The rest of this document stays as the record of E8.
+
 ## 1. Goal and the shape of the result
 
 A mod is written as many source files, built into **one module**, shipped as **one package

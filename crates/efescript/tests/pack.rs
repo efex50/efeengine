@@ -209,10 +209,10 @@ fn build_api_and_extra_apis_are_merged() {
     let s = Scratch::new("merge");
     let a = log_index("gameA", &["info", "debug"]);
     let b = log_index("gameB", &["info", "warn"]);
-    s.write("a.efapi", &a.to_json());
+    s.write("m/a.efapi", &a.to_json());
     s.write(
         "m/mod.toml",
-        "[mod]\nid = \"m\"\nversion = \"1.0.0\"\n[permissions]\nnamespaces = [\"engine.log\"]\n[build]\napi = [\"../a.efapi\"]\n",
+        "[mod]\nid = \"m\"\nversion = \"1.0.0\"\n[permissions]\nnamespaces = [\"engine.log\"]\n[build]\napi = [\"a.efapi\"]\n",
     );
     s.write(
         "m/src/main.efa",

@@ -1,0 +1,181 @@
+; coins.efa (dash_coins): the coins of the current round.
+use "common.efa" as c
+
+import dash_core.spawn_sprite
+import dash_core.player_pos
+import dash_core.pickup
+import dash_core.set_target
+import engine.world.get
+import engine.world.set
+import engine.random.f32
+import engine.random.seed
+import engine.time.elapsed
+import engine.math.sin
+import game.texture
+
+sheet_png db "coin_sheet.png"
+msg_batch db "coins in the new round: "
+
+handles resb 240                  ; entity of coin i (up to 30), 8 bytes each
+bases resb 120                    ; its resting y (f32)
+phases resb 120                   ; its animation phase (f32)
+tbuf resb Transform.size
+sbuf resb Sprite.size
+global mut count: i32 = 0
+global mut tex: i32 = 0
+
+pub fn init() {
+    reg t
+    call engine.random.seed(77)
+    call game.texture(sheet_png, sheet_png.len) -> t
+    global.set tex, t
+    ret
+}
+
+; A batch of `want` coins (at most 30 in all) at random spots away from the start.
+pub fn spawn_batch(want: i32) {
+    reg n, t, x, y, d2, tmp, phase, e, off, w, big
+    global.get n, count
+    global.get t, tex
+    i32.add tmp, n, want
+    i32.gt_s big, tmp, 30
+    br_ifz big, go
+    i32.sub want, 30, n
+go:
+    i64.extend_i32_s w, want
+    call c.log_num(msg_batch, msg_batch.len, w)
+    mov w, want
+next_coin:
+    br_ifz w, done
+retry:
+    call engine.random.f32() -> x
+    f32.sub x, x, 0.5
+    f32.mul x, x, 600.0
+    call engine.random.f32() -> y
+    f32.sub y, y, 0.5
+    f32.mul y, y, 440.0
+    f32.mul d2, x, x
+    f32.mul tmp, y, y
+    f32.add d2, d2, tmp
+    f32.lt tmp, d2, 1600.0            ; closer than 40 to the start: pick again
+    br_if tmp, retry
+    call engine.random.f32() -> phase
+    call dash_core.spawn_sprite(t, x, y, 16.0, 1, 0, 4) -> e
+    i64.extend_i32_u off, n
+    i64.shl off, off, 3
+    i64.store e, off, handles
+    i64.extend_i32_u off, n
+    i64.shl off, off, 2
+    f32.store y, off, bases
+    f32.store phase, off, phases
+    i32.add n, n, 1
+    i32.sub w, w, 1
+    jmp next_coin
+done:
+    global.set count, n
+    ret
+}
+
+; Remove coin `i` by moving the last one into its place.
+fn remove(i: i32) {
+    reg n, last, from, to, v
+    global.get n, count
+    i32.sub last, n, 1
+    i32.eq v, i, last
+    br_if v, shrink
+    i64.extend_i32_u from, last
+    i64.extend_i32_u to, i
+    i64.shl v, from, 3
+    i64.load v, v, handles
+    i64.shl to, to, 3
+    i64.store v, to, handles
+    i64.extend_i32_u from, last
+    i64.extend_i32_u to, i
+    i64.shl from, from, 2
+    i64.shl to, to, 2
+    f32.load v, from, bases
+    f32.store v, to, bases
+    f32.load v, from, phases
+    f32.store v, to, phases
+shrink:
+    global.set count, last
+    ret
+}
+
+pub fn tick(dt: f32) {
+    reg n, i, more, e, off, status, base, phase, t64, t, a, b, frame, u0, u1, x, y, px, py, d2, best, bx, by, found, total, idx
+    global.get n, count
+    br_ifz n, out
+    call engine.time.elapsed() -> t64
+    f32.demote_f64 t, t64
+    call dash_core.player_pos() -> (px, py)
+    const.f32 best, 1e30
+    const.i32 found, 0
+    const.i32 i, 0
+loop:
+    i32.lt_s more, i, n
+    br_ifz more, aim
+    i64.extend_i32_u idx, i
+    i64.shl off, idx, 3
+    i64.load e, off, handles
+    i64.shl off, idx, 2
+    f32.load base, off, bases
+    f32.load phase, off, phases
+    call engine.world.get(e, Transform.id, tbuf) -> status
+    br_if status, next                ; not alive yet
+    call engine.world.get(e, Sprite.id, sbuf) -> status
+    br_if status, next
+
+    ; spin: frame = floor(t * 8 + phase * 4) mod 4 of the 4-frame sheet
+    f32.mul a, t, 8.0
+    f32.mul b, phase, 4.0
+    f32.add a, a, b
+    i32.trunc_sat_f32_u frame, a
+    i32.and frame, frame, 3
+    f32.convert_i32_u u0, frame
+    f32.mul u0, u0, 0.25
+    f32.add u1, u0, 0.25
+    f32.store u0, sbuf, Sprite.uv_min
+    f32.store u1, sbuf, Sprite.uv_max
+    call engine.world.set(e, Sprite.id, sbuf) -> status
+
+    ; bob: base_y + sin(t * 3 + phase * 6) * 2
+    f32.mul a, t, 3.0
+    f32.mul b, phase, 6.0
+    f32.add a, a, b
+    call engine.math.sin(a) -> a
+    f32.mul a, a, 2.0
+    f32.add y, base, a
+    f32.load x, tbuf, Transform.position
+    i64.add off, tbuf, 4
+    f32.store y, off, Transform.position
+    call engine.world.set(e, Transform.id, tbuf) -> status
+
+    ; within reach of the player: dash_core scores it (and may start the next round)
+    f32.sub a, x, px
+    f32.sub b, y, py
+    f32.mul a, a, a
+    f32.mul b, b, b
+    f32.add d2, a, b
+    f32.lt more, d2, 121.0            ; (player radius 5 + coin radius 6) squared
+    br_ifz more, nearest
+    call dash_core.pickup(e, 1) -> total
+    call remove(i)
+    global.get n, count
+    jmp loop                          ; the last coin now sits at index i
+nearest:
+    f32.lt more, d2, best
+    br_ifz more, next
+    mov best, d2
+    mov bx, x
+    mov by, y
+    const.i32 found, 1
+next:
+    i32.add i, i, 1
+    jmp loop
+aim:
+    ; the autoplay bot of dash_core walks to the nearest coin
+    call dash_core.set_target(bx, by, found)
+out:
+    ret
+}

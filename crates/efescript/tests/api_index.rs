@@ -236,7 +236,7 @@ export fn main() -> i32 {
 fn assemble_an_example_against_an_index_read_from_json() {
     let json = game_index().to_json();
     let index = ApiIndex::from_json(&json).expect("index parses");
-    let m = assemble_with(GAME_SCRIPT, "game.efa", &AsmOptions { api: Some(&index) })
+    let m = assemble_with(GAME_SCRIPT, "game.efa", &AsmOptions { api: Some(&index), ..Default::default() })
         .unwrap_or_else(|e| panic!("{e}"));
     let api = m.data().api.clone().expect("section 12");
     assert_eq!(api.hash, index.hash());
@@ -261,7 +261,7 @@ fn assemble_an_example_against_an_index_read_from_json() {
 #[test]
 fn disassembly_comments_section_12_and_reassembles_with_the_index() {
     let index = game_index();
-    let opts = AsmOptions { api: Some(&index) };
+    let opts = AsmOptions { api: Some(&index), ..Default::default() };
     let m = assemble_with(GAME_SCRIPT, "game.efa", &opts).unwrap();
     let text = disassemble(&m);
     let first = text.lines().next().unwrap();

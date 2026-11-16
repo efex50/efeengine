@@ -1,0 +1,118 @@
+; common.efa (dash_core): constants, vector helpers and a log formatter.
+import engine.log.info
+
+pub const PLAYER_SPEED = 110.0
+; `Sprite.size` is the size in bytes of the whole struct (a struct constant named `size` wins over a
+; field named `size`), so the field `size` of Sprite is reached by its offset.
+pub const SPRITE_SIZE_AT = 20
+pub const COIN_R2 = 121.0        ; (player radius 5 + coin radius 6) squared
+pub const INVULN = 1.0           ; seconds of immunity after a hit
+
+pub fn vec2_load(base: i64, off: i64) -> (f32, f32) {
+    reg p, x, y
+    i64.add p, base, off
+    f32.load x, p
+    f32.load y, p, 4
+    ret (x, y)
+}
+
+pub fn vec2_store(base: i64, off: i64, x: f32, y: f32) {
+    reg p
+    i64.add p, base, off
+    f32.store x, p
+    f32.store y, p, 4
+    ret
+}
+
+pub fn f32_store(base: i64, off: i64, v: f32) {
+    reg p
+    i64.add p, base, off
+    f32.store v, p
+    ret
+}
+
+pub fn clamp(v: f32, lo: f32, hi: f32) -> f32 {
+    f32.max v, v, lo
+    f32.min v, v, hi
+    ret v
+}
+
+; ---- logging with numbers: fmt_begin(); fmt_str(..); fmt_num(..); fmt_log() ----
+fmtbuf resb 192
+global mut fmt_len: i64 = 0
+
+pub fn fmt_begin() {
+    global.set fmt_len, 0
+    ret
+}
+
+pub fn fmt_str(ptr: i64, len: i64) {
+    reg at
+    global.get at, fmt_len
+    i64.add at, at, fmtbuf
+    memory.copy at, ptr, len
+    global.get at, fmt_len
+    i64.add at, at, len
+    global.set fmt_len, at
+    ret
+}
+
+; Write the decimal digits of `v` (a leading '-' when negative) at `at`; returns the end address.
+fn put_digits(at: i64, v: i64) -> i64 {
+    reg start, pos, neg, digit, lo, hi, a, b
+    mov start, at
+    mov pos, at
+    i64.lt_s neg, v, 0
+    br_ifz neg, digits
+    i64.store8 '-', pos
+    i64.add pos, pos, 1
+    i64.add start, start, 1
+    i64.sub v, 0, v
+digits:
+    i64.rem_u digit, v, 10
+    i64.add digit, digit, 48
+    i64.store8 digit, pos
+    i64.add pos, pos, 1
+    i64.div_u v, v, 10
+    br_if v, digits
+    mov lo, start
+    i64.sub hi, pos, 1
+swap:
+    i64.lt_u a, lo, hi
+    br_ifz a, done
+    i64.load8_u a, lo
+    i64.load8_u b, hi
+    i64.store8 b, lo
+    i64.store8 a, hi
+    i64.add lo, lo, 1
+    i64.sub hi, hi, 1
+    jmp swap
+done:
+    ret pos
+}
+
+pub fn fmt_num(v: i64) {
+    reg n, at, end
+    global.get n, fmt_len
+    i64.add at, n, fmtbuf
+    call put_digits(at, v) -> end
+    i64.sub n, end, fmtbuf
+    global.set fmt_len, n
+    ret
+}
+
+pub fn fmt_log() {
+    reg n
+    global.get n, fmt_len
+    call engine.log.info(fmtbuf, n)
+    ret
+}
+
+; The provided `format_i64(v, out)`: the digits of `v` are written into `out` (a `bytes` argument:
+; it lives in this mod's scratch region while the call runs and is copied back to the caller).
+pub fn format_i64(v: i64, out: i64, out_len: i64) -> i64 {
+    reg end, n
+    call put_digits(out, v) -> end
+    i64.sub n, end, out
+    ret n
+}

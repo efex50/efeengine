@@ -51,9 +51,8 @@ pub(crate) fn script_system(cx: &mut Ctx<'_>) {
     if !scripting.is_active() {
         return;
     }
-    #[cfg(not(target_family = "wasm"))]
     {
-        let reloaded = scripting.check_reload(cx.time.elapsed());
+        let reloaded = scripting.check_reload(cx.time.elapsed(), cx.resources);
         if !reloaded.is_empty() {
             for s in cx.world.query_mut::<&mut Script>() {
                 if reloaded.contains(&s.module) {

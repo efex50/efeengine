@@ -7,6 +7,7 @@ use efevm::{LinkError, HostOk, HostRegistry, Instance, Interface, Limits, Module
 
 use super::{DEFAULT_BUDGET, DEFAULT_MEMORY_PAGES, LogLevel, ModuleId, ScriptError, Scripting};
 use super::host::{ModuleSlot, ScriptHost};
+use crate::engine::resources::Resources;
 
 /// Options of [`Scripting::load_mod`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,7 +200,7 @@ impl Scripting {
     fn instantiate(
         &mut self,
         name: &str,
-        bytes: &[u8],
+        module: Module,
         allowed: Option<Vec<String>>,
         version: u32,
         budget: u64,
@@ -218,7 +219,6 @@ impl Scripting {
         if taken {
             return Err(ScriptError::NameTaken(name.to_string()));
         }
-        let module = Module::decode(bytes).map_err(ScriptError::Load)?;
         // Only mods provide: a game module with an interface section is refused.
         if module.data().interface.is_some() && allowed.is_none() {
             return Err(ScriptError::NotAMod(name.to_string()));
@@ -268,7 +268,13 @@ impl Scripting {
     /// (if the module exports it) runs at the next script-system run; `Engine::load_module`
     /// runs it at once.
     pub fn load_module(&mut self, name: &str, bytes: &[u8]) -> Result<ModuleId, ScriptError> {
-        self.instantiate(name, bytes, None, 1, DEFAULT_BUDGET, DEFAULT_MEMORY_PAGES, None)
+        let module = self.cache.decode(bytes).map_err(ScriptError::Load)?;
+        self.load_module_decoded(name, module)
+    }
+
+    /// [`load_module`](Self::load_module) for a module that is already decoded.
+    pub(crate) fn load_module_decoded(&mut self, name: &str, module: Module) -> Result<ModuleId, ScriptError> {
+        self.instantiate(name, module, None, 1, DEFAULT_BUDGET, DEFAULT_MEMORY_PAGES, None)
     }
 
     /// Load a mod: only the namespaces in `opts.allowed` may be imported; a refused import
@@ -281,7 +287,13 @@ impl Scripting {
     /// is linked, so it may refer to them). Any
     /// failure registers nothing and keeps no module slot (no id is used).
     pub fn load_mod(&mut self, bytes: &[u8], opts: ModOptions) -> Result<ModuleId, ScriptError> {
-        self.instantiate(&opts.name, bytes, Some(opts.allowed), opts.version, opts.budget, opts.memory_pages, opts.doc)
+        let module = self.cache.decode(bytes).map_err(ScriptError::Load)?;
+        self.load_mod_decoded(module, opts)
+    }
+
+    /// [`load_mod`](Self::load_mod) for a module that is already decoded.
+    pub(crate) fn load_mod_decoded(&mut self, module: Module, opts: ModOptions) -> Result<ModuleId, ScriptError> {
+        self.instantiate(&opts.name, module, Some(opts.allowed), opts.version, opts.budget, opts.memory_pages, opts.doc)
     }
 
     /// The copies of external structs in `iface` must equal what the registry holds.
@@ -452,7 +464,7 @@ impl Scripting {
         Ok(out)
     }
 
-    fn unload_now(&mut self, idx: usize) -> Result<String, ScriptError> {
+    pub(crate) fn unload_now(&mut self, idx: usize) -> Result<String, ScriptError> {
         let name = self.host.modules[idx].name.clone();
         self.registry.unregister_owner(&name)?;
         let slot = &mut self.host.modules[idx];
@@ -600,16 +612,24 @@ impl Scripting {
     }
 }
 
+impl Scripting {
+    /// Every 0.25 s of engine time: reload the watched files (native) and the mods whose
+    /// source reports a change. Returns the reloaded modules.
+    pub(crate) fn check_reload(&mut self, now: f64, res: &mut Resources) -> Vec<ModuleId> {
+        if now < self.next_watch_check {
+            return Vec::new();
+        }
+        self.next_watch_check = now + 0.25;
+        let mut reloaded = Vec::new();
+        #[cfg(not(target_family = "wasm"))]
+        self.check_watches(&mut reloaded, res);
+        self.check_sources(&mut reloaded, res);
+        reloaded
+    }
+}
+
 #[cfg(not(target_family = "wasm"))]
 impl Scripting {
-    /// Read and load a game module from a file; the module is named after the file stem.
-    pub fn load_module_file(&mut self, path: impl AsRef<Path>) -> Result<ModuleId, ScriptError> {
-        let path = path.as_ref();
-        let bytes = std::fs::read(path).map_err(|e| ScriptError::Io(format!("{}: {e}", path.display())))?;
-        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        self.load_module(name, &bytes)
-    }
-
     /// Hot reload: whenever the modification time of `path` changes, the script system
     /// (checking at most every 0.25 s of engine time) decodes and links the new file, swaps it
     /// in (the old module keeps running if that fails; the failure is logged), re-runs
@@ -622,22 +642,38 @@ impl Scripting {
             .and_then(|m| m.modified())
             .map_err(|e| ScriptError::Io(format!("{}: {e}", path.display())))?;
         let slot = self.host.modules.get_mut(id.0 as usize).filter(|m| m.loaded).ok_or(ScriptError::NoSuchModule(id))?;
-        slot.watch = Some(super::host::Watch { package: false, path, mtime: Some(mtime) });
+        slot.watch = Some(super::host::Watch { package: false, source: false, path, mtime: Some(mtime) });
         Ok(())
     }
 
-    /// Check the watched files if 0.25 s of engine time passed; returns the reloaded modules.
-    pub(crate) fn check_reload(&mut self, now: f64) -> Vec<ModuleId> {
-        if now < self.next_watch_check {
-            return Vec::new();
-        }
-        self.next_watch_check = now + 0.25;
-        let mut reloaded = Vec::new();
+    /// Hot reload of a game script from source: whenever a `.efa` file under the directory of
+    /// `path` (the root file and the files it `use`s live there) changes, the script system
+    /// (checking at most every 0.25 s of engine time) recompiles `path` through the cache and
+    /// swaps the module in place, like [`watch`](Self::watch): the module id stays, `init` runs
+    /// again and the `state` of its `Script`s resets to 0. A compile or link error is logged and
+    /// the old version keeps running.
+    #[cfg(feature = "efa")]
+    pub fn watch_source(&mut self, id: ModuleId, path: impl AsRef<Path>) -> Result<(), ScriptError> {
+        let path = path.as_ref().to_path_buf();
+        let mtime = newest_efa_mtime(&path).ok_or_else(|| ScriptError::Io(format!("{}: not readable", path.display())))?;
+        let slot = self.host.modules.get_mut(id.0 as usize).filter(|m| m.loaded).ok_or(ScriptError::NoSuchModule(id))?;
+        slot.watch = Some(super::host::Watch { package: false, source: true, path, mtime: Some(mtime) });
+        Ok(())
+    }
+
+    /// Check the watched files.
+    fn check_watches(&mut self, reloaded: &mut Vec<ModuleId>, res: &mut Resources) {
         for idx in 0..self.host.modules.len() {
             let Some(w) = self.host.modules[idx].watch.as_ref().filter(|_| self.host.modules[idx].loaded) else { continue };
             let path = w.path.clone();
             let seen = w.mtime;
-            let Ok(m) = std::fs::metadata(&path).and_then(|m| m.modified()) else { continue };
+            let is_source = w.source;
+            let now = if is_source {
+                newest_efa_mtime(&path)
+            } else {
+                std::fs::metadata(&path).and_then(|m| m.modified()).ok()
+            };
+            let Some(m) = now else { continue };
             if Some(m) == seen {
                 continue;
             }
@@ -645,8 +681,19 @@ impl Scripting {
                 w.mtime = Some(m);
             }
             let name = self.host.modules[idx].name.clone();
-            let ok = if self.host.modules[idx].watch.as_ref().is_some_and(|w| w.package) {
-                let r = self.reload_package(idx, &path);
+            let ok = if is_source {
+                match self.reload_source(idx, &path) {
+                    Ok(()) => {
+                        self.log(LogLevel::Info, format!("[{name}] recompiled and reloaded from {}", path.display()));
+                        true
+                    }
+                    Err(e) => {
+                        self.log(LogLevel::Error, format!("[{name}] reload failed, keeping the old version: {e}"));
+                        false
+                    }
+                }
+            } else if self.host.modules[idx].watch.as_ref().is_some_and(|w| w.package) {
+                let r = self.reload_package(idx, &path, res);
                 self.log_package_reload(&name, &path, r)
             } else {
                 match self.reload(idx, &path) {
@@ -664,13 +711,54 @@ impl Scripting {
                 reloaded.push(ModuleId(idx as u32));
             }
         }
-        reloaded
+    }
+
+    #[cfg(feature = "efa")]
+    fn reload_source(&mut self, idx: usize, path: &Path) -> Result<(), ScriptError> {
+        let display = path.display().to_string();
+        let (files, root) = efa::asm::FsSource::for_file(&display);
+        let index = self.registry().index();
+        let game = self.registry().game().to_string();
+        let (module, _) = self
+            .cache
+            .compile(&game, &root, &files, &index, &efa::asm::AsmOptions::default())
+            .map_err(|d| ScriptError::Io(format!("{display}: {d}")))?;
+        let version = self.host.modules[idx].version;
+        self.reload_module(idx, module, version)
+    }
+
+    #[cfg(not(feature = "efa"))]
+    fn reload_source(&mut self, _idx: usize, _path: &Path) -> Result<(), ScriptError> {
+        Err(ScriptError::Io("the efa feature is off".into()))
     }
 
     fn reload(&mut self, idx: usize, path: &Path) -> Result<(), ScriptError> {
         let bytes = std::fs::read(path).map_err(|e| ScriptError::Io(format!("{}: {e}", path.display())))?;
-        let module = Module::decode(&bytes).map_err(ScriptError::Load)?;
+        let module = self.cache.decode(&bytes).map_err(ScriptError::Load)?;
         let version = self.host.modules[idx].version;
         self.reload_module(idx, module, version)
     }
+}
+
+/// The newest modification time of the `.efa` files under the directory of `path`.
+#[cfg(not(target_family = "wasm"))]
+fn newest_efa_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    fn walk(dir: &Path, best: &mut Option<std::time::SystemTime>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, best);
+            } else if p.extension().is_some_and(|x| x == "efa") {
+                if let Ok(m) = e.metadata().and_then(|m| m.modified()) {
+                    if best.is_none_or(|b| m > b) {
+                        *best = Some(m);
+                    }
+                }
+            }
+        }
+    }
+    let mut best = None;
+    walk(path.parent()?, &mut best);
+    best
 }

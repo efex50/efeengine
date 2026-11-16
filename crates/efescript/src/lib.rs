@@ -2,8 +2,7 @@ pub mod prelude;
 
 pub mod compiler;
 pub mod debugger;
-pub mod asm;
-pub mod link;
+pub use efa::{asm, link};
 pub mod host;
 pub mod host_std;
 pub mod disasm;

@@ -360,6 +360,110 @@ fn validate_checks_constructed_manifests() {
     assert!(m.validate().is_err());
 }
 
+// ---- meta ---------------------------------------------------------------------------
+
+use efemod::{MAX_META_BYTES, MAX_META_DEPTH};
+use efevm::api::json::Value;
+
+fn num(n: &str) -> Value {
+    Value::Num(n.into())
+}
+
+/// A meta object of exactly `depth` levels (the object itself is depth 1).
+fn deep_meta(depth: usize) -> Value {
+    let mut v = num("1");
+    for _ in 0..depth - 1 {
+        v = Value::Arr(vec![v]);
+    }
+    Value::Obj(vec![("k".into(), v)])
+}
+
+fn sample_meta() -> Value {
+    Value::Obj(vec![
+        ("title".into(), Value::Str("Tab\there \"quoted\" \u{1} é".into())),
+        ("count".into(), num("3")),
+        ("ratio".into(), num("-2.5e10")),
+        ("flag".into(), Value::Bool(false)),
+        ("nothing".into(), Value::Null),
+        ("tags".into(), Value::Arr(vec![Value::Str("a".into()), Value::Obj(vec![])])),
+        ("nested".into(), Value::Obj(vec![("z".into(), num("1.0")), ("a".into(), num("0"))])),
+    ])
+}
+
+#[test]
+fn meta_round_trips_through_json() {
+    let mut m = example();
+    m.meta = Some(sample_meta());
+    let text = m.to_json();
+    assert!(text.ends_with(
+        "\"meta\": {\"title\":\"Tab\\there \\\"quoted\\\" \\u0001 é\",\"count\":3,\"ratio\":-2.5e10,\"flag\":false,\"nothing\":null,\"tags\":[\"a\",{}],\"nested\":{\"z\":1.0,\"a\":0}}\n}\n"
+    ), "{text}");
+    let back = Manifest::from_json(&text).unwrap();
+    assert_eq!(back, m);
+    assert_eq!(back.to_json(), text);
+}
+
+#[test]
+fn meta_is_optional_and_last() {
+    assert!(!example().to_json().contains("\"meta\""));
+    let mut m = example();
+    m.meta = Some(Value::Obj(vec![]));
+    let text = m.to_json();
+    assert!(text.ends_with("  \"meta\": {}\n}\n"), "{text}");
+    assert_eq!(Manifest::from_json(&text).unwrap().meta, Some(Value::Obj(vec![])));
+}
+
+#[test]
+fn meta_must_be_an_object() {
+    for bad in ["\"meta\": 3", "\"meta\": [1]", "\"meta\": null", "\"meta\": \"x\""] {
+        let t = with(|s| s.replace("\"api_version\": 1,", &format!("\"api_version\": 1, {bad},")));
+        assert!(man_err(&t).starts_with("meta: must be a JSON object"), "{bad}");
+    }
+    let mut m = example();
+    m.meta = Some(num("1"));
+    assert!(m.validate().unwrap_err().to_string().contains("meta: must be a JSON object"));
+}
+
+#[test]
+fn meta_depth_limit() {
+    let mut m = example();
+    m.meta = Some(deep_meta(MAX_META_DEPTH));
+    m.validate().unwrap();
+    assert_eq!(Manifest::from_json(&m.to_json()).unwrap().meta, m.meta);
+    m.meta = Some(deep_meta(MAX_META_DEPTH + 1));
+    let e = m.validate().unwrap_err().to_string();
+    assert!(e.contains("meta: nesting depth 17 is more than 16"), "{e}");
+    let t = m.to_json();
+    assert!(man_err(&t).starts_with("meta: nesting depth 17"));
+}
+
+#[test]
+fn meta_size_limit() {
+    let at_limit = |n: usize| {
+        let mut m = example();
+        m.meta = Some(Value::Obj(vec![("k".into(), Value::Str("a".repeat(n)))]));
+        m
+    };
+    // `{"k":"` + n bytes + `"}` is n + 8 bytes of canonical JSON.
+    let ok = at_limit(MAX_META_BYTES - 8);
+    ok.validate().unwrap();
+    assert_eq!(Manifest::from_json(&ok.to_json()).unwrap(), ok);
+    let big = at_limit(MAX_META_BYTES - 7);
+    let e = big.validate().unwrap_err().to_string();
+    assert!(e.contains("meta:") && e.contains("at most 65536"), "{e}");
+    assert!(man_err(&big.to_json()).starts_with("meta:"));
+}
+
+#[test]
+fn meta_survives_package_write_and_read() {
+    let mut m = example_without_deps();
+    m.meta = Some(sample_meta());
+    let bytes = Package::write(&m, &module(), &assets()).unwrap();
+    let p = read(&bytes).unwrap();
+    assert_eq!(p.manifest.meta, Some(sample_meta()));
+    assert_eq!(p.manifest, m);
+}
+
 // ---- package round trip -------------------------------------------------------------
 
 #[test]

@@ -1,0 +1,21 @@
+[mod]
+id = "dash_tiles"
+version = "1.0.0"
+name = "Dash Tiles"
+description = "The ground: a 40 x 30 tilemap read from assets/map.txt, drawn with tiles.png."
+game = "coin_dash_mods"
+
+[dependencies]
+dash_core = "^1"
+
+# No engine.world: the tiles are drawn through dash_core.spawn_sprite. engine.mods reads the asset.
+[permissions]
+namespaces = ["engine.log", "engine.mods", "game"]
+
+[meta]
+category = "scenery"
+
+[meta.map]
+width = 40
+height = 30
+tile = 16

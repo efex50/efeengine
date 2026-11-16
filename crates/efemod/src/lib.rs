@@ -36,5 +36,5 @@ pub use version::{Version, VersionReq, VersionError};
 pub use error::PackageError;
 pub use limits::ReadLimits;
 pub use resolve::{resolve, Candidate, Dependency, Resolution, ResolveProblem};
-pub use manifest::{Manifest, Permissions};
+pub use manifest::{Manifest, Permissions, MAX_META_BYTES, MAX_META_DEPTH};
 pub use package::{check_module, Package};

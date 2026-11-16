@@ -94,6 +94,7 @@ cargo test -p script_demo                             # end to end: index, assem
 ```
 
 - [crates/efescript/README.md](crates/efescript/README.md): the toolchain and CLI.
+- [docs/MOD_LOADING.md](docs/MOD_LOADING.md): loading scripts and mods, sources, policy, reload, the script cache.
 - [crates/efevm/API_INDEX.md](crates/efevm/API_INDEX.md): the `.efapi` format.
 - [examples/script_demo](examples/script_demo): the example game (`cargo xtask run script_demo native` builds and runs its scripts).
 

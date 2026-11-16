@@ -27,10 +27,10 @@ use util::{cargo, dry_run, miss_line, ok_line, root, run, stdin_is_tty, step, wa
     about = "Build, run and serve efeengine examples (native SDL3 or web/wasm)",
     after_help = "Run without a command in a terminal to choose an example interactively.\n\
                   Native builds also write <example>.efapi (the script API index) next to the binary and \
-                  assemble examples/<example>/scripts/*.efa into scripts/*.efvm beside it (scripts with a \
-                  `; needs-mod:` header are skipped); `run` sets EFE_SCRIPT_DIR. See `api-export`.\n\
-                  Mods: examples/<example>/mods/*/ (folders with a mod.toml) are packed into .efmod packages \
-                  by `mods`, and build/run/dist copy them into mods/ next to the game. See `mods`.\n\
+                  copy examples/<example>/scripts/*.efa beside it into scripts/ (the game compiles them at \
+                  run time); `run` sets EFE_SCRIPT_DIR. `check-scripts` assembles them against the index. \n\
+                  Mods: examples/<example>/mods/*/ (folders with a mod.toml) are packed by `mods` as a check; \
+                  native builds copy the folders into mods/ next to the game, dist packs .efmod files. See `mods`.\n\
                   Environment: CARGO_TARGET_DIR is respected; WASM_BINDGEN selects a wasm-bindgen binary."
 )]
 struct Cli {
@@ -70,6 +70,11 @@ enum Cmd {
     /// Pack examples/<example>/mods/*/ into .efmod packages (target/mods/<example>/).
     /// Mods are packed against the game's API index and against each other, in passes.
     Mods {
+        example: Option<String>,
+    },
+    /// Assemble every examples/<example>/scripts/*.efa against the game's API index (exported
+    /// first) and fail listing the diagnostics. Scripts with a `; needs-mod:` header are skipped.
+    CheckScripts {
         example: Option<String>,
     },
     /// Serve an existing dist/<example>/ folder without rebuilding.
@@ -187,6 +192,14 @@ fn real_main(cli: Cli) -> Result<()> {
             let project = Project::load()?;
             let ex = pick_example(&project, example.as_deref())?;
             mods::mods_cmd(&project, &ex, preflight)
+        }
+        Cmd::CheckScripts { example } => {
+            let project = Project::load()?;
+            let ex = pick_example(&project, example.as_deref())?;
+            if preflight {
+                preflight_native(false)?;
+            }
+            api::check_scripts(&project, &ex)
         }
         Cmd::Serve { example, server } => {
             let project = Project::load()?;
@@ -381,7 +394,7 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
     })?;
     let scripts = api::after_native_build(project, ex, release)?;
     let profile = api::profile_dir(project, release);
-    mods::pack_into(project, ex, &profile.join(format!("{}.efapi", ex.dir)), &profile.join("mods"))?;
+    mods::install_native(project, ex, &profile.join(format!("{}.efapi", ex.dir)), &profile.join("mods"))?;
     if action == Action::Run {
         step(format!("native run: {} ({desc})", ex.package));
         let mut c = cargo();

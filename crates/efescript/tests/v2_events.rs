@@ -33,7 +33,7 @@ fn index() -> ApiIndex {
 
 fn with_api(src: &str) -> Result<Module, Vec<Diagnostic>> {
     let ix = index();
-    assemble_with(src, "t.efa", &AsmOptions { api: Some(&ix) }).map_err(|d| d.0)
+    assemble_with(src, "t.efa", &AsmOptions { api: Some(&ix), ..Default::default() }).map_err(|d| d.0)
 }
 
 fn plain(src: &str) -> Result<Module, Vec<Diagnostic>> {
@@ -305,7 +305,7 @@ export fn main() {
         .with("p.efa", "export struct Hit2 {\n    damage: i32\n}\nprovide event hit2(&Hit2), \"A hit.\"\npub fn f() {\n    ret\n}\n");
     // Hit2 is exported in p.efa and a different struct in main.efa; same name and size
     let ix = index();
-    let m = assemble_program("main.efa", &files, &AsmOptions { api: Some(&ix) }).unwrap_or_else(|d| panic!("{d}"));
+    let m = assemble_program("main.efa", &files, &AsmOptions { api: Some(&ix), ..Default::default() }).unwrap_or_else(|d| panic!("{d}"));
     assert_eq!(evs(&m), vec![ev("mymod", "hit2", Some(("Hit2", 4)))]);
 }
 

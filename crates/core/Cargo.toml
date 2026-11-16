@@ -36,6 +36,13 @@ glam = { version = "0.34.3", features = ["bytemuck"] }
 efevm = { path = "../efevm" }
 # mod packages (.efmod): reader only, no `write` feature (no compressor on the engine path)
 efemod = { path = "../efemod" }
+# the .efa compiler (feature `efa`)
+efa = { path = "../efa", optional = true }
+# PNG decoding (render/png.rs): zlib inflate and chunk CRCs, pure Rust, also on wasm
+miniz_oxide = "0.8"
+crc32fast = "1"
+# cache keys and verification (pure Rust, also on wasm)
+blake3 = { version = "1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 serde_json = "1.0.145"
@@ -44,7 +51,8 @@ efemod = { path = "../efemod", features = ["write"] }
 
 
 [features]
-default = []
+default = ["efa"]
+efa = ["dep:efa"]
 debug_log = []
 static=["sdl3/build-from-source","sdl3/static-link"]
 

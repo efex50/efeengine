@@ -1,0 +1,9 @@
+[package]
+name = "efa"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+efevm = { path = "../efevm" }
+efemod = { path = "../efemod" }
+toml = "1"

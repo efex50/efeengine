@@ -9,3 +9,11 @@ game = "script_demo"
 # package. engine.events is for the send of the mod's own event.
 [permissions]
 namespaces = ["engine.log", "engine.events"]
+
+# Free-form metadata: the game logs it after the load (Manifest.meta).
+[meta]
+category = "items"
+max_stack = 99
+
+[meta.ui]
+icon = "bag"
