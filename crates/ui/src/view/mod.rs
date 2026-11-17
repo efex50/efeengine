@@ -40,6 +40,6 @@ mod plugin;
 mod reconcile;
 
 pub use el::{
-    El, IntoChildren, button, button_with, checkbox, column, container, image, row, scroll, slider, slot, text, text_input,
+    El, IntoChildren, button, button_with, checkbox, column, container, gpu_view, image, row, scroll, slider, slot, text, text_input,
 };
 pub use plugin::{RunCondition, UiView, UiViews, ViewCx, changed};

@@ -114,6 +114,7 @@ impl Plugin for UiPlugin {
 
         let mut bcx = UiBackendCx::new((0.0, 0.0), 1.0);
         backend.init(&mut bcx);
+        backend.set_painters(&crate::painter::EngineUiExt::ui_painters(engine));
         let backend: Shared = Rc::new(RefCell::new(backend));
         let bcx = Rc::new(RefCell::new(bcx));
         // Pointer / keyboard input the backend consumed since the last `ui_signals` run.

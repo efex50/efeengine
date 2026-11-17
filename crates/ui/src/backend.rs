@@ -77,6 +77,12 @@ pub trait UiBackend: 'static {
     /// Window size in logical pixels and scale factor changed.
     fn resize(&mut self, _logical: (f32, f32), _scale: f32) {}
 
+    /// Once, right after `init`: the registry of GPU-view painters (API.md section 17).
+    /// Backends that draw `GpuView` nodes keep the handle (it is a cheap clone; painters added
+    /// to the engine later show up in it) and look painters up by `NodeKind::GpuView::painter`
+    /// at render time. Backends that never paint them (headless) ignore it.
+    fn set_painters(&mut self, _painters: &crate::painter::UiPainters) {}
+
     /// Native: the GPU is ready (the engine's render overlay `init`).
     fn gpu_init(&mut self, _gpu: &Gpu) {}
 

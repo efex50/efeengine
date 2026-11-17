@@ -6,7 +6,7 @@ use std::sync::Arc;
 use efeengine_core::prelude::TextureHandle;
 
 use crate::node::{ImageFit, NodeKind};
-use crate::signal::{UiSignalKind, UiValue};
+use crate::signal::{PointerEvent, UiSignalKind, UiValue};
 #[allow(unused_imports)]
 use crate::style::{Align, Border, Color, Direction, Edges, FontId, Justify, Size, Style, TextAlign, style_fields};
 
@@ -20,11 +20,12 @@ pub(crate) struct Handlers<Msg> {
     pub input: Option<Map<String, Msg>>,
     pub submit: Option<Map<String, Msg>>,
     pub focus: Option<Map<bool, Msg>>,
+    pub pointer: Option<Map<PointerEvent, Msg>>,
 }
 
 impl<Msg> Default for Handlers<Msg> {
     fn default() -> Self {
-        Self { click: None, change: None, toggle: None, input: None, submit: None, focus: None }
+        Self { click: None, change: None, toggle: None, input: None, submit: None, focus: None, pointer: None }
     }
 }
 
@@ -36,6 +37,7 @@ impl<Msg: Clone> Handlers<Msg> {
             && self.input.is_none()
             && self.submit.is_none()
             && self.focus.is_none()
+            && self.pointer.is_none()
     }
 
     /// The message for a signal of the widget these handlers belong to.
@@ -48,6 +50,9 @@ impl<Msg: Clone> Handlers<Msg> {
             UiSignalKind::Submit(t) => self.submit.as_ref().map(|f| f(t.clone())),
             UiSignalKind::Focus(b) => self.focus.as_ref().map(|f| f(*b)),
             UiSignalKind::Hover(_) => None,
+            UiSignalKind::Pointer { pos, buttons, wheel } => {
+                self.pointer.as_ref().map(|f| f(PointerEvent { pos: *pos, buttons: *buttons, wheel: *wheel }))
+            }
         }
     }
 
@@ -71,6 +76,7 @@ impl<Msg: Clone> Handlers<Msg> {
             input: wrap(self.input, f),
             submit: wrap(self.submit, f),
             focus: wrap(self.focus, f),
+            pointer: wrap(self.pointer, f),
         }
     }
 }
@@ -273,6 +279,16 @@ impl<Msg: Clone + Send + Sync + 'static> El<Msg> {
         self
     }
 
+    /// GPU view: a pointer signal (move over the view, button, wheel) in view-relative logical
+    /// px. Turns the view's `pointer` flag on.
+    pub fn on_pointer(mut self, f: impl Fn(PointerEvent) -> Msg + Send + Sync + 'static) -> Self {
+        if let NodeKind::GpuView { pointer, .. } = &mut self.kind {
+            *pointer = true;
+        }
+        self.handlers.pointer = Some(Arc::new(f));
+        self
+    }
+
     /// Converts the message type of this element and all its children (Elm's `Html.map`), so a
     /// reusable component view with its own message enum can be embedded in a parent view:
     /// `component(&s.inner).map(Msg::Inner)`.
@@ -328,6 +344,12 @@ pub fn text_input<Msg>(value: impl Into<String>) -> El<Msg> {
 
 pub fn image<Msg>(texture: TextureHandle, fit: ImageFit) -> El<Msg> {
     El::new(NodeKind::Image { texture, fit })
+}
+
+/// A view the game draws with wgpu: the painter registered with `add_ui_painter(name, ..)`.
+/// Give it a size (`.width(..)`, `.height(..)`); add `.on_pointer(..)` for pointer input.
+pub fn gpu_view<Msg>(painter: &str) -> El<Msg> {
+    El::new(NodeKind::gpu_view(painter))
 }
 
 /// A flex box without a fixed direction (set it with `.direction(..)`).

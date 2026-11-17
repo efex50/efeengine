@@ -17,7 +17,7 @@ pub fn element_tag(kind: &NodeKind) -> &'static str {
     match kind {
         NodeKind::Container | NodeKind::Scroll => "div",
         NodeKind::Text { .. } => "span",
-        NodeKind::Image { .. } => "canvas",
+        NodeKind::Image { .. } | NodeKind::GpuView { .. } => "canvas",
         NodeKind::Button { .. } => "button",
         NodeKind::Checkbox { .. } => "label",
         NodeKind::Slider { .. } | NodeKind::TextInput { .. } => "input",

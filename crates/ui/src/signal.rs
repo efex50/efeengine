@@ -65,6 +65,29 @@ pub enum UiSignalKind {
     Focus(bool),
     /// Pointer entered or left (only nodes that opted in with `.hover_signals()`).
     Hover(bool),
+    /// GpuView with `pointer`: the pointer moved over the view, a button changed, or the wheel
+    /// turned. `pos` is in logical px relative to the view's top-left corner, `buttons` the
+    /// pressed buttons ([`PointerEvent::LEFT`], ...), `wheel` the scroll delta of this event
+    /// (zero for other events).
+    Pointer { pos: (f32, f32), buttons: u8, wheel: (f32, f32) },
+}
+
+/// The data of a [`UiSignalKind::Pointer`] signal, as the view layer's `on_pointer` gets it.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct PointerEvent {
+    pub pos: (f32, f32),
+    pub buttons: u8,
+    pub wheel: (f32, f32),
+}
+
+impl PointerEvent {
+    pub const LEFT: u8 = 1;
+    pub const RIGHT: u8 = 2;
+    pub const MIDDLE: u8 = 4;
+
+    pub fn left(&self) -> bool {
+        self.buttons & Self::LEFT != 0
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -116,7 +139,7 @@ impl UiCtxExt for ParCtx<'_> {
 /// Dropped: stale widgets, widgets that are not shown or not enabled (own flag or an
 /// ancestor's), widgets on a layer below a visible modal layer (lower `z`; API.md section 3),
 /// kinds that do not fit the node (`Click` on a non-button, `Changed` with the
-/// wrong value type, ...), `Hover` for nodes without `.hover_signals()`. Kept `Changed` values are
+/// wrong value type, ...), `Hover` for nodes without `.hover_signals()`, `Pointer` for anything but a `GpuView` with `.pointer_signals()`. Kept `Changed` values are
 /// sanitized (slider clamped, text cut to `max_len`), written into the tree WITHOUT a journal
 /// entry (the backend already shows them), and the signal carries the sanitized value. Key and
 /// owner are filled from the node.
@@ -140,6 +163,7 @@ pub fn filter_signals(tree: &mut UiTree, raw: Vec<UiSignal>) -> Vec<UiSignal> {
             UiSignalKind::Submit(t) if matches!(node.kind, NodeKind::TextInput { .. }) => UiSignalKind::Submit(t),
             UiSignalKind::Focus(f) => UiSignalKind::Focus(f),
             UiSignalKind::Hover(h) if node.hover_signals => UiSignalKind::Hover(h),
+            k @ UiSignalKind::Pointer { .. } if matches!(node.kind, NodeKind::GpuView { pointer: true, .. }) => k,
             _ => continue,
         };
         let node = tree.get(id).expect("checked above");

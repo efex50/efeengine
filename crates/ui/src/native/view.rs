@@ -254,6 +254,10 @@ fn node_el<'a>(n: &'a VNode, parent: Parent, fill: bool, a: &'a Assets) -> Eleme
                 None => space().width(w).height(h)._boxed(),
             }
         }
+        NodeKind::GpuView { .. } => {
+            let (w, h) = dims(st, parent);
+            space().width(w).height(h)._boxed()
+        }
         NodeKind::Button { label } => button_el(n, parent, label, a),
         NodeKind::Checkbox { label, checked } => {
             let (w, _) = dims(st, parent);

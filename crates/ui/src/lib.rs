@@ -15,6 +15,7 @@ pub mod journal;
 #[cfg(all(feature = "iced", not(target_arch = "wasm32")))]
 pub mod native;
 pub mod node;
+pub mod painter;
 pub mod plugin;
 pub mod signal;
 pub mod style;
@@ -32,8 +33,9 @@ pub use headless::{HeadlessBackend, HeadlessHandle};
 pub use id::{Owner, WidgetId};
 pub use journal::UiChange;
 pub use node::{Anchor, ClassId, ImageFit, KindTag, Layer, Node, NodeKind};
+pub use painter::{EngineUiExt, UiPainter, UiPainters, ViewTarget};
 pub use plugin::UiPlugin;
-pub use signal::{UiCtxExt, UiSignal, UiSignalKind, UiValue, filter_signals};
+pub use signal::{PointerEvent, UiCtxExt, UiSignal, UiSignalKind, UiValue, filter_signals};
 pub use style::{Align, Border, Color, Direction, Edges, FontId, Justify, Size, Style, TextAlign};
 pub use testing::UiTest;
 pub use theme::{StateStyles, Theme, WidgetState};

@@ -144,4 +144,9 @@ impl UiTest {
     pub fn hover(&mut self, key: &str, hovered: bool) {
         self.signal(key, UiSignalKind::Hover(hovered));
     }
+
+    /// A pointer signal on a GPU view: `pos` in view-relative logical px.
+    pub fn pointer(&mut self, key: &str, pos: (f32, f32), buttons: u8) {
+        self.signal(key, UiSignalKind::Pointer { pos, buttons, wheel: (0.0, 0.0) });
+    }
 }

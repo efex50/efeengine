@@ -507,6 +507,11 @@ impl UiTree {
         NodeRef { tree: self, id }
     }
 
+    /// A GPU view drawn by the painter registered under `painter` (API.md section 17).
+    pub fn gpu_view(&mut self, parent: WidgetId, painter: &str) -> NodeRef<'_> {
+        self.create(parent, NodeKind::gpu_view(painter))
+    }
+
     pub fn image(&mut self, parent: WidgetId, texture: TextureHandle, fit: ImageFit) -> NodeRef<'_> {
         self.create(parent, NodeKind::Image { texture, fit })
     }
@@ -973,6 +978,16 @@ impl NodeRef<'_> {
 
     pub fn enabled(self, v: bool) -> Self {
         self.tree.set_enabled(self.id, v);
+        self
+    }
+
+    /// A `GpuView` sends `Pointer` signals (no effect on other kinds).
+    pub fn pointer_signals(self) -> Self {
+        self.tree.edit_kind(self.id, |k| {
+            if let NodeKind::GpuView { pointer, .. } = k {
+                *pointer = true;
+            }
+        });
         self
     }
 

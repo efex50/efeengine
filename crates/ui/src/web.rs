@@ -633,7 +633,8 @@ impl Inner {
                     draw_image(&e.el, img.size(), img.rgba8());
                 }
             }
-            NodeKind::Container | NodeKind::Scroll => {}
+            // TODO(web gpu views): the canvas stays empty until the web backend paints painters into it.
+            NodeKind::Container | NodeKind::Scroll | NodeKind::GpuView { .. } => {}
         }
     }
 

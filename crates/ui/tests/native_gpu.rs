@@ -10,6 +10,7 @@ use efeengine_ui::native::IcedBackend;
 use efeengine_ui::{Layer, UiBackend, UiBackendCx, UiSignal, UiSignalKind, UiTree, UiValue, WidgetId};
 
 struct Rig {
+    instance: wgpu::Instance,
     device: wgpu::Device,
     queue: wgpu::Queue,
     adapter: wgpu::Adapter,
@@ -46,12 +47,14 @@ impl Rig {
             device: &device,
             queue: &queue,
             adapter: &adapter,
+            instance: &instance,
+            backend: adapter.get_info().backend,
             surface_format: wgpu::TextureFormat::Rgba8UnormSrgb,
             size: SIZE,
             scale_factor: 1.0,
         };
         be.gpu_init(&gpu);
-        let mut rig = Rig { device, queue, adapter, target, be, tree };
+        let mut rig = Rig { instance, device, queue, adapter, target, be, tree };
         rig.sync();
         rig
     }
@@ -68,6 +71,8 @@ impl Rig {
             device: &self.device,
             queue: &self.queue,
             adapter: &self.adapter,
+            instance: &self.instance,
+            backend: self.adapter.get_info().backend,
             surface_format: wgpu::TextureFormat::Rgba8UnormSrgb,
             size: SIZE,
             scale_factor: 1.0,

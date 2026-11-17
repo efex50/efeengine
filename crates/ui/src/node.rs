@@ -35,6 +35,10 @@ pub enum NodeKind {
     TextInput { value: String, placeholder: String, max_len: u32, password: bool },
     /// Clips children, scrolls on the main axis.
     Scroll,
+    /// A view the game draws with wgpu: the [`UiPainter`](crate::UiPainter) registered under
+    /// `painter` (API.md section 17). Sized and clipped like an `Image`; an `Auto` size is
+    /// empty (give it a size). `pointer`: send `Pointer` signals.
+    GpuView { painter: Arc<str>, pointer: bool },
 }
 
 /// [`NodeKind`] without its data: the key of per-kind theme styles.
@@ -48,10 +52,11 @@ pub enum KindTag {
     Slider,
     TextInput,
     Scroll,
+    GpuView,
 }
 
 impl KindTag {
-    pub const ALL: [KindTag; 8] = [
+    pub const ALL: [KindTag; 9] = [
         KindTag::Container,
         KindTag::Text,
         KindTag::Image,
@@ -60,6 +65,7 @@ impl KindTag {
         KindTag::Slider,
         KindTag::TextInput,
         KindTag::Scroll,
+        KindTag::GpuView,
     ];
 
     /// Lowercase name, as used in the web stylesheet (`.efui-k-<name>`).
@@ -73,6 +79,7 @@ impl KindTag {
             KindTag::Slider => "slider",
             KindTag::TextInput => "text-input",
             KindTag::Scroll => "scroll",
+            KindTag::GpuView => "gpu-view",
         }
     }
 }
@@ -88,6 +95,7 @@ impl NodeKind {
             NodeKind::Slider { .. } => KindTag::Slider,
             NodeKind::TextInput { .. } => KindTag::TextInput,
             NodeKind::Scroll => KindTag::Scroll,
+            NodeKind::GpuView { .. } => KindTag::GpuView,
         }
     }
 
@@ -125,6 +133,11 @@ impl NodeKind {
             }
             _ => {}
         }
+    }
+
+    /// A GPU view drawn by the painter registered as `painter`, without pointer signals.
+    pub fn gpu_view(painter: &str) -> NodeKind {
+        NodeKind::GpuView { painter: painter.into(), pointer: false }
     }
 
     pub fn text_input(value: impl Into<String>) -> NodeKind {
