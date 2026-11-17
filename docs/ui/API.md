@@ -667,6 +667,15 @@ gpu_view("minimap").on_pointer(Msg::Map)                     // view layer
 - Pointer input: with `.pointer_signals()` (view layer: `on_pointer`), the node sends
   `UiSignalKind::Pointer { pos: (f32, f32), buttons: u8, wheel: (f32, f32) }` in view-relative logical
   px, plus normal `Hover`. A captured pointer over the view is UI-owned input like any widget.
+- Registration: the engine is a core type, so `add_ui_painter` is the extension trait method
+  `efeengine_ui::EngineUiExt::add_ui_painter(&mut self, name, impl UiPainter) -> &mut Self`
+  (before or after `UiPlugin`). Backends reach painters through the `UiPainters` handle that
+  `UiBackend::set_painters` hands them after `init` (an `Rc` registry; clones share it).
+- Pointer: `UiSignalKind::Pointer { pos, buttons, wheel }` as above; the view layer's
+  `.on_pointer(fn(PointerEvent) -> Msg)` (`PointerEvent { pos, buttons, wheel }`, `LEFT`/`RIGHT`/`MIDDLE`
+  masks) also turns the `pointer` flag on. Events: move inside the view, button press / release
+  (a release after leaving the view still arrives), wheel.
+- Size: like `Image`, an `Auto` size is empty and nothing is painted; give the view a size or `Fill`.
 - A painter name with no registered painter: the view stays transparent and a warning is logged once.
 
 ### 17.2 Contract every backend meets
@@ -680,6 +689,11 @@ gpu_view("minimap").on_pointer(Msg::Map)                     // view layer
 | Size | Physical px; `resize` is called before the first `paint` and on every size or scale change. Zero-size views are not painted. |
 | Limits | The device's limits apply (WebGL2: no compute, no storage buffers); `gpu.limits()` tells the painter. |
 | No wgpu | Headless: never painted, layout only. SDL render mode (no wgpu): never painted, warning once. |
+
+Native (iced) as built: `ViewTarget.format` is the surface format (`Rgba8UnormSrgb` in
+`render_offscreen`); the view's texture is `round(logical size * scale)` physical px. Painters also
+run on frames where the rest of the UI is unchanged (they animate), once per frame per view.
+Draw order follows iced's layers: a view is above the quads of its own layer, below text and images of that layer.
 
 ### 17.3 Per backend
 

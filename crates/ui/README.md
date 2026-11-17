@@ -24,6 +24,12 @@ fn menu(s: &State) -> El<Msg> {
 }
 engine.add_plugin(UiView::new("menu", menu).layer(Layer::centered(10)))?;   // t.click("menu/play")
 
+// GPU views: a node the game draws with wgpu (API.md section 17)
+use efeengine_ui::EngineUiExt;
+engine.add_ui_painter("minimap", Minimap::new());          // impl UiPainter: resize(..), paint(gpu, encoder, &ViewTarget)
+// view layer: gpu_view("minimap").width(Size::Px(200.0)).height(Size::Px(200.0)).on_pointer(Msg::Map)
+// retained:   ui.gpu_view(panel, "minimap").pointer_signals();   -> UiSignalKind::Pointer { pos, buttons, wheel }
+
 // tests
 let mut t = UiTest::new(|e| { /* setup */ });
 t.click("menu/play");
