@@ -99,6 +99,8 @@ features = [
     "Document",
     "Element",
     "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
     "Event",
     "EventTarget",
     "KeyboardEvent",

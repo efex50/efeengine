@@ -5,6 +5,7 @@
 //! game supplies the drawing as a [`Renderer`] (`Engine::set_renderer`); the default is
 //! [`ClearRenderer`], which only clears. See `docs/RENDERING.md`.
 
+mod extra_surface;
 mod extract;
 mod frame;
 pub(crate) mod gpu;
@@ -12,6 +13,7 @@ mod png;
 mod sprite_renderer;
 mod textures;
 
+pub use extra_surface::{ExtraSurface, SurfaceFrame};
 pub use extract::{camera_matrices, render_extract};
 pub use frame::{CameraView, MeshInstance, RenderFrame, RenderWarnings, SpriteInstance};
 pub use png::PngError;
@@ -22,6 +24,10 @@ pub use textures::{Image, TextureChanges, TextureError, Textures};
 pub struct Gpu<'a> {
     /// The adapter the device was created from (renderers like `iced_wgpu` need it).
     pub adapter: &'a wgpu::Adapter,
+    /// The instance the device came from (create extra surfaces on it).
+    pub instance: &'a wgpu::Instance,
+    /// The backend in use (`Gl` = WebGL2 on the web).
+    pub backend: wgpu::Backend,
     pub device: &'a wgpu::Device,
     pub queue: &'a wgpu::Queue,
     /// Format of the surface; render pipelines that draw to `target` must use it.

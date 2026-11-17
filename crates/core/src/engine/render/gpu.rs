@@ -9,10 +9,9 @@ use super::Gpu;
 /// Everything the engine needs to render to the main window. Declared in `Engine` BEFORE the
 /// window so the surface drops before the window it was created from.
 pub(crate) struct GpuContext {
-    #[allow(dead_code)]
     instance: Instance,
-    #[allow(dead_code)]
     adapter: Adapter,
+    backend: wgpu::Backend,
     pub device: Device,
     pub queue: Queue,
     pub surface: Surface<'static>,
@@ -100,13 +99,16 @@ impl GpuContext {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
-        Ok(Self { instance, adapter, device, queue, surface, config, suspended: false, scale_factor: sanitize_scale(window.scale_factor()) })
+        let backend = info.backend;
+        Ok(Self { instance, adapter, backend, device, queue, surface, config, suspended: false, scale_factor: sanitize_scale(window.scale_factor()) })
     }
 
     /// The borrowed view handed to the renderer.
     pub fn gpu(&self) -> Gpu<'_> {
         Gpu {
             adapter: &self.adapter,
+            instance: &self.instance,
+            backend: self.backend,
             device: &self.device,
             queue: &self.queue,
             surface_format: self.config.format,

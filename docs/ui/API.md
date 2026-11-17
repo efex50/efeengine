@@ -687,14 +687,30 @@ gpu_view("minimap").on_pointer(Msg::Map)                     // view layer
 |---|---|
 | Native (iced) | iced's `shader` widget: the painter draws into an offscreen texture the size of the view, which the widget composites (premultiplied) in UI order, clipped. |
 | Web, WebGPU | Each GPU view node is its own `<canvas>` in the DOM tree. The painter renders to that canvas's surface on the shared device (no copies; DOM z-order and clipping). |
-| Web, WebGL2 | The GL context cannot be shared between canvases. The core surface layer provides the view canvases anyway (OffscreenCanvas + `bitmaprenderer` hand-off, or a copy path, chosen in implementation and documented in `crates/core/structure.md`). |
+| Web, WebGL2 | The GL context cannot be shared between canvases, so each view canvas gets a 2D context and core's copy path feeds it: the painter draws into an internal `Rgba8Unorm` texture, `present` reads it back (buffer map) and `putImageData`s the un-premultiplied pixels. One frame of latency; costs a GPU->CPU readback plus a CPU un-premultiply per view per frame, so keep GPU views small on WebGL2. |
 
-### 17.4 Core: surface set
+### 17.4 Core: extra surfaces
 
-Core owns a `SurfaceSet`: the main surface plus extra surfaces on the same device (a canvas per web
-GPU view now, a surface per window later). `add`, `resize`, `acquire`, `present`, per surface, with the
-WebGL2 path hidden inside it. The UI web backend asks core for a surface per GPU-view canvas; the
-iced backend does not need it (it uses textures). `Engine::create_window` will use it later.
+Core exposes `efeengine_core::render::ExtraSurface` (not a `SurfaceSet`: the caller owns the surfaces):
+extra drawing surfaces on the engine's shared device, one per web GPU-view canvas now, one per window
+later (`Gpu` carries `instance` and `backend` for this).
+
+```rust
+ExtraSurface::for_canvas(&gpu, canvas) -> Result<Self, String>   // wasm32 only
+surface.format()                       // fixed for the run
+surface.resize(&gpu, (w, h))           // physical px; sets canvas backing size; 0 = not drawn
+surface.acquire(&gpu) -> Option<SurfaceFrame>   // { view, format, size }; None = skip this frame
+surface.present(&gpu, frame)           // after submitting the commands that drew into frame.view
+```
+
+- WebGPU: a real surface on the shared device (format: the main surface's if supported, else the first
+  non-sRGB; alpha `PreMultiplied`, else `Inherit`, else the first mode the canvas offers: without
+  premultiplied support transparent pixels may composite opaque).
+- WebGL2: copy path as in 17.3 (format `Rgba8Unorm`). The readback is double-gated: if the previous one
+  has not completed when a frame is presented, that frame is re-read at the next `acquire`, so the last
+  drawn content always arrives. The path is logged once. Details in `crates/core/structure.md`.
+- The iced backend does not need it (textures). `Engine::create_window` will use the same layer later
+  (`ExtraSurface::from_surface` is the native hook).
 
 ## 18. Open questions
 

@@ -19,7 +19,7 @@ pub mod math {
 
 pub mod render {
     //! Writing a renderer or touching the GPU: `Renderer`, `Gpu`, the `RenderFrame` and its parts, textures, plus the `wgpu` and `bytemuck` crates.
-    pub use crate::engine::render::{Renderer, RenderOverlay, Gpu, ClearRenderer, PngError, RenderFrame, CameraView, SpriteInstance, MeshInstance, TextureChanges, Textures, Image, TextureError, RenderWarnings, SpriteRenderer};
+    pub use crate::engine::render::{Renderer, RenderOverlay, Gpu, ExtraSurface, SurfaceFrame, ClearRenderer, PngError, RenderFrame, CameraView, SpriteInstance, MeshInstance, TextureChanges, Textures, Image, TextureError, RenderWarnings, SpriteRenderer};
     pub use bytemuck;
     pub use wgpu;
 }
