@@ -42,7 +42,9 @@ const USAGE: &str = r#"usage: efescript run   <file.efa|file.efvm> [--budget N] 
   against the merged --api inputs plus the [build] api list (relative to mod.toml), checks
   the manifest against the module, adds every file below [build] assets (default
   assets/) and writes the canonical package. The output is -o FILE, else
-  <id>-<version>.efmod in the current directory.
+  <id>-<version>.efmod in the current directory. It also writes the mod's API fragment next
+  to the output (<name>.efapi: its namespace, provides, events, structs and [[meta.component]]
+  components); merge it with the game's index to check scripts that use the mod.
 
   inspect prints a package's manifest, dependencies, permissions, provides (with
   signatures and docs), structs, events, assets with sizes, ignored entries (warnings)
@@ -311,6 +313,10 @@ fn v2_pack(args: &[String]) -> ! {
     let out = a.out.unwrap_or_else(|| packed.file_name.clone());
     std::fs::write(&out, &packed.bytes).unwrap_or_else(|e| v2_fail(format!("error: {out}: {e}")));
     eprintln!("packed {out} ({} bytes)", packed.bytes.len());
+    // `<out>.efapi` next to the package: the mod's API fragment (provides, events, structs, components).
+    let api_path = std::path::Path::new(&out).with_extension("efapi");
+    std::fs::write(&api_path, packed.api.to_json()).unwrap_or_else(|e| v2_fail(format!("error: {}: {e}", api_path.display())));
+    eprintln!("wrote {}", api_path.display());
     std::process::exit(0);
 }
 

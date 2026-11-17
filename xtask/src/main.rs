@@ -72,8 +72,21 @@ enum Cmd {
     Mods {
         example: Option<String>,
     },
+    /// Write the API index fragment (.efapi) of a mod folder, built from its declaration without
+    /// running the game: its provides, events, structs and [[meta.component]] components.
+    ModApi {
+        /// The mod folder (with mod.toml), usually examples/<example>/mods/<name>.
+        dir: PathBuf,
+        /// Output file (default: <folder name>.efapi in the current directory).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// The game's index to build against (default: exported from the example the mod is in).
+        #[arg(long)]
+        api: Option<PathBuf>,
+    },
     /// Assemble every examples/<example>/scripts/*.efa against the game's API index (exported
-    /// first) and fail listing the diagnostics. Scripts with a `; needs-mod:` header are skipped.
+    /// first) and fail listing the diagnostics. A script with a `; needs-mod: NAME` header is
+    /// checked against the game index merged with the .efapi fragment of mods/NAME.
     CheckScripts {
         example: Option<String>,
     },
@@ -192,6 +205,10 @@ fn real_main(cli: Cli) -> Result<()> {
             let project = Project::load()?;
             let ex = pick_example(&project, example.as_deref())?;
             mods::mods_cmd(&project, &ex, preflight)
+        }
+        Cmd::ModApi { dir, output, api } => {
+            let project = Project::load()?;
+            mods::mod_api_cmd(&project, &dir, output, api)
         }
         Cmd::CheckScripts { example } => {
             let project = Project::load()?;

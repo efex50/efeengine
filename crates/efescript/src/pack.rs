@@ -9,7 +9,7 @@ use std::path::Path;
 use efa::asm::FsSource;
 use efa::mod_folder::{build_mod, list_assets, BuildLimits};
 use efemod::{Manifest, Package, ReadLimits};
-use efevm::api::ApiIndex;
+pub use efevm::api::ApiIndex;
 
 pub use efa::mod_folder::{mod_index, read_mod_toml, BuildToml, ModToml};
 
@@ -22,6 +22,9 @@ pub struct Packed {
     pub bytes: Vec<u8>,
     /// `<id>-<version>.efmod`.
     pub file_name: String,
+    /// The mod's own API index fragment (`<id>.efapi`): its namespace, provides, events, structs
+    /// and `[[meta.component]]` components, built from the declaration (see [`efemod::api_fragment`]).
+    pub api: ApiIndex,
 }
 
 /// Packs the mod folder `dir`: reads `dir/mod.toml`, assembles `[build] entry` against the
@@ -50,7 +53,9 @@ pub fn pack_dir(dir: &Path, extra_apis: &[&ApiIndex]) -> Result<Packed, String> 
     let module_bytes = built.module.encode();
     let bytes = Package::write(&built.manifest, &module_bytes, &built.assets).map_err(|e| e.to_string())?;
     let file_name = format!("{}-{}.efmod", built.manifest.id, built.manifest.version);
-    Ok(Packed { manifest: built.manifest, module: built.module, bytes, file_name })
+    let api = efemod::api_fragment(&built.manifest, &built.module)
+        .map_err(|e| format!("mod `{}`: component `{}`: {}", built.manifest.id, e.component, e.reason))?;
+    Ok(Packed { manifest: built.manifest, module: built.module, bytes, file_name, api })
 }
 
 /// Reads an API input: `.efapi` (JSON index) or `.efmod` (the package's own index). Other

@@ -148,8 +148,11 @@ pub fn after_native_build(project: &Project, ex: &Example, release: bool) -> Res
 }
 
 /// `cargo xtask check-scripts <example>`: export the game index, then assemble every
-/// `examples/<example>/scripts/*.efa` (except `needs-mod` ones) against it. Fails listing the
-/// diagnostics of every script that does not assemble.
+/// `examples/<example>/scripts/*.efa` against it. A script with a `; needs-mod: NAME` header is
+/// assembled against the game index merged with the API fragment of the mod folder
+/// `examples/<example>/mods/NAME` (and the mods it depends on), built from its declaration. Fails
+/// listing the diagnostics of every script that does not assemble, and with a clear error when a
+/// needed mod folder cannot be found or built.
 pub fn check_scripts(project: &Project, ex: &Example) -> Result<()> {
     let sources = script_sources(&root().join("examples").join(&ex.dir).join("scripts"))?;
     if sources.is_empty() {
@@ -160,18 +163,29 @@ pub fn check_scripts(project: &Project, ex: &Example) -> Result<()> {
     api_export(project, ex, Some(index_path.clone()), false, false)?;
     let index = efescript::pack::read_api_input(&index_path).map_err(anyhow::Error::msg)?;
     let opts = efescript::asm::AsmOptions { api: Some(&index), ..Default::default() };
+    let mut merged: std::collections::BTreeMap<String, efescript::pack::ApiIndex> = Default::default();
 
     let mut failures = vec![];
     let mut checked = 0;
     for src in &sources {
         let text = std::fs::read_to_string(src).with_context(|| format!("reading {}", src.display()))?;
+        let mut script_opts = opts;
         if let Some(m) = needs_mod(&text) {
-            step(format!("skipping {} (needs mod `{m}`)", src.display()));
-            continue;
+            if !merged.contains_key(&m) {
+                let frags = crate::mods::fragments_for(ex, &index_path, &m)
+                    .with_context(|| format!("{} needs mod `{m}`", src.display()))?;
+                let mut parts: Vec<&efescript::pack::ApiIndex> = vec![&index];
+                parts.extend(frags.iter());
+                let ix = efescript::pack::ApiIndex::merge(&parts)
+                    .map_err(|e| anyhow::anyhow!("{}: merging the game index with mod `{m}`: {e}", src.display()))?;
+                merged.insert(m.clone(), ix);
+            }
+            step(format!("{}: using the API fragment of mod `{m}`", src.display()));
+            script_opts.api = merged.get(&m);
         }
         checked += 1;
         let (files, root_name) = efescript::asm::FsSource::for_file(&src.display().to_string());
-        match efescript::asm::assemble_program(&root_name, &files, &opts) {
+        match efescript::asm::assemble_program(&root_name, &files, &script_opts) {
             Ok(_) => println!("  ok: {}", src.display()),
             Err(d) => failures.push(format!("{}:\n{d}", src.display())),
         }

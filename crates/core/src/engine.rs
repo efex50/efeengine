@@ -4,7 +4,7 @@ use once_cell::sync::{Lazy, OnceCell};
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::{debug_info, engine::{config::{EngineConfig, Threads}, error::EngineError, events::EventRegistry, parallel::Executor, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::{Res, Resources}, schedule::{Access, Ctx, EngineCommand, Commands, ParCtx, Schedule, Stage, SystemEntry}, plugin::{Plugin, PluginError}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, window::WindowManager};
+use crate::{debug_info, engine::{config::{EngineConfig, Threads}, error::EngineError, events::EventRegistry, parallel::Executor, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::{Res, Resources}, schedule::{Access, Ctx, EngineCommand, Commands, ParCtx, Schedule, ScheduleError, Stage, SystemEntry}, plugin::{Plugin, PluginError}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, window::WindowManager};
 use crate::engine::components::{Camera, GlobalTransform, MeshHandle, Parent, Sprite, TextureHandle, Transform, Velocity, Visibility};
 use crate::engine::render::{self as rendering, gpu::GpuContext, ClearRenderer, RenderFrame, Renderer, Textures};
 use crate::{global_info, thread_pool::{init_global_pool, init_global_pool_auto}};
@@ -284,6 +284,9 @@ impl Engine {
     /// Plugins may add plugins from `build` (their dependencies must come first).
     pub fn add_plugin(&mut self, p: impl Plugin) -> Result<&mut Self, PluginError> {
         let name = p.name().to_string();
+        if !self.api_open() {
+            return Err(PluginError::Closed(name));
+        }
         if self.has_plugin(&name) {
             return Err(PluginError::AlreadyAdded(name));
         }
@@ -307,7 +310,39 @@ impl Engine {
         &self.plugins
     }
 
-    /// System names of `stage` in execution order.
+    /// Enable or disable every system named `name` (the name set with `.name(..)`, else the
+    /// type name of its closure; if several systems share a name, all are changed). A disabled
+    /// system is skipped, does not split batches and does not advance its change tick, so when
+    /// re-enabled it sees every change since it last ran. Errors if no system has that name.
+    pub fn set_system_enabled(&mut self, name: &str, enabled: bool) -> Result<(), ScheduleError> {
+        if self.schedule.set_enabled(name, enabled) == 0 {
+            return Err(ScheduleError::UnknownSystem(name.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Whether the system `name` is enabled (with several of that name: whether any is);
+    /// `None` if there is no such system. A system whose `run_if` is false still counts as enabled.
+    pub fn is_system_enabled(&self, name: &str) -> Option<bool> {
+        self.schedule.is_enabled(name)
+    }
+
+    /// Remove every system named `name` from all stages and return how many were removed
+    /// (an error if none). Systems can be removed at any time from outside the schedule; from
+    /// inside a system use `ctx.schedule().remove(..)`.
+    pub fn remove_system(&mut self, name: &str) -> Result<usize, ScheduleError> {
+        match self.schedule.remove(name) {
+            0 => Err(ScheduleError::UnknownSystem(name.to_string())),
+            n => Ok(n),
+        }
+    }
+
+    /// `(name, enabled)` of each system of `stage` in execution order.
+    pub fn system_states(&self, stage: Stage) -> Vec<(&str, bool)> {
+        self.schedule.system_states(stage)
+    }
+
+    /// System names of `stage` in execution order (disabled systems included).
     pub fn system_names(&self, stage: Stage) -> Vec<&str> {
         self.schedule.system_names(stage)
     }
@@ -345,6 +380,7 @@ impl Engine {
     /// Like [`register_component`](Self::register_component) with an owner (the game's name or
     /// a mod name), recorded in the index.
     pub fn register_component_owned<T: ScriptType + hecs::Component>(&mut self, owner: &str) -> Result<u32, TypeError> {
+        self.check_api_open(|| format!("component `{}`", std::any::type_name::<T>()))?;
         let id = self.state.types.register_owned::<T>(owner)?;
         self.index_or_rollback(id)
     }
@@ -352,8 +388,39 @@ impl Engine {
     /// Register a layout-only struct (no component; e.g. from a mod); returns its id. It is
     /// also put in the API index, so functions can take `&Name` parameters.
     pub fn register_struct(&mut self, desc: efevm::StructDesc) -> Result<u32, TypeError> {
+        self.check_api_open(|| format!("struct `{}`", desc.name))?;
         let id = self.state.types.register_struct(desc)?;
         self.index_or_rollback(id)
+    }
+
+    fn check_api_open(&self, what: impl FnOnce() -> String) -> Result<(), TypeError> {
+        if self.state.scripting.api_open() { Ok(()) } else { Err(TypeError::Closed { what: what() }) }
+    }
+
+    /// Whether API registration is still open: `register_host_fn`, `register_component(_owned)`,
+    /// `register_struct`, `register_event` and `add_plugin` work from `Engine::new` until the game
+    /// loop starts running (or the first frame runs when the engine is driven by `frame` /
+    /// `run_frames` / `tick`). After that they return an error ("API registration is closed once
+    /// the game loop starts; register in setup or Plugin::build; mods declare theirs in
+    /// mod.toml"). Mods are exempt: what a mod declares registers at load, whenever that is.
+    /// Not locked: systems, resources, Rust events, the renderer. Gate late features with
+    /// `SystemEntry::enabled` / `run_if` instead (docs/SYSTEMS.md).
+    pub fn api_open(&self) -> bool {
+        self.state.scripting.api_open()
+    }
+
+    /// Open API registration again. Dev only (an editor or hot reload of game code); a shipped
+    /// game never needs this. It does not re-run anything, and the next frame does not close it
+    /// again once the first frame has run (until then the first frame still closes it).
+    #[doc(hidden)]
+    pub fn reopen_api(&mut self) -> &mut Self {
+        self.state.scripting.set_api_open(true);
+        self
+    }
+
+    /// Close API registration (what the game loop does when it starts).
+    pub(crate) fn close_api(&mut self) {
+        self.state.scripting.set_api_open(false);
     }
 
     /// Index the just-registered type `id`; if the index refuses it, remove it from the
@@ -949,6 +1016,10 @@ impl Engine {
         // them (the one that queued it included) sees it as added/changed on its next run.
         self.state.world.increment_change_tick();
         self.commands.apply(&mut self.state.world, &self.state.types);
+        let sched = self.commands.take_sched();
+        if !sched.is_empty() {
+            self.schedule.apply_ops(sched);
+        }
         let cmds: Vec<EngineCommand> = self.commands.drain().collect();
         for c in cmds {
             match c {
@@ -1088,6 +1159,10 @@ impl Engine {
     /// the frame (remaining stages and render are skipped), then `Shutdown` runs once;
     /// `Startup` is skipped if the engine is killed before it. After that this is a no-op.
     pub fn frame(&mut self, now_secs: f64){
+        if !self.started {
+            // The first frame closes API registration (`game_loop` closed it already).
+            self.close_api();
+        }
         if self.status == EngineStatus::Kill && self.shut_down {
             return;
         }
@@ -1189,6 +1264,7 @@ impl Engine {
                 }
                 return;
             }
+            self.close_api();
             self.sdl_loop();
         }
         #[cfg(target_family = "wasm")]
@@ -1196,6 +1272,7 @@ impl Engine {
     }
     #[cfg(target_family = "wasm")]
     pub fn wasm_loop_start(mut self){
+        self.close_api();
         // The browser can't block on async GPU init (no pollster here), so init
         // graphics on the JS event loop first and start ticking once it is done.
         wasm_bindgen_futures::spawn_local(async move {

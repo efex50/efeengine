@@ -28,4 +28,6 @@ pub enum PluginError {
     AlreadyAdded(String),
     #[error("plugin `{plugin}` needs `{missing}` to be added first")]
     MissingDependency { plugin: String, missing: String },
+    #[error("cannot add plugin `{0}`: API registration is closed once the game loop starts; register in setup or Plugin::build (mods declare theirs in mod.toml)")]
+    Closed(String),
 }

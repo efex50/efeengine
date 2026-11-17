@@ -1,0 +1,10 @@
+[mod]
+id = "adder"
+version = "1.0.0"
+name = "Adder"
+description = "Provides adder.add, used by scripts/mod_user.efa (checked against this mod's .efapi by `cargo xtask check-scripts`)."
+game = "script_demo"
+
+# No host imports: a pure function.
+[permissions]
+namespaces = []

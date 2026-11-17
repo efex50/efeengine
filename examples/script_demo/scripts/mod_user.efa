@@ -2,9 +2,9 @@
 ; mod_user.efa - a script that calls a function provided by a mod.
 ;
 ; `adder.add` exists in the API index only after the mod `adder` is loaded (the e2e test builds it
-; with ModuleBuilder and an interface section), so this file must be
-; assembled against an index exported *after* that (the e2e test does; `cargo xtask build`
-; skips files with a `needs-mod:` header line). Attach it with Script::new(module, "update").
+; with ModuleBuilder; mods/adder is the same mod as a folder), so this file must be assembled
+; against the game index plus the mod's .efapi: `cargo xtask check-scripts script_demo` does that
+; for the `needs-mod:` header line. Attach it with Script::new(module, "update").
 ; Each frame: state = adder.add(state, 10), and the game scores a point.
 
 import adder.add

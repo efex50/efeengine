@@ -13,7 +13,7 @@ pub use crate::{
     engine::{window, messages, scripting, render, flags, thread_pool, commands, components, types, error, resources, time, config, schedule, events, input, order, plugin},
     engine::error::EngineError,
     engine::config::{EngineConfig, Threads},
-    engine::schedule::{Stage, Ctx, SystemEntry},
+    engine::schedule::{Stage, Ctx, SystemEntry, RunCtx, ScheduleCommands, PendingSystem, ScheduleError},
     engine::plugin::{Plugin, PluginError},
     engine::parallel::{Access, ParCtx},
     engine::commands::{Commands, EngineCommands, ParCommands},

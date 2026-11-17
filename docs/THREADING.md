@@ -57,6 +57,9 @@ Built in: `velocity_system` is a par system (`read Velocity, write Transform`, b
 `propagate_transforms` is a par system (structural changes through commands); `render_extract`
 and the script system are exclusive.
 
+Systems can be disabled, gated by a run condition, added late and removed; see [SYSTEMS.md](SYSTEMS.md).
+A disabled system is left out of the batches (it does not split one) and keeps its change tick.
+
 ## How batches are built
 
 Per stage, once (rebuilt lazily when a system is added or its order changes), as a pure

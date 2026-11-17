@@ -244,12 +244,16 @@ pub enum RegistryError {
     EventFunctionClash { name: String },
     /// `unregister_owner` would remove a struct that an event of another owner still carries.
     StructInUseByEvent { name: String, event: String },
+    /// Registration is closed: the game loop already started (`Engine::api_open`). `what` names
+    /// the refused item.
+    Closed { what: String },
 }
 
 impl fmt::Display for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use RegistryError as E;
         match self {
+            E::Closed { what } => write!(f, "cannot register {what}: API registration is closed once the game loop starts; register in setup or Plugin::build (mods declare theirs in mod.toml)"),
             E::InvalidNamespace(n) => write!(f, "`{n}` is not a valid namespace name"),
             E::EmptyOwner { namespace } => write!(f, "namespace {namespace} has an empty owner"),
             E::NamespaceOwner { namespace, owner, existing } => {

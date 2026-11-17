@@ -155,6 +155,7 @@ fn mod_policy(r: &ModRequest<'_>) -> Result<Grant, String> {
     let namespaces: &[&str] = match r.manifest.id.as_str() {
         "inventory" => &["engine.log", "engine.events"],
         "shop" => &["engine.events", "game"],
+        "adder" => &[],
         other => return Err(format!("{other} is not welcome")),
     };
     Ok(Grant { namespaces: namespaces.iter().map(|s| s.to_string()).collect(), ..Grant::default() })

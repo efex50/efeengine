@@ -31,163 +31,16 @@ use super::packages::ModError;
 use super::{ModuleId, Scripting};
 use crate::engine::types::TypeRegistry;
 
-/// Most components one mod may declare, whatever the grant says.
-pub const MAX_COMPONENTS_PER_MOD: usize = 256;
-/// Most fields one component may have.
-pub const MAX_FIELDS: usize = 64;
-/// Largest size of one component, whatever the grant says.
-pub const MAX_COMPONENT_BYTES: u32 = 64 * 1024;
+pub use efemod::components::{component_name, parse_components_raw, ModComponent, MAX_COMPONENTS_PER_MOD, MAX_COMPONENT_BYTES, MAX_FIELDS};
 
 /// Marks the module whose script spawned an entity. Rust-only and untracked (not in the
 /// `TypeRegistry`, so scripts never see it); an unload despawns the entities of the module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpawnedBy(pub ModuleId);
 
-/// One component a mod declares.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModComponent {
-    /// The name as declared (`Health`).
-    pub name: String,
-    /// Whether change ticks are recorded (`tracked`, default true).
-    pub tracked: bool,
-    /// The layout: name `mod:<mod>/<Name>`, owner `mod:<mod>`, `repr(C)` offsets.
-    pub desc: StructDesc,
-}
-
-impl ModComponent {
-    /// Size in bytes.
-    pub fn size(&self) -> u32 {
-        self.desc.size
-    }
-    /// Alignment in bytes.
-    pub fn align(&self) -> u32 {
-        self.desc.align
-    }
-    /// The id scripts and Rust use: `fnv1a32` of the full name.
-    pub fn id(&self) -> u32 {
-        TypeRegistry::id_of_name(&self.desc.name)
-    }
-}
-
-/// `mod:<mod>/<component>`.
-pub fn component_name(mod_id: &str, component: &str) -> String {
-    format!("mod:{mod_id}/{component}")
-}
-
-fn bad<T>(id: &str, component: &str, reason: impl Into<String>) -> Result<T, ModError> {
-    Err(ModError::Component { id: id.to_string(), component: component.to_string(), reason: reason.into() })
-}
-
 /// Parse and lay out the components of `meta.component`. Nothing is registered.
 pub fn parse_components(mod_id: &str, meta: Option<&Value>) -> Result<Vec<ModComponent>, ModError> {
-    let Some(list) = meta.and_then(|m| m.get("component")) else { return Ok(Vec::new()) };
-    let Some(list) = list.as_array() else {
-        return bad(mod_id, "", "`meta.component` must be an array of tables (`[[meta.component]]`)");
-    };
-    if list.len() > MAX_COMPONENTS_PER_MOD {
-        return bad(mod_id, "", format!("{} components declared, at most {MAX_COMPONENTS_PER_MOD}", list.len()));
-    }
-    let mut out: Vec<ModComponent> = Vec::new();
-    for (i, c) in list.iter().enumerate() {
-        let Some(entries) = c.entries() else { return bad(mod_id, &format!("#{i}"), "a component must be a table") };
-        let name = match c.get("name").and_then(Value::as_str) {
-            Some(n) => n.to_string(),
-            None => return bad(mod_id, &format!("#{i}"), "`name` is missing or not a string"),
-        };
-        if !efevm::api::is_ident(&name) {
-            return bad(mod_id, &name, "the name is not an identifier");
-        }
-        if out.iter().any(|o| o.name == name) {
-            return bad(mod_id, &name, "declared twice");
-        }
-        for (k, _) in entries {
-            if !["name", "doc", "fields", "tracked"].contains(&k.as_str()) {
-                return bad(mod_id, &name, format!("unknown key `{k}` (known: name, doc, fields, tracked)"));
-            }
-        }
-        let doc = match c.get("doc") {
-            None => String::new(),
-            Some(v) => match v.as_str() {
-                Some(s) => s.to_string(),
-                None => return bad(mod_id, &name, "`doc` must be a string"),
-            },
-        };
-        let tracked = match c.get("tracked") {
-            None => true,
-            Some(v) => match v.as_bool() {
-                Some(b) => b,
-                None => return bad(mod_id, &name, "`tracked` must be true or false"),
-            },
-        };
-        let Some(fields) = c.get("fields").and_then(Value::as_array) else {
-            return bad(mod_id, &name, "`fields` is missing or not an array");
-        };
-        if fields.is_empty() {
-            return bad(mod_id, &name, "a component needs at least one field");
-        }
-        if fields.len() > MAX_FIELDS {
-            return bad(mod_id, &name, format!("{} fields, at most {MAX_FIELDS}", fields.len()));
-        }
-        let full = component_name(mod_id, &name);
-        let mut desc = StructDesc::new(full, 0, 1).doc(doc);
-        desc.owner = format!("mod:{mod_id}");
-        let (mut offset, mut align) = (0u64, 1u32);
-        for (j, f) in fields.iter().enumerate() {
-            let Some(fe) = f.entries() else { return bad(mod_id, &name, format!("field #{j} must be a table")) };
-            let Some(fname) = f.get("name").and_then(Value::as_str) else {
-                return bad(mod_id, &name, format!("field #{j}: `name` is missing or not a string"));
-            };
-            for (k, _) in fe {
-                if !["name", "type", "count", "doc"].contains(&k.as_str()) {
-                    return bad(mod_id, &name, format!("field `{fname}`: unknown key `{k}` (known: name, type, count, doc)"));
-                }
-            }
-            if !efevm::api::is_ident(fname) {
-                return bad(mod_id, &name, format!("field name `{fname}` is not an identifier"));
-            }
-            if desc.fields.iter().any(|g| g.name == fname) {
-                return bad(mod_id, &name, format!("duplicate field `{fname}`"));
-            }
-            let Some(tname) = f.get("type").and_then(Value::as_str) else {
-                return bad(mod_id, &name, format!("field `{fname}`: `type` is missing or not a string"));
-            };
-            let Some(ty) = Prim::parse(tname) else {
-                let known: Vec<&str> = Prim::ALL.iter().map(|p| p.name()).collect();
-                return bad(mod_id, &name, format!("field `{fname}`: unknown type `{tname}` (known: {})", known.join(", ")));
-            };
-            let count = match f.get("count") {
-                None => 1,
-                Some(v) => match v.as_u64() {
-                    Some(n) if (1..=u32::MAX as u64).contains(&n) => n as u32,
-                    _ => return bad(mod_id, &name, format!("field `{fname}`: `count` must be an integer of at least 1")),
-                },
-            };
-            let fdoc = match f.get("doc") {
-                None => String::new(),
-                Some(v) => match v.as_str() {
-                    Some(s) => s.to_string(),
-                    None => return bad(mod_id, &name, format!("field `{fname}`: `doc` must be a string")),
-                },
-            };
-            let tsize = ty.size() as u64;
-            offset = offset.div_ceil(tsize) * tsize;
-            let end = offset + tsize * count as u64;
-            if end > MAX_COMPONENT_BYTES as u64 {
-                return bad(mod_id, &name, format!("larger than {MAX_COMPONENT_BYTES} bytes"));
-            }
-            desc.fields.push(FieldDesc::new(fname, offset as u32, ty, count).with_doc(fdoc));
-            offset = end;
-            align = align.max(tsize as u32);
-        }
-        let size = (offset as u32).div_ceil(align) * align;
-        desc.size = size;
-        desc.align = align;
-        if let Err(e) = desc.validate() {
-            return bad(mod_id, &name, e);
-        }
-        out.push(ModComponent { name, tracked, desc });
-    }
-    Ok(out)
+    parse_components_raw(mod_id, meta).map_err(|e| ModError::Component { id: mod_id.to_string(), component: e.component, reason: e.reason })
 }
 
 /// Same declarations (names, layouts, tracking); docs are not compared.

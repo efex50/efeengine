@@ -125,6 +125,8 @@ pub enum TypeError {
     IdCollision { name: String, other: String, id: u32 },
     #[error("invalid layout: {0}")]
     Invalid(String),
+    #[error("cannot register {what}: API registration is closed once the game loop starts; register in setup or Plugin::build (mods declare theirs in mod.toml)")]
+    Closed { what: String },
 }
 
 type ReadFn = fn(&World, Entity, &mut [u8]) -> Result<(), CompError>;

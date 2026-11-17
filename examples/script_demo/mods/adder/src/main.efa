@@ -1,0 +1,8 @@
+; adder: provides adder.add(a, b) -> sum.
+pub fn add_impl(a: i64, b: i64) -> i64 {
+    reg sum
+    i64.add sum, a, b
+    ret sum
+}
+
+provide add(a: i64, b: i64) -> (sum: i64) = add_impl, "Add two numbers."

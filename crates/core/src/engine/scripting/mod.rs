@@ -215,6 +215,10 @@ pub struct ScriptStats {
 /// the loaded modules.
 pub struct Scripting {
     pub(crate) registry: HostRegistry<ScriptHost>,
+    /// Whether the public registration functions (`register_host_fn`, `register_event`) still
+    /// work: true until the game loop starts. Mods register through `self.registry` directly
+    /// and are not affected.
+    api_open: bool,
     /// Every module slot, by module id. During the script phase the slots of a lane live in the
     /// lane's [`ScriptHost`] and come back at the merge.
     pub(crate) modules: Vec<host::ModuleSlot>,
@@ -251,6 +255,7 @@ impl Scripting {
         api_engine::register_engine_api(&mut registry).expect("the engine API registers");
         Scripting {
             registry,
+            api_open: true,
             modules: Vec::new(),
             logs: Vec::new(),
             events_out: Vec::new(),
@@ -270,6 +275,16 @@ impl Scripting {
             stash: Default::default(),
             migrations: Vec::new(),
         }
+    }
+
+    /// Whether the game may still register API (host functions, events, types, plugins): true
+    /// from `Engine::new` until the game loop starts. Mods are exempt.
+    pub fn api_open(&self) -> bool {
+        self.api_open
+    }
+
+    pub(crate) fn set_api_open(&mut self, open: bool) {
+        self.api_open = open;
     }
 
     /// The one table of callable functions and visible types (read-only: functions are added
@@ -299,6 +314,9 @@ impl Scripting {
     where
         F: Fn(&mut Caller<'_, ScriptHost>, &Args<'_>, &mut Results<'_>) -> Result<HostOk, Trap> + Send + Sync + 'static,
     {
+        if !self.api_open {
+            return Err(RegistryError::Closed { what: format!("host function `{}.{}`", desc.namespace, desc.name) });
+        }
         self.registry.register(desc, f)
     }
 
@@ -308,6 +326,9 @@ impl Scripting {
     /// refer to it in section 14 and use it with `engine.events.send/count/read`. Namespaces of
     /// the engine are reserved (the engine registers its own events itself).
     pub fn register_event(&mut self, desc: EventDesc) -> Result<(), RegistryError> {
+        if !self.api_open {
+            return Err(RegistryError::Closed { what: format!("event `{}.{}`", desc.namespace, desc.name) });
+        }
         if self.registry.namespace(&desc.namespace).is_some_and(|n| n.owner == api_engine::OWNER) {
             return Err(RegistryError::NamespaceOwner {
                 namespace: desc.namespace.clone(),

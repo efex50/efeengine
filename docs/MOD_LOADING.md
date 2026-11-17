@@ -210,6 +210,29 @@ tracked = true   # optional, default true: change ticks on
 - **Determinism.** Spawn, despawn and migration order comes from query order and sorted maps,
   never from hash iteration; one thread and four threads give identical worlds.
 
+## The `.efapi` of a mod
+
+A mod's API fragment is built from its declaration, without running the game: its namespace
+(`<id>`, the manifest's `api_version` and doc), the functions it provides, its events, its own
+structs, and every `[[meta.component]]` as a struct `mod:<id>/<Name>` owned by `mod:<id>` with its
+component id. It is the same data the engine registers when the mod loads (a test compares them),
+built by `efemod::api_fragment(&manifest, &module)`.
+
+- `efescript pack DIR` writes `<out>.efapi` next to the `.efmod`; `cargo xtask mods <example>` writes
+  one beside each package in `target/mods/<example>/`.
+- `cargo xtask mod-api examples/<example>/mods/<name> [-o FILE] [--api GAME.efapi]` writes just the
+  fragment (default `<name>.efapi`). Inside an example it builds against that example's exported
+  game index and the sibling mods it depends on; elsewhere pass `--api`.
+- `cargo xtask check-scripts <example>`: a script with `; needs-mod: NAME` as one of its leading
+  comment lines is checked against the game index merged with the fragment of
+  `examples/<example>/mods/NAME` (and the fragments of the mods that one depends on), using
+  `ApiIndex::merge`. If no such mod folder exists, or it does not build, the command fails and says so.
+- Use a fragment the same way as any `--api` input of `efescript` and the LSP: merge it with the
+  game's `.efapi` (`--api game.efapi --api mod.efapi`).
+
+Mods register at any time, also after the game loop started: the lock of
+[SYSTEMS.md](SYSTEMS.md) is for the game's own registration.
+
 ## Content hash and `AlreadyLoaded`
 
 Loading a mod records `PackageInfo.hash` (blake3, 64 hex characters) and `PackageInfo.source`

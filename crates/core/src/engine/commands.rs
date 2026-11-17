@@ -7,6 +7,7 @@
 
 use hecs::{Component, DynamicBundle, Entity, EntityBuilder, World};
 
+use crate::engine::schedule::{ScheduleCommands, ScheduleOp};
 use crate::engine::types::TypeRegistry;
 
 /// A control request a system makes of the engine; applied after the stage ends.
@@ -60,6 +61,8 @@ fn remove_fn<T: Component>(w: &mut World, e: Entity) -> bool {
 pub struct Commands {
     list: Vec<EngineCommand>,
     ops: Vec<WorldOp>,
+    /// Deferred schedule edits (`Ctx::schedule`), applied after the world ops.
+    sched: Vec<ScheduleOp>,
 }
 
 /// The old name of [`Commands`].
@@ -171,11 +174,12 @@ impl Commands {
     pub fn append(&mut self, other: &mut Commands) {
         self.list.append(&mut other.list);
         self.ops.append(&mut other.ops);
+        self.sched.append(&mut other.sched);
     }
 
     /// Nothing queued (neither control requests nor world changes).
     pub fn is_empty(&self) -> bool {
-        self.list.is_empty() && self.ops.is_empty()
+        self.list.is_empty() && self.ops.is_empty() && self.sched.is_empty()
     }
 
     /// Number of queued world changes.
@@ -216,6 +220,15 @@ impl Commands {
                 }
             }
         }
+    }
+
+    pub(crate) fn sched_ops(&mut self) -> &mut Vec<ScheduleOp> {
+        &mut self.sched
+    }
+
+    /// Take the queued schedule edits (the engine applies them after the world ops).
+    pub(crate) fn take_sched(&mut self) -> Vec<ScheduleOp> {
+        std::mem::take(&mut self.sched)
     }
 
     pub(crate) fn drain(&mut self) -> std::vec::Drain<'_, EngineCommand> {
@@ -274,6 +287,11 @@ impl ParCommands {
     }
     pub fn remove_raw(&mut self, e: Entity, component_id: u32) {
         self.inner.remove_raw(e, component_id);
+    }
+    /// Queue schedule edits (add, enable/disable, remove systems); applied at the end of the
+    /// stage after the world commands. Merged in sorted system order like the rest.
+    pub fn schedule(&mut self) -> ScheduleCommands<'_> {
+        ScheduleCommands { ops: self.inner.sched_ops() }
     }
     pub fn reload_mods(&mut self) {
         self.inner.reload_mods();

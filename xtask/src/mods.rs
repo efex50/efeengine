@@ -49,17 +49,15 @@ fn folder_name(dir: &Path) -> String {
     dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// Packs `mods` against the game index at `index` and the mods packed before them, writing the
-/// packages into `out_dir` (emptied first). Returns the written package paths.
-fn pack_all(index: &Path, mods: &[PathBuf], out_dir: &Path) -> Result<Vec<PathBuf>> {
-    let game = efescript::pack::read_api_input(index).map_err(anyhow::Error::msg)?;
-    if out_dir.exists() {
-        std::fs::remove_dir_all(out_dir).with_context(|| format!("removing {}", out_dir.display()))?;
-    }
-    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
-
+/// Packs `mods` in passes against `game` and the fragments of the mods packed before them.
+/// Returns the packed mods (folder, result) and the last error of each mod that could not be
+/// packed (by folder name).
+fn pack_loop(
+    game: efescript::pack::ApiIndex,
+    mods: &[PathBuf],
+) -> (Vec<(PathBuf, efescript::pack::Packed)>, BTreeMap<String, String>) {
     let mut indices = vec![game];
-    let mut written = vec![];
+    let mut done: Vec<(PathBuf, efescript::pack::Packed)> = vec![];
     let mut last_err: BTreeMap<String, String> = BTreeMap::new();
     let mut todo: Vec<PathBuf> = mods.to_vec();
     loop {
@@ -69,19 +67,14 @@ fn pack_all(index: &Path, mods: &[PathBuf], out_dir: &Path) -> Result<Vec<PathBu
         {
             let refs: Vec<_> = indices.iter().collect();
             for dir in todo {
-                let name = folder_name(&dir);
                 match efescript::pack::pack_dir(&dir, &refs) {
                     Ok(packed) => {
-                        let path = out_dir.join(&packed.file_name);
-                        std::fs::write(&path, &packed.bytes)
-                            .with_context(|| format!("writing {}", path.display()))?;
-                        new_indices.push(efescript::pack::read_api_input(&path).map_err(anyhow::Error::msg)?);
-                        println!("  packed {name} -> {}", path.display());
-                        written.push(path);
+                        new_indices.push(packed.api.clone());
+                        done.push((dir, packed));
                         progress = true;
                     }
                     Err(e) => {
-                        last_err.insert(name, e);
+                        last_err.insert(folder_name(&dir), e);
                         still_todo.push(dir);
                     }
                 }
@@ -93,17 +86,109 @@ fn pack_all(index: &Path, mods: &[PathBuf], out_dir: &Path) -> Result<Vec<PathBu
             break;
         }
     }
-    if !todo.is_empty() {
-        let names: Vec<String> = todo.iter().map(|d| folder_name(d)).collect();
+    last_err.retain(|n, _| todo.iter().any(|d| folder_name(d) == *n));
+    (done, last_err)
+}
+
+/// Packs `mods` against the game index at `index` and the mods packed before them, writing the
+/// packages (and each mod's `.efapi` fragment) into `out_dir` (emptied first). Returns the
+/// written package paths.
+fn pack_all(index: &Path, mods: &[PathBuf], out_dir: &Path) -> Result<Vec<PathBuf>> {
+    let game = efescript::pack::read_api_input(index).map_err(anyhow::Error::msg)?;
+    if out_dir.exists() {
+        std::fs::remove_dir_all(out_dir).with_context(|| format!("removing {}", out_dir.display()))?;
+    }
+    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    let (done, last_err) = pack_loop(game, mods);
+    let mut written = vec![];
+    for (dir, packed) in &done {
+        let path = out_dir.join(&packed.file_name);
+        std::fs::write(&path, &packed.bytes).with_context(|| format!("writing {}", path.display()))?;
+        let api = path.with_extension("efapi");
+        std::fs::write(&api, packed.api.to_json()).with_context(|| format!("writing {}", api.display()))?;
+        println!("  packed {} -> {}", folder_name(dir), path.display());
+        written.push(path);
+    }
+    if done.len() < mods.len() {
+        let names: Vec<String> = mods.iter().map(|d| folder_name(d)).filter(|n| last_err.contains_key(n)).collect();
         for n in &names {
-            warn(format!(
-                "mod `{n}` not packed: {}",
-                last_err.get(n).map_or("unknown error", String::as_str)
-            ));
+            warn(format!("mod `{n}` not packed: {}", last_err.get(n).map_or("unknown error", String::as_str)));
         }
         bail!("{} of {} mod(s) could not be packed: {}", names.len(), mods.len(), names.join(", "));
     }
     Ok(written)
+}
+
+/// The API fragments of mod `name` (a folder name or a mod id) and of the mods of `ex` it
+/// depends on (transitively), built from the declarations against the game index at `index`.
+/// The mod's own fragment comes first.
+pub fn fragments_for(ex: &Example, index: &Path, name: &str) -> Result<Vec<efescript::pack::ApiIndex>> {
+    let mods = mod_folders(ex)?;
+    let game = efescript::pack::read_api_input(index).map_err(anyhow::Error::msg)?;
+    let (done, errs) = pack_loop(game, &mods);
+    let want = done.iter().find(|(d, p)| folder_name(d) == name || p.manifest.id == name);
+    let Some((dir, target)) = want else {
+        if let Some((n, e)) = errs.iter().find(|(n, _)| n.as_str() == name) {
+            bail!("mod `{n}` of {} could not be built: {e}", ex.dir);
+        }
+        let known: Vec<String> = mods.iter().map(|d| folder_name(d)).collect();
+        bail!(
+            "mod `{name}` not found in examples/{}/mods/ (folders: {})",
+            ex.dir,
+            if known.is_empty() { "none".to_string() } else { known.join(", ") }
+        );
+    };
+    let _ = dir;
+    let mut out = vec![target.api.clone()];
+    let mut seen = vec![target.manifest.id.clone()];
+    let mut queue: Vec<String> = target.manifest.dependencies.iter().map(|d| d.id.clone()).collect();
+    while let Some(id) = queue.pop() {
+        if seen.contains(&id) {
+            continue;
+        }
+        seen.push(id.clone());
+        if let Some((_, p)) = done.iter().find(|(_, p)| p.manifest.id == id) {
+            out.push(p.api.clone());
+            queue.extend(p.manifest.dependencies.iter().map(|d| d.id.clone()));
+        }
+    }
+    Ok(out)
+}
+
+/// `cargo xtask mod-api <mod dir> [-o FILE]`: write the API index fragment of a mod folder
+/// (its namespace, provides, events, structs and `[[meta.component]]` components) without
+/// running the game. A mod inside `examples/<example>/mods/` is built against that example's
+/// exported game index (and the sibling mods it depends on); elsewhere `--api GAME.efapi` is needed.
+pub fn mod_api_cmd(project: &Project, dir: &Path, output: Option<PathBuf>, api: Option<PathBuf>) -> Result<()> {
+    let dir = std::fs::canonicalize(dir).with_context(|| format!("mod folder {}", dir.display()))?;
+    if !dir.join("mod.toml").is_file() {
+        bail!("{} has no mod.toml", dir.display());
+    }
+    let ex_root = root().join("examples");
+    let example = dir
+        .strip_prefix(std::fs::canonicalize(&ex_root).unwrap_or(ex_root))
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .and_then(|c| project.get(&c.as_os_str().to_string_lossy()).ok());
+    let name = folder_name(&dir);
+    let frag = match (example, api) {
+        (Some(ex), api) => {
+            let index = match api {
+                Some(p) => p,
+                None => export_game_index(project, ex)?,
+            };
+            fragments_for(ex, &index, &name)?.remove(0)
+        }
+        (None, Some(api)) => {
+            let game = efescript::pack::read_api_input(&api).map_err(anyhow::Error::msg)?;
+            efescript::pack::pack_dir(&dir, &[&game]).map_err(anyhow::Error::msg)?.api
+        }
+        (None, None) => bail!("{} is not inside examples/<example>/mods/: pass --api GAME.efapi", dir.display()),
+    };
+    let out = output.unwrap_or_else(|| PathBuf::from(format!("{name}.efapi")));
+    std::fs::write(&out, frag.to_json()).with_context(|| format!("writing {}", out.display()))?;
+    println!("mod API fragment: {}", out.display());
+    Ok(())
 }
 
 /// Exports the game's index with `api` (builds and runs the native binary) and returns its path.
