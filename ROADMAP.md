@@ -220,6 +220,21 @@ Must keep working on WebGL2 (wasm). WebGL2 has downlevel limits: no storage buff
 - [ ] 4B.9 **[S] Skybox and environment.** A cube-map skybox drawn after the opaque pass at maximum depth. Cube maps work on WebGL2. _Done when_ the sky stays behind geometry and fixed while the camera rotates.
 - [ ] 4B.10 **[S] Skinned meshes (later).** glTF skins with joint matrices. WebGL2 limits uniform size, so cap the joint count or move joints into a texture. _Done when_ a sample animated character plays natively and in both browsers.
 
+### Phase 4C: Separate 2D/3D renderers, GPU modes, SDL fallback
+
+Plan and design: [`docs/RENDERER_PLAN.md`](docs/RENDERER_PLAN.md). 2D and 3D become separate renderers
+(`Renderer2D`, `Renderer3D`) fed by `Frame2D` / `Frame3D`; 2D gets a second backend on SDL3's
+`SDL_Renderer` (a startup "SDL mode" for hardware below GL 3.3 and homebrew targets like the PS Vita);
+3D stays wgpu only. Supersedes 4B.8's pass list (order: 3D cameras, 2D cameras, overlays).
+
+- [ ] 4C.1 Split the frame and traits (`Frame2D`/`Frame3D`, camera kinds, `CustomRenderer` for full wgpu renderers).
+- [ ] 4C.2 Native GL fallback for wgpu (`PRIMARY | GL`, GL last, config switch).
+- [ ] 4C.3 `Draw2D` (shared 2D drawing API) with the wgpu implementation; 2D debug draw (4A.17) on it.
+- [ ] 4C.4 SDL mode: `SDL_Renderer` 2D backend; coin_dash matches in both modes.
+- [ ] 4C.5 `auto` mode falls back to SDL mode when no wgpu adapter exists.
+- [ ] 4C.6 Fallback UI drawn through `Draw2D` (works in both modes).
+- [ ] 4C.7 PS Vita homebrew build of coin_dash (Vita3K, then hardware).
+
 ## Phase 5: Scripting with efescript (future)
 
 Goal: game and mod logic written in efescript runs inside the engine, calls engine and mod functions through a typed host API that can grow at runtime, and has tooling that always knows that API.

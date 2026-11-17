@@ -6,6 +6,13 @@
 > **Implements:** the common API in [`API.md`](API.md). Game code does not change when switching.\
 > **Feature:** `efeengine-ui/ui-fallback` (native only)
 
+> **Revision planned (2026-11-18):** per [`../RENDERER_PLAN.md`](../RENDERER_PLAN.md) (section 3.5,
+> phase 4C.6) this backend will draw through the shared `Draw2D` API instead of its own WGSL
+> pipeline, so it also runs in the SDL rendering mode (no wgpu): rounded rectangles as triangle
+> meshes or nine-slice textures, glyphs rasterised on the CPU (cosmic-text + swash) into an atlas
+> texture instead of glyphon. Sections 1, 4 and 6 below describe the original wgpu-only design and
+> will be rewritten at that point.
+
 ## 1. Pieces
 
 | Part | Crate | Job |
