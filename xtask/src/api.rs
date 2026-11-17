@@ -28,8 +28,8 @@ pub fn profile_dir(project: &Project, release: bool) -> PathBuf {
     project.target_dir.join(if release { "release" } else { "debug" })
 }
 
-fn native_bin(project: &Project, release: bool) -> PathBuf {
-    profile_dir(project, release).join(format!("native{}", std::env::consts::EXE_SUFFIX))
+fn native_bin(project: &Project, ex: &Example, release: bool) -> PathBuf {
+    profile_dir(project, release).join(format!("{}{}", ex.package, std::env::consts::EXE_SUFFIX))
 }
 
 /// Extra cargo arguments for a native build.
@@ -46,7 +46,7 @@ pub fn build_flags(release: bool, static_sdl: bool) -> Vec<&'static str> {
 
 fn build_native(ex: &Example, release: bool, static_sdl: bool) -> Result<()> {
     let mut c = cargo();
-    c.args(["build", "-p", &ex.package, "--bin", "native"]).args(build_flags(release, static_sdl));
+    c.args(["build", "-p", &ex.package, "--bin", &ex.package]).args(build_flags(release, static_sdl));
     run(c)
 }
 
@@ -99,7 +99,7 @@ fn run_export(bin: &Path, out: &Path) -> Result<()> {
 /// `cargo xtask api-export`: build natively, export, print the path.
 pub fn api_export(project: &Project, ex: &Example, output: Option<PathBuf>, release: bool, static_sdl: bool) -> Result<()> {
     if !ex.native_bin {
-        bail!("example '{}' has no [[bin]] named 'native'; the index is exported by running it", ex.dir);
+        bail!("example '{}' has no binary target; the index is exported by running it", ex.dir);
     }
     let out = match output {
         Some(p) if p.is_absolute() => p,
@@ -108,8 +108,8 @@ pub fn api_export(project: &Project, ex: &Example, output: Option<PathBuf>, rele
     };
     step(format!("api-export: building {}", ex.package));
     build_native(ex, release, static_sdl)?;
-    step(format!("api-export: running {}", native_bin(project, release).display()));
-    run_export(&native_bin(project, release), &out)?;
+    step(format!("api-export: running {}", native_bin(project, ex, release).display()));
+    run_export(&native_bin(project, ex, release), &out)?;
     println!("API index: {}", out.display());
     Ok(())
 }
@@ -121,7 +121,7 @@ pub fn after_native_build(project: &Project, ex: &Example, release: bool) -> Res
     let sources = script_sources(&root().join("examples").join(&ex.dir).join("scripts"))?;
     let efapi = profile_dir(project, release).join(format!("{}.efapi", ex.dir));
     step(format!("writing {}", efapi.display()));
-    if let Err(e) = run_export(&native_bin(project, release), &efapi) {
+    if let Err(e) = run_export(&native_bin(project, ex, release), &efapi) {
         warn(format!("no .efapi written: {e:#}"));
     }
     if sources.is_empty() {
@@ -188,12 +188,12 @@ pub fn check_scripts(project: &Project, ex: &Example) -> Result<()> {
 pub fn copy_into_dist(project: &Project, ex: &Example, dist: &Path) {
     let go = || -> Result<()> {
         if !ex.native_bin {
-            bail!("example has no 'native' bin");
+            bail!("example has no binary target");
         }
         let efapi = project.target_dir.join("efapi").join(format!("{}.efapi", ex.dir));
         step(format!("exporting the API index into {}", dist.display()));
         build_native(ex, false, false)?;
-        run_export(&native_bin(project, false), &efapi)?;
+        run_export(&native_bin(project, ex, false), &efapi)?;
         if !dry_run() {
             let dest = dist.join(format!("{}.efapi", ex.dir));
             std::fs::copy(&efapi, &dest).with_context(|| format!("copying to {}", dest.display()))?;

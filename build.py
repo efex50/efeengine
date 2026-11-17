@@ -95,12 +95,13 @@ def need_cargo():
 # ------------------------------------------------------------ examples ----
 def has_native_bin(example):
     text = (ROOT / "examples" / example / "Cargo.toml").read_text(encoding="utf-8")
+    pkg = web.package_name(example)
     in_bin = False
     for line in text.splitlines():
         s = line.strip()
         if s.startswith("["):
             in_bin = s == "[[bin]]"
-        elif in_bin and re.match(r'name\s*=\s*"native"', s):
+        elif in_bin and (re.match(r'name\s*=\s*"native"', s) or re.match(rf'name\s*=\s*"{re.escape(pkg)}"', s)):
             return True
     return False
 
@@ -195,7 +196,7 @@ def do_native(action, ex, release, static):
     if has_native_bin(ex):
         step(f"native {action}: {pkg} ({desc})")
         try:
-            run(["cargo", action, "-p", pkg, "--bin", "native"] + extra)
+            run(["cargo", action, "-p", pkg, "--bin", pkg] + extra)
         except Fail:
             if static:
                 print("hint: building SDL3 from source also needs its platform dev headers "
@@ -208,10 +209,10 @@ def do_native(action, ex, release, static):
                       "and drop --static.", file=sys.stderr)
             raise
     else:
-        step(f"{pkg} has no 'native' bin; building the lib")
+        step(f"{pkg} has no binary target; building the lib")
         run(["cargo", "build", "-p", pkg, "--lib"] + extra)
         if action == "run":
-            raise Fail(f"example '{ex}' has no [[bin]] named 'native', nothing to run (library was built)")
+            raise Fail(f"example '{ex}' has no binary named '{pkg}', nothing to run (library was built)")
 
 
 def do_web(action, ex, release, port):

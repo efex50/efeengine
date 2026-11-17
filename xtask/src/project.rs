@@ -54,7 +54,7 @@ impl Project {
                     native_bin: p
                         .targets
                         .iter()
-                        .any(|t| t.name == "native" && t.kind.contains(&TargetKind::Bin)),
+                        .any(|t| (p.name == t.name || t.name == "native") && t.kind.contains(&TargetKind::Bin)),
                 })
             })
             .collect();

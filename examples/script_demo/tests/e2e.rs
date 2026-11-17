@@ -150,7 +150,7 @@ fn the_native_binary_writes_the_index_with_efe_api_export() {
     let out = temp("binary.efapi");
     let _ = std::fs::remove_file(&out);
     // No scripts exist next to the test binary: registrations must not depend on them.
-    let status = std::process::Command::new(env!("CARGO_BIN_EXE_native"))
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_script_demo"))
         .env("EFE_API_EXPORT", &out)
         .env_remove("EFE_SCRIPT_DIR")
         .status()

@@ -373,20 +373,20 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
     );
     if !ex.native_bin {
         if !mods::mod_folders(ex)?.is_empty() {
-            warn(format!("{}: mods not packed (no 'native' bin to export the API index)", ex.dir));
+            warn(format!("{}: mods not packed (no binary to export the API index)", ex.dir));
         }
-        step(format!("{} has no 'native' bin; building the lib", ex.package));
+        step(format!("{} has no binary target; building the lib", ex.package));
         let mut c = cargo();
         c.args(["build", "-p", &ex.package, "--lib"]).args(&extra);
         run(c)?;
         if action == Action::Run {
-            bail!("example '{}' has no [[bin]] named 'native', nothing to run (library was built)", ex.dir);
+            bail!("example '{}' has no binary target, nothing to run (library was built)", ex.dir);
         }
         return Ok(());
     }
     step(format!("native build: {} ({desc})", ex.package));
     let mut c = cargo();
-    c.args(["build", "-p", &ex.package, "--bin", "native"]).args(&extra);
+    c.args(["build", "-p", &ex.package, "--bin", &ex.package]).args(&extra);
     run(c).inspect_err(|_| {
         if static_sdl {
             eprintln!("{STATIC_DEPS_HINT}");
@@ -398,7 +398,7 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
     if action == Action::Run {
         step(format!("native run: {} ({desc})", ex.package));
         let mut c = cargo();
-        c.args(["run", "-p", &ex.package, "--bin", "native"]).args(&extra);
+        c.args(["run", "-p", &ex.package, "--bin", &ex.package]).args(&extra);
         if let Some(dir) = scripts {
             c.env("EFE_SCRIPT_DIR", dir);
         }

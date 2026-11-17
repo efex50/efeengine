@@ -18,10 +18,17 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #input_fn
 
         // --- Native Entry Point ---
+        // `run` is what the example's `src/main.rs` calls (`fn main() { my_game::run() }`), so
+        // the lib and the bin don't share a source file. `main` keeps a bin built straight from
+        // this file working.
         #[cfg(not(target_arch = "wasm32"))]
-        fn main(){
-            // Simply call the user's function
+        pub fn run(){
             __engine_user_main()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        #[allow(dead_code)]
+        fn main(){
+            run()
         }
 
         // --- WASM Entry Point ---
