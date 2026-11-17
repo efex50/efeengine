@@ -42,6 +42,9 @@ struct Shared {
     hover: HashSet<u64>,
     /// The pointer is over something inside the layer element (pointerover / pointerout).
     over: bool,
+    /// Element to blur once the listener has released the borrow: `blur()` fires `focusout`
+    /// synchronously, which re-enters a listener and would borrow `Shared` again.
+    blur: Option<HtmlElement>,
 }
 
 struct Entry {
@@ -205,13 +208,19 @@ fn input_of(target: Option<EventTarget>) -> Option<HtmlInputElement> {
 }
 
 impl Inner {
-    fn listen(&mut self, kind: &'static str, mut f: impl FnMut(&Shared, &Element, Event) -> Option<Vec<UiSignal>> + 'static) {
+    fn listen(&mut self, kind: &'static str, mut f: impl FnMut(&mut Shared, &Element, Event) -> Option<Vec<UiSignal>> + 'static) {
         let shared = self.shared.clone();
         let root: Element = self.root.clone().into();
         let closure = Closure::<dyn FnMut(Event)>::new(move |e: Event| {
-            let mut sh = shared.borrow_mut();
-            if let Some(mut sigs) = f(&sh, &root, e) {
-                sh.signals.append(&mut sigs);
+            let blur = {
+                let mut sh = shared.borrow_mut();
+                if let Some(mut sigs) = f(&mut sh, &root, e) {
+                    sh.signals.append(&mut sigs);
+                }
+                sh.blur.take()
+            };
+            if let Some(h) = blur {
+                let _ = h.blur();
             }
         });
         let target: EventTarget = self.root.clone().into();
@@ -233,7 +242,7 @@ impl Inner {
                 && el.contains(Some(&active))
                 && let Ok(h) = active.dyn_into::<HtmlElement>()
             {
-                let _ = h.blur();
+                sh.blur = Some(h);
             }
             (sh.kinds.get(&id.to_bits()) == Some(&Button)).then(|| vec![signal(id, UiSignalKind::Click)])
         });
