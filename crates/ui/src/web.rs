@@ -13,10 +13,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use wasm_bindgen::{Clamped, JsCast, closure::Closure};
+use wasm_bindgen::{JsCast, closure::Closure};
 use web_sys::{
-    CanvasRenderingContext2d, Document, Element, Event, EventTarget, HtmlCanvasElement, HtmlElement, HtmlInputElement,
-    ImageData, KeyboardEvent, PointerEvent, Text,
+    CanvasRenderingContext2d, Document, Element, Event, EventTarget, FontFace, HtmlCanvasElement, HtmlElement,
+    HtmlInputElement, ImageData, KeyboardEvent, PointerEvent, Text,
 };
 
 use crate::backend::{UiBackend, UiBackendCx};
@@ -27,6 +27,7 @@ use crate::id::{Owner, WidgetId};
 use crate::journal::UiChange;
 use crate::node::{ImageFit, KindTag, NodeKind};
 use crate::signal::{UiSignal, UiSignalKind, UiValue};
+use crate::style::FontId;
 use crate::theme::Theme;
 use crate::tree::UiTree;
 
@@ -79,6 +80,8 @@ struct Inner {
     theme_style: HtmlElement,
     theme_written: bool,
     entries: HashMap<WidgetId, Entry>,
+    /// The loaded font faces (kept alive here; also in `document.fonts`), by font id.
+    fonts: HashMap<FontId, FontFace>,
     shared: Rc<RefCell<Shared>>,
     listeners: Vec<Listener>,
 }
@@ -152,6 +155,7 @@ impl UiBackend for WebBackend {
             theme_style,
             theme_written: false,
             entries: HashMap::new(),
+            fonts: HashMap::new(),
             shared,
             listeners: Vec::new(),
         };
@@ -399,7 +403,15 @@ impl Inner {
                     self.theme_style.set_text_content(Some(&css::theme_state_stylesheet(theme)));
                     restyle_all = true;
                 }
-                UiChange::Font(_) => {}
+                UiChange::Font(id) => self.install_font(tree, id),
+            }
+        }
+        // Fonts registered before the first sync (and any the journal missed): load what is not
+        // loaded yet. A font loaded in this sync is already in the map, so it is skipped here.
+        for i in 0..tree.fonts().len() {
+            let id = FontId(i as u32);
+            if !self.fonts.contains_key(&id) {
+                self.install_font(tree, id);
             }
         }
         if restyle_all {
@@ -413,6 +425,33 @@ impl Inner {
         for p in dirty_parents {
             self.place_children(tree, p);
         }
+    }
+
+    /// Creates the `FontFace` for a registered font, adds it to `document.fonts` and sets
+    /// `--efui-font-{id}` on the layer element, which css.rs's `font-family` reads. A font id
+    /// loaded again replaces the old face.
+    fn install_font(&mut self, tree: &UiTree, id: FontId) {
+        let Some(font) = tree.font(id) else { return };
+        let family = format!("efui-font-{}", id.0);
+        let face = match FontFace::new_with_u8_array(&family, &font.bytes[..]) {
+            Ok(face) => face,
+            Err(_) => {
+                warn(&format!("could not create the font face for {}", font.name));
+                return;
+            }
+        };
+        // The promise is not awaited: the face is usable once it resolves, and the fallback
+        // font shows until then.
+        let _ = face.load();
+        let set = self.document.fonts();
+        if set.add(&face).is_err() {
+            warn("could not add the font to document.fonts");
+        }
+        if let Some(old) = self.fonts.insert(id, face) {
+            let _ = set.delete(&old);
+        }
+        let value = format!("\"{family}\", sans-serif");
+        let _ = self.root.style().set_property(&format!("--efui-font-{}", id.0), &value);
     }
 
     fn make_element(&self, tag: &str) -> Option<HtmlElement> {
@@ -697,7 +736,11 @@ fn draw_image(el: &HtmlElement, (w, h): (u32, u32), rgba: &[u8]) {
     let Some(ctx) = canvas.get_context("2d").ok().flatten().and_then(|c| c.dyn_into::<CanvasRenderingContext2d>().ok()) else {
         return;
     };
-    match ImageData::new_with_u8_clamped_array_and_sh(Clamped(rgba), w, h) {
+    // Copy into a JS-owned array first: with wasm threads the wasm memory is a
+    // SharedArrayBuffer, and the ImageData constructor rejects views into shared memory.
+    let arr = js_sys::Uint8ClampedArray::new_with_length(rgba.len() as u32);
+    arr.copy_from(rgba);
+    match ImageData::new_with_js_u8_clamped_array_and_sh(&arr, w, h) {
         Ok(data) => {
             let _ = ctx.put_image_data(&data, 0.0, 0.0);
         }

@@ -17,8 +17,8 @@ iced = ["dep:iced_wgpu", "dep:iced_widget", "dep:iced_runtime", "dep:iced_core",
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # iced main, pinned to a commit whose workspace uses wgpu 30 (same as the engine).
-iced_wgpu = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", default-features = false, optional = true }
-iced_widget = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", features = ["wgpu"], optional = true }
+iced_wgpu = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", default-features = false, features = ["image"], optional = true }
+iced_widget = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", features = ["wgpu", "image"], optional = true }
 iced_runtime = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", optional = true }
 iced_core = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", optional = true }
 pollster = { version = "1.0.2", optional = true }
@@ -41,6 +41,8 @@ features = [
     "CanvasRenderingContext2d",
     "ImageData",
     "CssStyleDeclaration",
+    "FontFace",
+    "FontFaceSet",
     "Node",
     "Text",
     "Event",

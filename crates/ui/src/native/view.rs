@@ -13,6 +13,7 @@
 //!   main size is definite (Fixed or Fill; there is no free space otherwise, same as CSS).
 //! - `min_*` / `max_*` map to `Length::min` / `Length::max` (iced main's bounded lengths).
 
+use iced_core::ContentFit;
 use iced_core::alignment::{Horizontal, Vertical};
 use iced_core::font::Weight;
 use iced_core::Widget as _;
@@ -21,8 +22,11 @@ use iced_widget::{button, checkbox, container, mouse_area, opaque, scrollable, s
 use iced_wgpu::Renderer;
 
 use crate::id::WidgetId;
-use crate::node::{Anchor, NodeKind};
+use crate::node::{Anchor, ImageFit, NodeKind};
 use crate::style::{Align, Color, Direction, Edges, Justify, Size, Style, TextAlign};
+
+use super::assets::{Assets, DEFAULT_FAMILY};
+use super::keyed::Keyed;
 
 use super::model::{DISABLED, FOCUSED, HOVERED, Model, NORMAL, PRESSED, VLayer, VNode};
 
@@ -45,14 +49,15 @@ pub fn iced_id(id: WidgetId) -> iced_core::widget::Id {
     iced_core::widget::Id::from(format!("efui-{}", id.to_bits()))
 }
 
-pub fn view(model: &Model) -> Element<'_> {
-    let layers: Vec<Element<'_>> = model.layers.iter().map(layer_el).collect();
-    stack(layers).width(Length::Fill).height(Length::Fill)._boxed()
+pub fn view<'a>(model: &'a Model, a: &'a Assets) -> Element<'a> {
+    let keys = model.layers.iter().map(|l| l.root.id.to_bits()).collect();
+    let layers: Vec<Element<'a>> = model.layers.iter().map(|l| layer_el(l, a)).collect();
+    Keyed::new(keys, stack(layers).width(Length::Fill).height(Length::Fill)._boxed())._boxed()
 }
 
-fn layer_el(l: &VLayer) -> Element<'_> {
+fn layer_el<'a>(l: &'a VLayer, a: &'a Assets) -> Element<'a> {
     let fill = l.layer.anchor == Anchor::Fill;
-    let root = node_el(&l.root, Parent::none(), fill);
+    let root = node_el(&l.root, Parent::none(), fill, a);
     let (ax, ay) = alignment(l.layer.anchor);
     let (x, y) = l.layer.offset;
     let pad = |v: f32| (2.0 * v.max(0.0), 2.0 * (-v).max(0.0));
@@ -103,21 +108,31 @@ fn alignment(a: Anchor) -> (Horizontal, Vertical) {
 struct Parent {
     dir: Option<Direction>,
     stretch: bool,
+    /// The parent's own width / height is definite (Fixed or Fill). In an intrinsically sized
+    /// parent a `Fill` (or stretched `Auto`) child must not claim the free space: iced would make
+    /// the parent `Fill` too ("Fill wins over Fit"), and `Fluid(Max)` makes leaf widgets such as
+    /// text take all the space. It stays `Fit`, i.e. the child keeps its own size, like a flex
+    /// item in an auto-sized CSS box when nothing is left to share (only a stretch to the widest
+    /// sibling is lost).
+    w_def: bool,
+    h_def: bool,
 }
 
 impl Parent {
     fn none() -> Self {
-        Parent { dir: None, stretch: false }
+        Parent { dir: None, stretch: false, w_def: true, h_def: true }
     }
 }
 
-fn length(s: Size, stretch: bool) -> Length {
+/// `definite`: the parent's size on this axis is definite.
+fn length(s: Size, stretch: bool, definite: bool) -> Length {
+    let fill = |l: Length| if definite { l } else { Length::Fit };
     match s {
-        Size::Auto if stretch => Length::Fill,
+        Size::Auto if stretch => fill(Length::Fill),
         Size::Auto => Length::Fit,
         Size::Px(v) => Length::Fixed(v),
-        Size::Fill => Length::Fill,
-        Size::Portion(n) => Length::FillPortion(n.max(1)),
+        Size::Fill => fill(Length::Fill),
+        Size::Portion(n) => fill(Length::FillPortion(n.max(1))),
     }
 }
 
@@ -136,15 +151,15 @@ fn bounded(l: Length, min: Option<f32>, max: Option<f32>) -> Length {
 fn dims(st: &Style, parent: Parent) -> (Length, Length) {
     let (w, h) = (st.width.unwrap_or(Size::Auto), st.height.unwrap_or(Size::Auto));
     let (w, h) = match parent.dir {
-        Some(Direction::Column) => (length(w, parent.stretch), length(h, false)),
-        Some(Direction::Row) => (length(w, false), length(h, parent.stretch)),
-        None => (length(w, false), length(h, false)),
+        Some(Direction::Column) => (length(w, parent.stretch, parent.w_def), length(h, false, parent.h_def)),
+        Some(Direction::Row) => (length(w, false, parent.w_def), length(h, parent.stretch, parent.h_def)),
+        None => (length(w, false, true), length(h, false, true)),
     };
     (bounded(w, st.min_width, st.max_width), bounded(h, st.min_height, st.max_height))
 }
 
 fn definite(l: Length) -> bool {
-    l.is_fill() || matches!(l, Length::Fixed(_))
+    !matches!(l, Length::Fluid(_)) && (l.is_fill() || matches!(l, Length::Fixed(_)))
 }
 
 fn color(c: Color, opacity: Option<f32>) -> IColor {
@@ -167,8 +182,13 @@ fn padding(e: Option<Edges>) -> Padding {
     Padding { top: e.top, right: e.right, bottom: e.bottom, left: e.left }
 }
 
-fn font(st: &Style) -> Font {
-    if st.bold == Some(true) { Font { weight: Weight::Bold, ..Font::DEFAULT } } else { Font::DEFAULT }
+fn font(st: &Style, a: &Assets) -> Font {
+    let family = st.font.and_then(|f| a.fonts.get(&f).copied()).unwrap_or(DEFAULT_FAMILY);
+    Font {
+        family: iced_core::font::Family::Name(family),
+        weight: if st.bold == Some(true) { Weight::Bold } else { Weight::Normal },
+        ..Font::DEFAULT
+    }
 }
 
 fn font_size(st: &Style) -> f32 {
@@ -201,28 +221,40 @@ fn wrap<'a>(n: &'a VNode, el: Element<'a>) -> Element<'a> {
     }
 }
 
-fn node_el<'a>(n: &'a VNode, parent: Parent, fill: bool) -> Element<'a> {
+fn node_el<'a>(n: &'a VNode, parent: Parent, fill: bool, a: &'a Assets) -> Element<'a> {
     let st = n.style();
     let el = match &n.kind {
-        NodeKind::Container => flex_el(n, parent, fill, false),
-        NodeKind::Scroll => flex_el(n, parent, fill, true),
+        NodeKind::Container => flex_el(n, parent, fill, false, a),
+        NodeKind::Scroll => flex_el(n, parent, fill, true, a),
         NodeKind::Text { text: t } => {
             let (w, h) = dims(st, parent);
             text(t.as_str())
                 .size(font_size(st))
                 .color(text_color(st))
-                .font(font(st))
+                .font(font(st, a))
                 .width(w)
                 .height(h)
                 .align_x(text_align(st))
                 ._boxed()
         }
-        NodeKind::Image { .. } => {
-            // Phase 3: draw the engine texture (iced image handles).
+        NodeKind::Image { texture, fit } => {
             let (w, h) = dims(st, parent);
-            space().width(w).height(h)._boxed()
+            match a.images.get(texture) {
+                Some(handle) => iced_widget::image(handle.clone())
+                    .content_fit(match fit {
+                        ImageFit::Contain => ContentFit::Contain,
+                        ImageFit::Cover => ContentFit::Cover,
+                        ImageFit::Fill => ContentFit::Fill,
+                        ImageFit::None => ContentFit::None,
+                    })
+                    .opacity(st.opacity.unwrap_or(1.0).clamp(0.0, 1.0))
+                    .width(w)
+                    .height(h)
+                    ._boxed(),
+                None => space().width(w).height(h)._boxed(),
+            }
         }
-        NodeKind::Button { label } => button_el(n, parent, label),
+        NodeKind::Button { label } => button_el(n, parent, label, a),
         NodeKind::Checkbox { label, checked } => {
             let (w, _) = dims(st, parent);
             let id = n.id;
@@ -232,7 +264,7 @@ fn node_el<'a>(n: &'a VNode, parent: Parent, fill: bool) -> Element<'a> {
                 .on_toggle_maybe(n.enabled.then_some(move |v| Msg::Toggle(id, v)))
                 .spacing(st.gap.unwrap_or(8.0))
                 .text_size(font_size(st))
-                .font(font(st))
+                .font(font(st, a))
                 .width(w)
                 .style(move |_t, status| {
                     use checkbox::Status::*;
@@ -305,7 +337,7 @@ fn node_el<'a>(n: &'a VNode, parent: Parent, fill: bool) -> Element<'a> {
                 .size(font_size(st))
                 .padding(padding(st.padding))
                 .width(w)
-                .font(font(st));
+                .font(font(st, a));
             if n.enabled {
                 t = t.on_input(move |s| Msg::Input(id, s)).on_submit(Msg::Submit(id));
             }
@@ -332,20 +364,20 @@ fn node_el<'a>(n: &'a VNode, parent: Parent, fill: bool) -> Element<'a> {
     wrap(n, el)
 }
 
-fn button_el<'a>(n: &'a VNode, parent: Parent, label: &'a str) -> Element<'a> {
+fn button_el<'a>(n: &'a VNode, parent: Parent, label: &'a str, a: &'a Assets) -> Element<'a> {
     let st = n.style();
     let (w, h) = dims(st, parent);
     let id = n.id;
     let styles = n.styles;
     let content: Element<'a> = if n.children.is_empty() {
-        let mut t = text(label).size(font_size(st)).color(text_color(st)).font(font(st)).align_x(text_align(st));
+        let mut t = text(label).size(font_size(st)).color(text_color(st)).font(font(st, a)).align_x(text_align(st));
         if w != Length::Fit {
             t = t.width(Length::Fill);
         }
         t._boxed()
     } else {
         let row = Style { direction: Some(st.direction.unwrap_or(Direction::Row)), ..*st };
-        flex_children(n, &row, (Length::Fit, Length::Fit), (Length::Fit, Length::Fit))
+        flex_children(n, &row, (Length::Fit, Length::Fit), (Length::Fit, Length::Fit), a)
     };
     button(content)
         .padding(padding(st.padding))
@@ -372,29 +404,38 @@ fn button_el<'a>(n: &'a VNode, parent: Parent, label: &'a str) -> Element<'a> {
 /// The children of `n` as one row or column (direction, gap, align, justify), no box. `own` is
 /// the node's own width and height (they decide `justify` and the stretch of the children),
 /// `inner` the lengths of the row / column itself.
-fn flex_children<'a>(n: &'a VNode, st: &Style, own: (Length, Length), inner: (Length, Length)) -> Element<'a> {
+fn flex_children<'a>(n: &'a VNode, st: &Style, own: (Length, Length), inner: (Length, Length), a: &'a Assets) -> Element<'a> {
     let dir = st.direction.unwrap_or(Direction::Column);
     let is_row = dir == Direction::Row;
     let main = if is_row { own.0 } else { own.1 };
     let stretch = st.align.unwrap_or(Align::Stretch) == Align::Stretch;
-    let child_parent = Parent { dir: Some(dir), stretch };
+    let child_parent = Parent { dir: Some(dir), stretch, w_def: definite(own.0), h_def: definite(own.1) };
     let mut kids: Vec<Element<'a>> = Vec::with_capacity(n.children.len() + 2);
+    let mut keys: Vec<u64> = Vec::with_capacity(n.children.len() + 2);
     let spacer = || -> Element<'a> {
         if is_row { space().width(Length::Fill)._boxed() } else { space().height(Length::Fill)._boxed() }
     };
+    // Spacers are keyed from the top of the key space; node ids are small.
+    let mut spacer_key = u64::MAX;
     let justify = if definite(main) { st.justify.unwrap_or(Justify::Start) } else { Justify::Start };
     if matches!(justify, Justify::Center | Justify::End) {
         kids.push(spacer());
+        keys.push(spacer_key);
+        spacer_key -= 1;
     }
     let count = n.children.len();
     for (i, c) in n.children.iter().enumerate() {
-        kids.push(node_el(c, child_parent, false));
+        kids.push(node_el(c, child_parent, false, a));
+        keys.push(c.id.to_bits());
         if justify == Justify::SpaceBetween && i + 1 < count {
             kids.push(spacer());
+            keys.push(spacer_key);
+            spacer_key -= 1;
         }
     }
     if justify == Justify::Center {
         kids.push(spacer());
+        keys.push(spacer_key);
     }
     let gap = st.gap.unwrap_or(0.0);
     let (iw, ih) = inner;
@@ -404,18 +445,18 @@ fn flex_children<'a>(n: &'a VNode, st: &Style, own: (Length, Length), inner: (Le
             Align::End => Vertical::Bottom,
             _ => Vertical::Top,
         };
-        iced_widget::row(kids).spacing(gap).width(iw).height(ih).align_y(v)._boxed()
+        Keyed::new(keys, iced_widget::row(kids).spacing(gap).width(iw).height(ih).align_y(v)._boxed())._boxed()
     } else {
         let hz = match st.align.unwrap_or(Align::Stretch) {
             Align::Center => Horizontal::Center,
             Align::End => Horizontal::Right,
             _ => Horizontal::Left,
         };
-        iced_widget::column(kids).spacing(gap).width(iw).height(ih).align_x(hz)._boxed()
+        Keyed::new(keys, iced_widget::column(kids).spacing(gap).width(iw).height(ih).align_x(hz)._boxed())._boxed()
     }
 }
 
-fn flex_el<'a>(n: &'a VNode, parent: Parent, fill: bool, scroll: bool) -> Element<'a> {
+fn flex_el<'a>(n: &'a VNode, parent: Parent, fill: bool, scroll: bool, a: &'a Assets) -> Element<'a> {
     let st = n.style();
     let (mut w, mut h) = dims(st, parent);
     if fill {
@@ -424,7 +465,7 @@ fn flex_el<'a>(n: &'a VNode, parent: Parent, fill: bool, scroll: bool) -> Elemen
     // The flex box inside the padded, painted container fills it unless the container is
     // intrinsically sized.
     let in_len = |l: Length| if matches!(l, Length::Fit | Length::Shrink) { Length::Fit } else { Length::Fill };
-    let inner = flex_children(n, st, (w, h), (in_len(w), in_len(h)));
+    let inner = flex_children(n, st, (w, h), (in_len(w), in_len(h)), a);
     let inner: Element<'a> =
         if scroll { scrollable(inner).width(Length::Fill).height(Length::Fill)._boxed() } else { inner };
     let st_copy = *st;

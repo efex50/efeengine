@@ -8,8 +8,9 @@
 //!
 //! Run natively with `cargo xtask run ui_demo native`, on the web with `cargo xtask run ui_demo web`.
 use efeengine_core::prelude::*;
+use efeengine_core::render::Image;
 use efeengine_ui::view::*;
-use efeengine_ui::{Layer, UiPlugin, column, row};
+use efeengine_ui::{ImageFit, Layer, Size, Style, UiPlugin, column, row};
 
 /// The game state, read by both views and changed by the update system.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,11 +20,14 @@ pub struct Settings {
     pub name: String,
     pub plays: u32,
     pub show_menu: bool,
+    /// The logo shown in the menu: a generated texture whose colours change on every Play, which
+    /// exercises the texture refresh of the backends.
+    pub logo: Option<TextureHandle>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { volume: 0.8, fullscreen: false, name: String::new(), plays: 0, show_menu: true }
+        Self { volume: 0.8, fullscreen: false, name: String::new(), plays: 0, show_menu: true, logo: None }
     }
 }
 
@@ -45,9 +49,29 @@ fn hud_line(s: &Settings) -> String {
     format!("Plays: {}  Volume: {}%", s.plays, percent(s.volume))
 }
 
+/// A 64x64 gradient; `hue` shifts the colours.
+fn logo_image(hue: u32) -> Image {
+    let mut px = Vec::with_capacity(64 * 64 * 4);
+    for y in 0..64u32 {
+        for x in 0..64u32 {
+            let t = (x + y) as f32 / 126.0;
+            let r = (255.0 * (0.2 + 0.8 * t)) as u32;
+            let g = (255.0 * (1.0 - t)) as u32;
+            let b = (255.0 * (0.5 + 0.5 * ((x as f32 / 10.0).sin() * (y as f32 / 10.0).cos()))) as u32;
+            let rot = [r, g, b];
+            let k = hue as usize % 3;
+            px.extend_from_slice(&[rot[k] as u8, rot[(k + 1) % 3] as u8, rot[(k + 2) % 3] as u8, 255]);
+        }
+    }
+    Image::new(64, 64, px).expect("logo image")
+}
+
 fn menu_view(s: &Settings) -> El<Msg> {
     column![
         text("UI demo").class("title").key("title"),
+        s.logo
+            .map(|t| image(t, ImageFit::Contain).key("logo").style(Style::new().width(Size::Px(64.0)).height(Size::Px(64.0))))
+            .unwrap_or_else(|| container().key("logo")),
         row![
             button("Play").key("play").on_click(Msg::Play),
             checkbox("Fullscreen", s.fullscreen).key("fullscreen").on_toggle(Msg::Fullscreen),
@@ -80,6 +104,11 @@ fn update(cx: &mut Ctx) {
             Msg::Play => {
                 s.plays += 1;
                 global_info(&format!("[ui_demo] play pressed {} times", s.plays));
+                let (plays, logo) = (s.plays, s.logo);
+                if let (Some(logo), Some(textures)) = (logo, cx.resources.get_mut::<Textures>()) {
+                    let _ = textures.replace(logo, logo_image(plays));
+                }
+                continue;
             }
             Msg::Volume(v) => s.volume = v,
             Msg::Fullscreen(f) => s.fullscreen = f,
@@ -98,7 +127,8 @@ fn update(cx: &mut Ctx) {
 /// The game's resources, views and systems. Expects `UiPlugin` to be added already (`run` adds
 /// it; `UiTest::new` adds it before calling this).
 pub fn setup(engine: &mut Engine) {
-    engine.insert_resource(Settings::default());
+    let logo = engine.textures_mut().add(logo_image(0));
+    engine.insert_resource(Settings { logo: Some(logo), ..Settings::default() });
     engine.add_plugin(UiView::new("menu", menu_view).layer(Layer::centered(10))).expect("menu view");
     engine.add_plugin(UiView::new("hud", hud_view).layer(Layer::top_left(20))).expect("hud view");
     engine.add_system(Stage::Update, update);

@@ -41,7 +41,10 @@ pub struct UiBackendCx {
     pub scale_factor: f32,
     /// The engine images (RGBA8) of the textures that `Image` nodes touched by this `sync`
     /// (created, or `Kind` changed) use. Filled by the plugin right before `sync`, empty
-    /// otherwise. A texture that is replaced in `Textures` later does not refresh the widget.
+    /// otherwise. When a texture an `Image` node shows is replaced in `Textures`, the plugin
+    /// adds the new image here and a synthesized `UiChange::Kind(node)` for every node that
+    /// shows it to the `changes` of that `sync` (the journal of the tree is untouched), so a
+    /// backend refreshes replaced textures the same way it handles a new image.
     pub images: Vec<(TextureHandle, Arc<Image>)>,
 }
 
@@ -87,6 +90,13 @@ pub trait UiBackend: 'static {
     /// "a text field has focus here", `Some(None)` "no text field has focus", `None` no change.
     /// The plugin turns it into `SetTextInput` / `SetTextInputArea` commands.
     fn take_text_input(&mut self) -> Option<Option<TextInputArea>> {
+        None
+    }
+
+    /// Native: the mouse cursor icon the UI wants since the last call (`None` = no change).
+    /// The plugin turns it into `set_cursor_icon`; it only changes when the UI's interaction
+    /// changes (over a button, a text input, ...).
+    fn take_cursor_icon(&mut self) -> Option<efeengine_core::window::CursorIcon> {
         None
     }
 }

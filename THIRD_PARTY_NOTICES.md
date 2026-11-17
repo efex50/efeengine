@@ -42,3 +42,8 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Inter (bundled font, `crates/ui/assets/`)
+
+- Source: https://github.com/rsms/inter, release `v4.1` (`extras/ttf/Inter-Regular.ttf`, `extras/ttf/Inter-Bold.ttf`, unmodified).
+- License: SIL Open Font License 1.1, Copyright (c) The Inter Project Authors. The license text is kept unchanged in `crates/ui/assets/Inter-OFL.txt`. Used as the default font of the native UI backend (`crates/ui/src/native`).

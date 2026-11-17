@@ -17,11 +17,17 @@
 //! RefCell rule (see `plugin.rs`): the backend never calls back into the engine or the plugin;
 //! signals and the text-input request are queued and picked up by the plugin's systems.
 
+mod assets;
 mod convert;
+mod keyed;
 mod model;
+pub mod offscreen;
 mod view;
 
+pub use offscreen::{Screenshot, encode_png, render_offscreen, render_offscreen_represented};
+
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Instant as StdInstant;
 
 use efeengine_core::input::{Filter, InputEvent, InputEventKind};
@@ -29,11 +35,14 @@ use efeengine_core::render::Gpu;
 use iced_core::event::Status;
 use iced_core::time::Instant;
 use iced_core::widget::Operation;
-use iced_core::widget::operation::{Focusable, Outcome};
+use iced_core::widget::operation::{Focusable, Outcome, focusable};
+use iced_core::clipboard;
 use iced_core::{Color, Event, Rectangle, Size, Theme, mouse, renderer, shell, window};
 use iced_runtime::user_interface::{self, UserInterface};
 use iced_wgpu::graphics::{Shell, Viewport};
 use iced_wgpu::{Engine, Renderer, wgpu};
+
+use efeengine_core::window::CursorIcon;
 
 use crate::backend::{TextInputArea, UiBackend, UiBackendCx};
 use crate::capture::UiCapture;
@@ -46,6 +55,7 @@ use crate::tree::UiTree;
 
 use convert::Converter;
 use model::Model;
+use assets::Assets;
 use view::{Msg, iced_id};
 
 struct GpuState {
@@ -56,10 +66,22 @@ struct GpuState {
 /// Cost counters for `EFE_UI_STATS=1` (average CPU time of the overlay pass).
 #[derive(Default)]
 struct Stats {
-    frames: u32,
-    total: std::time::Duration,
-    /// Of `total`: build + layout + update + draw (everything before `present`).
-    build: std::time::Duration,
+    /// Frames that rebuilt, laid out and drew the interface.
+    active: u32,
+    active_total: std::time::Duration,
+    /// Of `active_total`: build + layout + update + draw (everything before `present`).
+    active_build: std::time::Duration,
+    /// Frames that only presented the previous frame's primitives again.
+    idle: u32,
+    idle_total: std::time::Duration,
+}
+
+/// Keyboard focus navigation requested by a key press.
+#[derive(Clone, Copy)]
+enum Nav {
+    Next,
+    Previous,
+    Blur,
 }
 
 pub struct IcedBackend {
@@ -79,6 +101,17 @@ pub struct IcedBackend {
     hovering: HashSet<WidgetId>,
     /// The text input with keyboard focus.
     focused: Option<WidgetId>,
+    assets: Assets,
+    /// The model, a message or an event changed something: rebuild, lay out and draw next frame.
+    dirty: bool,
+    /// What the last `update` asked for (caret blink, animations).
+    redraw: window::RedrawRequest,
+    /// The renderer holds a drawn frame that can be presented again.
+    drawn: bool,
+    /// Mouse cursor the UI wants, and the last one reported to the plugin.
+    icon: CursorIcon,
+    icon_sent: CursorIcon,
+    icon_request: Option<CursorIcon>,
     /// Latest IME cursor rectangle (logical px) of the focused text input.
     ime_area: Option<Rectangle>,
     /// Text-input request not yet picked up by the plugin.
@@ -104,6 +137,13 @@ impl IcedBackend {
             over: HashSet::new(),
             hovering: HashSet::new(),
             focused: None,
+            assets: Assets::new(),
+            dirty: true,
+            redraw: window::RedrawRequest::NextFrame,
+            drawn: false,
+            icon: CursorIcon::Default,
+            icon_sent: CursorIcon::Default,
+            icon_request: None,
             ime_area: None,
             text_request: None,
             text_sent: None,
@@ -118,35 +158,96 @@ impl IcedBackend {
     }
 
     /// Builds the interface, feeds `events`, returns the statuses; applies produced messages
-    /// and refreshes the focus. Does not draw.
-    fn update(&mut self, events: &[Event], draw: Option<(&Gpu, &wgpu::TextureView)>) -> Vec<Status> {
+    /// and refreshes the focus. Draws when `draw` is given. `nav` runs a focus operation after
+    /// the events (Tab / Shift+Tab / Escape).
+    fn update(&mut self, events: &[Event], draw: Option<(&Gpu, &wgpu::TextureView)>, nav: Option<Nav>) -> Vec<Status> {
         let cursor = self.cursor;
         let Some(g) = self.gpu.as_mut() else { return Vec::new() };
         let mut bus = shell::Bus::new();
-        let mut ui = UserInterface::build(view::view(&self.model), self.logical, std::mem::take(&mut self.cache), &mut g.renderer);
-        let (state, statuses) = ui.update(&window::Headless, &shell::Waker::noop(), events, self.cursor, &mut g.renderer, &mut bus);
+        let mut ui = UserInterface::build(view::view(&self.model, &self.assets), self.logical, std::mem::take(&mut self.cache), &mut g.renderer);
+        let (mut state, statuses) = ui.update(&window::Headless, &shell::Waker::noop(), events, self.cursor, &mut g.renderer, &mut bus);
+        // Clipboard requests: writes go out, reads are answered with a follow-up event.
+        if let user_interface::State::Updated { clipboard, .. } = &mut state {
+            if let Some(clipboard::Content::Text(t)) = clipboard.write.take() {
+                let _ = efeengine_core::clipboard::set_clipboard_text(&t);
+            }
+            if !clipboard.reads.is_empty() {
+                let answer = match efeengine_core::clipboard::clipboard_text() {
+                    Some(t) => Ok(Arc::new(clipboard::Content::Text(t))),
+                    None => Err(clipboard::Error::ContentNotAvailable),
+                };
+                let reply = [Event::Clipboard(clipboard::Event::Read(answer))];
+                let (s2, _) = ui.update(&window::Headless, &shell::Waker::noop(), &reply, self.cursor, &mut g.renderer, &mut bus);
+                state = s2;
+            }
+        }
+        let nav_op: Option<Box<dyn Operation>> = match nav {
+            Some(Nav::Next) => Some(Box::new(focusable::focus_next::<()>())),
+            Some(Nav::Previous) => Some(Box::new(focusable::focus_previous::<()>())),
+            Some(Nav::Blur) => Some(Box::new(focusable::unfocus::<()>())),
+            None => None,
+        };
+        // `focus_next` / `focus_previous` count first and then focus: follow the chain.
+        if let Some(mut op) = nav_op {
+            loop {
+                ui.operate(&g.renderer, op.as_mut());
+                match op.finish() {
+                    Outcome::Chain(next) => op = next,
+                    _ => break,
+                }
+            }
+        }
         let mut probe = FocusProbe(None);
         ui.operate(&g.renderer, &mut probe);
         if let Some((gpu, target)) = draw {
             ui.draw(&mut g.renderer, &Theme::Dark, &renderer::Style { text_color: Color::WHITE }, cursor);
             self.cache = ui.into_cache();
-            self.stats.build += self.stats_t0.elapsed();
+            self.stats.active_build += self.stats_t0.elapsed();
             let _ = g.renderer.present(None, gpu.surface_format, target, &g.viewport);
         } else {
             self.cache = ui.into_cache();
         }
         let focus_id = probe.0;
-        if let user_interface::State::Updated { input_method, .. } = state {
+        if let user_interface::State::Updated { input_method, redraw_request, mouse_interaction, .. } = state {
             self.ime_area = match input_method {
                 iced_core::InputMethod::Enabled { cursor, .. } => Some(cursor),
                 iced_core::InputMethod::Disabled => None,
             };
+            self.redraw = redraw_request;
+            self.set_icon(mouse_interaction);
+        } else {
+            // Outdated: the widgets want a rebuild.
+            self.dirty = true;
         }
         for m in bus {
             self.apply(m);
+            self.dirty = true;
         }
         self.set_focus(focus_id.and_then(|id| self.model.text_inputs().into_iter().find(|n| iced_id(*n) == id)));
         statuses
+    }
+
+    fn set_icon(&mut self, i: mouse::Interaction) {
+        use mouse::Interaction as I;
+        self.icon = match i {
+            I::Pointer | I::Alias | I::Copy | I::ContextMenu | I::Help | I::Cell | I::ZoomIn | I::ZoomOut => CursorIcon::Pointer,
+            I::Text => CursorIcon::Text,
+            I::Crosshair => CursorIcon::Crosshair,
+            I::Grab => CursorIcon::Grab,
+            I::Grabbing => CursorIcon::Grabbing,
+            I::NotAllowed | I::NoDrop => CursorIcon::NotAllowed,
+            I::Wait | I::Progress => CursorIcon::Wait,
+            I::Move | I::AllScroll => CursorIcon::Move,
+            I::ResizingHorizontally | I::ResizingColumn => CursorIcon::ResizeEw,
+            I::ResizingVertically | I::ResizingRow => CursorIcon::ResizeNs,
+            I::ResizingDiagonallyUp => CursorIcon::ResizeNesw,
+            I::ResizingDiagonallyDown => CursorIcon::ResizeNwse,
+            I::None | I::Idle | I::Hidden => CursorIcon::Default,
+        };
+        if self.icon != self.icon_sent {
+            self.icon_sent = self.icon;
+            self.icon_request = Some(self.icon);
+        }
     }
 
     fn set_focus(&mut self, now: Option<WidgetId>) {
@@ -244,6 +345,17 @@ impl IcedBackend {
         }
     }
 
+    /// Tab / Shift+Tab move the focus between text inputs, Escape blurs the focused one.
+    fn nav_for(&self, ev: &InputEvent) -> Option<Nav> {
+        use efeengine_core::input::{ElementState, Key as EKey, NamedKey};
+        let InputEventKind::Key { logical: EKey::Named(k), state: ElementState::Pressed, mods, .. } = &ev.kind else { return None };
+        match k {
+            NamedKey::Tab if !self.model.text_inputs().is_empty() => Some(if mods.shift() { Nav::Previous } else { Nav::Next }),
+            NamedKey::Escape if self.focused.is_some() => Some(Nav::Blur),
+            _ => None,
+        }
+    }
+
     fn pointer_over(&self) -> bool {
         !self.over.is_empty() || self.model.modal()
     }
@@ -256,6 +368,7 @@ impl IcedBackend {
         );
         self.logical = vp.logical_size();
         self.conv.scale = scale;
+        self.dirty = true;
         if let Some(g) = self.gpu.as_mut() {
             g.viewport = vp;
         }
@@ -304,7 +417,9 @@ impl UiBackend for IcedBackend {
         if events.is_empty() || self.model.is_empty() || self.gpu.is_none() {
             return Filter::Pass;
         }
-        let statuses = self.update(&events, None);
+        let nav = self.nav_for(ev);
+        self.dirty = true;
+        let statuses = self.update(&events, None, nav);
         let used = statuses.contains(&Status::Captured);
         let captured = match &ev.kind {
             InputEventKind::MouseMotion { .. }
@@ -312,14 +427,26 @@ impl UiBackend for IcedBackend {
             | InputEventKind::MouseWheel { .. }
             | InputEventKind::Touch { .. } => used || self.pointer_over(),
             InputEventKind::Key { .. } | InputEventKind::Text(_) | InputEventKind::TextEditing { .. } => {
-                used || self.focused.is_some() || self.model.modal()
+                used || nav.is_some() || self.focused.is_some() || self.model.modal()
             }
             InputEventKind::Window(_) => false,
         };
         if captured { Filter::Captured } else { Filter::Pass }
     }
 
-    fn sync(&mut self, tree: &UiTree, _changes: &[UiChange], _theme: &UiTheme, _cx: &mut UiBackendCx) {
+    fn sync(&mut self, tree: &UiTree, changes: &[UiChange], _theme: &UiTheme, cx: &mut UiBackendCx) {
+        for (h, img) in &cx.images {
+            self.assets.set_image(*h, img);
+        }
+        for ch in changes {
+            if let UiChange::Font(id) = ch
+                && let Some(f) = tree.font(*id)
+                && self.assets.load_font(*id, &f.bytes).is_none()
+            {
+                efeengine_core::prelude::global_warn(&format!("[efeengine-ui] font \"{}\" has no usable face", f.name));
+            }
+        }
+        self.dirty = true;
         self.model = Model::build(tree);
         // Forget ids that are gone or no longer interesting; a surviving widget keeps its state
         // in iced's cache, so its enter / exit pairs stay consistent.
@@ -344,22 +471,11 @@ impl UiBackend for IcedBackend {
     fn resize(&mut self, logical: (f32, f32), scale: f32) {
         self.conv.scale = scale.max(0.01);
         self.logical = Size::new(logical.0, logical.1);
+        self.dirty = true;
     }
 
     fn gpu_init(&mut self, gpu: &Gpu) {
-        // iced_wgpu's `Engine::new` wants an adapter (it only reads it with the image / svg
-        // features, which are off). `Gpu` does not carry one, so ask for a throwaway one.
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::from_env().unwrap_or_default(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()));
-        let Ok(adapter) = adapter else {
-            efeengine_core::prelude::global_warn("[efeengine-ui] iced: no wgpu adapter, native UI disabled");
-            self.broken = true;
-            return;
-        };
-        let engine = Engine::new(&adapter, gpu.device.clone(), gpu.queue.clone(), gpu.surface_format, None, Shell::headless());
+        let engine = Engine::new(gpu.adapter, gpu.device.clone(), gpu.queue.clone(), gpu.surface_format, None, Shell::headless());
         let renderer = Renderer::new(engine, renderer::Settings::default());
         let viewport = Viewport::with_physical_size(Size::new(1, 1), renderer::Scale { window: 1.0, application: 1.0 });
         self.gpu = Some(GpuState { renderer, viewport });
@@ -376,21 +492,44 @@ impl UiBackend for IcedBackend {
         }
         let t0 = StdInstant::now();
         self.stats_t0 = t0;
-        // `RedrawRequested` lets widgets refresh their status and request the input method;
-        // the same interface is then drawn.
-        let _ = self.update(&[Event::Window(window::Event::RedrawRequested(Instant::now()))], Some((gpu, target)));
-        self.refresh_text_request();
+        let due = match self.redraw {
+            window::RedrawRequest::NextFrame => true,
+            window::RedrawRequest::At(t) => Instant::now() >= t,
+            window::RedrawRequest::Wait => false,
+        };
+        let active = self.dirty || due || !self.drawn;
+        if active {
+            // `RedrawRequested` lets widgets refresh their status and request the input method
+            // and the next redraw; the same interface is then drawn.
+            self.dirty = false;
+            self.redraw = window::RedrawRequest::Wait;
+            let _ = self.update(&[Event::Window(window::Event::RedrawRequested(Instant::now()))], Some((gpu, target)), None);
+            self.drawn = true;
+            self.refresh_text_request();
+        } else if let Some(g) = self.gpu.as_mut() {
+            // Nothing changed: no rebuild, no layout, no draw; the renderer still holds the
+            // primitives of the last frame, the engine cleared the target, so present again.
+            let _ = g.renderer.present(None, gpu.surface_format, target, &g.viewport);
+        }
         if self.stats_on {
-            self.stats.frames += 1;
-            self.stats.total += t0.elapsed();
-            if self.stats.frames == 300 {
-                let n = self.stats.frames as f64;
-                let ms = self.stats.total.as_secs_f64() * 1000.0 / n;
-                let build = self.stats.build.as_secs_f64() * 1000.0 / n;
+            let el = t0.elapsed();
+            if active {
+                self.stats.active += 1;
+                self.stats.active_total += el;
+            } else {
+                self.stats.idle += 1;
+                self.stats.idle_total += el;
+            }
+            if self.stats.active + self.stats.idle == 300 {
+                let s = &self.stats;
+                let avg = |t: std::time::Duration, n: u32| if n == 0 { 0.0 } else { t.as_secs_f64() * 1000.0 / n as f64 };
+                let (a, i) = (avg(s.active_total, s.active), avg(s.idle_total, s.idle));
+                let build = avg(s.active_build, s.active);
                 efeengine_core::prelude::global_info(&format!(
-                    "[efeengine-ui] iced overlay: {ms:.3} ms/frame ({build:.3} build+layout+update+draw, {:.3} present) over {} frames",
-                    ms - build,
-                    self.stats.frames
+                    "[efeengine-ui] iced overlay over 300 frames: active {a:.3} ms ({} frames, {build:.3} build+layout+update+draw, {:.3} present), idle {i:.3} ms ({} frames)",
+                    s.active,
+                    a - build,
+                    s.idle
                 ));
                 self.stats = Stats::default();
             }
@@ -399,5 +538,9 @@ impl UiBackend for IcedBackend {
 
     fn take_text_input(&mut self) -> Option<Option<TextInputArea>> {
         self.text_request.take()
+    }
+
+    fn take_cursor_icon(&mut self) -> Option<CursorIcon> {
+        self.icon_request.take()
     }
 }

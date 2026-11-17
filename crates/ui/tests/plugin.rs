@@ -571,3 +571,75 @@ fn blur_passes_for_disabled_or_hidden_widgets() {
     t.step(1);
     assert_eq!(log.borrow().len(), 2);
 }
+
+// ----- image refresh --------------------------------------------------------------------------
+
+mod image_refresh {
+    use std::sync::Arc;
+
+    use super::*;
+    use efeengine_core::render::Image;
+
+    #[derive(Default)]
+    struct Seen {
+        /// One entry per `sync`: the changes and the images that came with it.
+        syncs: Vec<(Vec<UiChange>, Vec<(TextureHandle, Arc<Image>)>)>,
+    }
+
+    struct Recorder(Rc<RefCell<Seen>>);
+
+    impl UiBackend for Recorder {
+        fn init(&mut self, _: &mut UiBackendCx) {}
+        fn sync(&mut self, _: &UiTree, changes: &[UiChange], _: &Theme, cx: &mut UiBackendCx) {
+            self.0.borrow_mut().syncs.push((changes.to_vec(), cx.images.clone()));
+        }
+        fn drain_signals(&mut self, _: &mut Vec<UiSignal>) {}
+        fn capture(&self) -> UiCapture {
+            UiCapture::default()
+        }
+    }
+
+    #[test]
+    fn a_replaced_texture_refreshes_every_image_node_that_shows_it() {
+        let seen = Rc::new(RefCell::new(Seen::default()));
+        let mut engine = Engine::with_config(EngineConfig::headless()).unwrap();
+        engine.add_plugin(UiPlugin::with_backend(Recorder(seen.clone()))).unwrap();
+        let tex = engine.textures_mut().add(Image::solid(4, 4, [255, 0, 0, 255]));
+        let other = engine.textures_mut().add(Image::solid(2, 2, [0, 0, 255, 255]));
+        let (a, b, c);
+        {
+            let ui = engine.resources_mut().get_mut::<UiTree>().unwrap();
+            let r = ui.layer("r", Layer::fill(0));
+            a = ui.image(r, tex, ImageFit::Contain).id();
+            b = ui.image(r, tex, ImageFit::Fill).id();
+            c = ui.image(r, other, ImageFit::Fill).id();
+        }
+        engine.run_frames(1, 1.0 / 60.0);
+        {
+            let s = seen.borrow();
+            assert_eq!(s.syncs.len(), 1);
+            assert_eq!(s.syncs[0].1.len(), 2, "one image per texture, not per node");
+        }
+
+        // Nothing changed: no sync at all.
+        engine.run_frames(2, 1.0 / 60.0);
+        assert_eq!(seen.borrow().syncs.len(), 1);
+
+        let new_img = Image::solid(8, 8, [0, 255, 0, 255]);
+        engine.textures_mut().replace(tex, new_img.clone()).unwrap();
+        engine.run_frames(1, 1.0 / 60.0);
+        let s = seen.borrow();
+        assert_eq!(s.syncs.len(), 2);
+        let (changes, images) = &s.syncs[1];
+        assert!(changes.contains(&UiChange::Kind(a)) && changes.contains(&UiChange::Kind(b)), "{changes:?}");
+        assert!(!changes.contains(&UiChange::Kind(c)));
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].0, tex);
+        assert_eq!(*images[0].1, new_img);
+        drop(s);
+
+        // Once refreshed it is quiet again.
+        engine.run_frames(2, 1.0 / 60.0);
+        assert_eq!(seen.borrow().syncs.len(), 2);
+    }
+}

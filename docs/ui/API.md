@@ -174,13 +174,36 @@ pub struct Style {
 | Property | CSS | iced | taffy / fallback |
 |---|---|---|---|
 | direction | `flex-direction` | `row` / `column` | `flex_direction` |
-| justify, align | `justify-content`, `align-items` | align: `align_x` / `align_y` on the row / column (`Stretch` = children `Fill`, fluid inside a `Fit` parent); justify: `Fill` spacers around the children, only when the container's main size is definite (iced has no justify) | `justify_content`, `align_items` |
+| justify, align | `justify-content`, `align-items` | align: `align_x` / `align_y` on the row / column (`Stretch` = children `Fill` when the parent's size on that axis is definite, else they keep their own size); justify: `Fill` spacers around the children, only when the container's main size is definite (iced has no justify) | `justify_content`, `align_items` |
 | gap, padding | `gap`, `padding` | `spacing`, `padding` | `gap`, `padding` |
-| width/height Auto, Fill, Portion | `flex-grow` | `Length::Fit` (Auto), `Length::Fill`, `FillPortion` | `flex_grow` |
+| width/height Auto, Fill, Portion | `flex-grow` | `Length::Fit` (Auto), `Length::Fill`, `FillPortion` (a `Fill` inside an auto-sized parent stays `Fit`) | `flex_grow` |
 | min/max | `min-width` ... | `Length::min(v)` / `Length::max(v)` on the width / height (iced main's bounded lengths; spike: works for both axes) | `min_size`, `max_size` |
 | background, border, radius | `background`, `border`, `border-radius` | `container::Style` | quad pipeline |
 | text color, size, bold, align | `color`, `font-size`, `font-weight`, `text-align` | `text` style | glyphon attrs |
 | opacity | `opacity` | folded into every colour's alpha of the node (background, border, text); a child does not inherit it (the theme puts it on the node that needs it, e.g. disabled) | multiply alpha |
+
+### Per-backend notes (web vs iced)
+
+Checked property by property with an offscreen render of `examples/ui_demo` (`cargo test -p ui_demo
+--test native_screenshot -- --ignored`) against the web page. Differences that remain:
+
+| Property | Web (CSS) | Native (iced) | Note |
+|---|---|---|---|
+| layers | `position: absolute`, `inset: 0` for `Fill`, shrink-to-content otherwise, offsets as left / right / top / bottom (centred anchors: `translate`) | every layer is a full-size `container` with `align_x` / `align_y` from the anchor and padding for the offset; a `Fill` root fills it | same placement |
+| `Auto` size | `auto` | `Length::Fit` (never `Fill`) | same |
+| `Fill` / `Portion` / `align: Stretch` | `flex-grow`; stretch to the widest sibling in an auto-sized parent | `Fill` / `FillPortion` when the parent's size on that axis is definite (`Px` or `Fill`); in an auto-sized parent the child keeps its own size | native does not stretch children to the widest sibling of an auto-sized parent (iced would turn the parent into `Fill`) |
+| `justify` | `justify-content` | `Fill` spacers, only when the container's main size is definite | same result, no free space to share otherwise in CSS either |
+| `min_*` / `max_*` | `min-width` ... | `Length::min` / `max` | same |
+| `background`, `border`, `radius` | CSS | `container::Style`; button, text input, checkbox, slider have their own style closures | a checkbox paints its box, not the whole row; on web the row element has the background |
+| `text_color`, `font_size`, `bold`, `font`, `text_align` | CSS (inherited by children) | per node; the backend copies unset values of `bold`, `font`, `text_color`, `font_size`, `text_align` from the parent's resolved style (per state) | built-in theme sets colour, size and alignment on every node, so in practice only `bold` and `font` inherit |
+| `font` | `font-family: var(--efui-font-N)` | family name read from the font file | web font loading: separate change |
+| `opacity` | whole subtree (CSS `opacity`) | folded into the node's own colours (background, border, text); children do not inherit it | known difference; put `opacity` on leaf nodes |
+| state styles | `:hover`, `:active`, `:focus`, `[disabled]` | button, text input, checkbox, slider through iced status closures | focus style only on text inputs (iced buttons, checkboxes and sliders are not focusable) |
+| focus navigation | browser Tab order | Tab / Shift+Tab move between text inputs, Escape blurs the focused one (the key is captured) | buttons are not in the native tab order |
+| mouse cursor | CSS `cursor` | iced's `mouse::Interaction` mapped to `CursorIcon`, sent when it changes | the UI also resets the cursor to `Default` when the pointer leaves an interactive widget |
+| clipboard | browser (DOM inputs) | copy, cut, paste through `efeengine_core::clipboard` (SDL) | main thread only |
+| IME | browser | `TextEditing` preedit reaches iced's editor; the OS popup follows `SetTextInputArea` | preedit is not drawn inline |
+| images | `<canvas>` + `object-fit` | `image` widget with `ContentFit` | `Cover` crops to the box on both |
 
 ## 6. Themes and classes
 
@@ -347,15 +370,21 @@ pub type UiCapture = efeengine_core::input::InputCapture;   // { pointer: bool, 
 ## 11. Text, fonts and images
 
 - **Fonts:** `FontId` registry in the UI plugin. `ui.load_font(name, bytes)`. Web: `FontFace` from
-  the bytes. iced: `font::load`. Fallback: cosmic-text font database. `efeengine-ui` bundles one OFL
-  font (listed in `THIRD_PARTY_NOTICES.md`) as the native default; the web default is the browser's
-  sans-serif unless the game loads a font.
+  the bytes. iced: the bytes go into iced's global font system (what `font::load` writes to; the
+  backend has no iced runtime to run the task) and `Style.font` becomes the iced font family named
+  inside the file, `bold` the bold weight. Fallback: cosmic-text font database. `efeengine-ui`
+  bundles Inter Regular and Bold (SIL OFL, `crates/ui/assets/`, listed in `THIRD_PARTY_NOTICES.md`) as
+  the native default; the web default is the browser's sans-serif unless the game loads a font.
 - **Text input on native** needs IME composition events. The engine's `InputEventKind` has
   `Text(String)` and `TextEditing { text, cursor, len }` (IME preedit, from SDL3), and
   `cx.commands.set_text_input_area(x, y, w, h, cursor)` places the IME popup next to the field.
 - **Images** reference engine `TextureHandle`s. Web: the backend draws the decoded RGBA into a
-  `<canvas>` (`putImageData`) when the node is created or its kind changes; a texture replaced
-  later in `Textures` does not refresh the widget yet. iced: `image::Handle::from_rgba`. Fallback:
+  `<canvas>` (`putImageData`) when the node is created or its kind changes. A texture replaced later
+  in `Textures` refreshes every backend the same way: the plugin remembers the image (`Arc`) each
+  texture had when it was last handed over and, when it differs, adds the new image to
+  `UiBackendCx.images` and a synthesized `UiChange::Kind(node)` for each `Image` node showing it to
+  that `sync`'s changes (the tree's journal is untouched). iced: `image::Handle::from_rgba`
+  (a new handle per replaced image). Fallback:
   its own GPU texture table fed by the same `TextureChanges` the game renderer gets.
 - **World-space UI** (labels and bars over entities) is out of v1: on the web HTML always draws above
   the canvas, so these would be positioned from the camera each frame or drawn by the game renderer.
@@ -395,6 +424,7 @@ pub trait UiBackend: 'static {
     fn gpu_resize(&mut self, gpu: &Gpu) {}                             // native only (surface size / scale)
     fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView) {}   // native only, LoadOp::Load
     fn take_text_input(&mut self) -> Option<Option<TextInputArea>> { None }  // Some(Some(area)): a text field has focus
+    fn take_cursor_icon(&mut self) -> Option<CursorIcon> { None }    // native: mouse cursor the UI wants (only when it changes)
     fn resize(&mut self, logical: (f32, f32), scale: f32) {}
 }
 
@@ -413,7 +443,9 @@ pub enum UiChange {
 - The journal names what changed, the backend reads the new state from the tree. A frame with no
   changes costs nothing in `sync`.
 - `UiBackendCx.images` carries the engine RGBA images of the textures that `Image` nodes created
-  or changed in this `sync` use (filled by the plugin from `Textures`).
+  or changed in this `sync` use, or that were replaced in `Textures` since the last hand-over
+  (filled by the plugin from `Textures`; for replaced textures the `changes` slice also holds one
+  synthesized `UiChange::Kind` per node that shows the texture).
 - The plugin installs one engine `InputFilter` (calls `backend.input`, answers `Filter::Captured` / `Pass`) and one `RenderOverlay` (`gpu_init`, `gpu_resize`, `render`). The backend never calls back into the engine: signals and the text-input request are queued and the plugin's `ui_signals` system hands them over (`cx.commands.set_text_input(bool)`, `set_text_input_area`). The filter uses `try_borrow_mut`, never a blocking borrow of the shared backend.
 - `UiPlugin::new()` picks the backend: web on wasm32 (`UiPlugin::headless()` forces headless; `UiTest` uses it), iced on native when the default `iced` cargo feature is on and the engine is not headless (`EngineConfig::headless`), the fallback with the
   `ui-fallback` feature, headless when there is no window (tests, servers).

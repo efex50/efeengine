@@ -15,13 +15,15 @@
 //! - `PostUpdate`, `order::LATE + 20`: the journal goes to `backend.sync`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use efeengine_core::input::{InputCapture, InputEventKind, WindowEvent};
 use efeengine_core::prelude::*;
 
 use efeengine_core::input::{Filter, InputEvent, InputFilter};
-use efeengine_core::render::{Gpu, RenderOverlay};
+use efeengine_core::render::{Gpu, Image, RenderOverlay};
 
 use crate::backend::{UiBackend, UiBackendCx};
 use crate::bindings::{BindCx, UiBindings};
@@ -167,11 +169,14 @@ impl Plugin for UiPlugin {
             engine
                 .add_system(Stage::PreUpdate, move |cx| {
                     let mut raw = Vec::new();
-                    let (capture, text_input) = {
+                    let (capture, text_input, cursor_icon) = {
                         let mut be = backend.borrow_mut();
                         be.drain_signals(&mut raw);
-                        (be.capture(), be.take_text_input())
+                        (be.capture(), be.take_text_input(), be.take_cursor_icon())
                     };
+                    if let Some(icon) = cursor_icon {
+                        cx.commands.set_cursor_icon(icon);
+                    }
                     match text_input {
                         Some(Some(a)) => {
                             cx.commands.set_text_input(true);
@@ -223,30 +228,61 @@ impl Plugin for UiPlugin {
             .order(order::LATE + 10)
             .name("ui_bindings");
 
-        // Sync.
+        // Sync. Image textures: `seen` remembers the image (by `Arc`) each texture had when it
+        // was last handed to the backend; a texture replaced in `Textures` since then makes
+        // every `Image` node that shows it get a synthesized `UiChange::Kind` plus the new image
+        // in `UiBackendCx::images`, exactly like a node whose image was just set.
         {
             let backend = backend.clone();
             let bcx = bcx.clone();
+            let seen: RefCell<HashMap<TextureHandle, Arc<Image>>> = RefCell::new(HashMap::new());
             engine
                 .add_system(Stage::PostUpdate, move |cx| {
                     let Some(tree) = cx.resources.get_mut::<UiTree>() else { return };
-                    let changes = tree.take_changes();
-                    if changes.is_empty() {
-                        return;
-                    }
+                    let mut changes = tree.take_changes();
                     let Some(tree) = cx.resources.get::<UiTree>() else { return };
-                    let mut bc = bcx.borrow_mut();
-                    bc.images.clear();
-                    if let Some(textures) = cx.resources.get::<Textures>() {
+                    let textures = cx.resources.get::<Textures>();
+                    let mut seen = seen.borrow_mut();
+                    let mut images: Vec<(TextureHandle, Arc<Image>)> = Vec::new();
+                    if let Some(textures) = textures {
                         for ch in &changes {
                             let (UiChange::Created(id) | UiChange::Kind(id)) = ch else { continue };
                             if let Some(NodeKind::Image { texture, .. }) = tree.kind(*id)
                                 && let Some(img) = textures.get(*texture)
+                                && !images.iter().any(|(h, _)| h == texture)
                             {
-                                bc.images.push((*texture, img.clone()));
+                                images.push((*texture, img.clone()));
+                            }
+                        }
+                        // Replaced (or removed) textures behind existing image nodes.
+                        let stale: Vec<TextureHandle> = seen
+                            .iter()
+                            .filter(|(h, old)| textures.get(**h).is_none_or(|now| !Arc::ptr_eq(now, old)))
+                            .map(|(h, _)| *h)
+                            .collect();
+                        for h in stale {
+                            let _ = seen.remove(&h);
+                            let Some(img) = textures.get(h) else { continue };
+                            for (id, n) in tree.iter() {
+                                if matches!(n.kind(), NodeKind::Image { texture, .. } if *texture == h) {
+                                    if !changes.contains(&UiChange::Kind(id)) && !changes.contains(&UiChange::Created(id)) {
+                                        changes.push(UiChange::Kind(id));
+                                    }
+                                    if !images.iter().any(|(t, _)| *t == h) {
+                                        images.push((h, img.clone()));
+                                    }
+                                }
                             }
                         }
                     }
+                    if changes.is_empty() {
+                        return;
+                    }
+                    for (h, img) in &images {
+                        let _ = seen.insert(*h, img.clone());
+                    }
+                    let mut bc = bcx.borrow_mut();
+                    bc.images = images;
                     backend.borrow_mut().sync(&tree, &changes, tree.theme(), &mut bc);
                     bc.images.clear();
                 })

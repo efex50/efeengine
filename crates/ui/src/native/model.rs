@@ -49,7 +49,7 @@ impl Model {
                 continue;
             }
             let Some(layer) = tree.get(root).and_then(|n| n.layer().copied()) else { continue };
-            if let Some(mut node) = build_node(tree, root) {
+            if let Some(mut node) = build_node(tree, root, None) {
                 if layer.modal {
                     node.blocking = true;
                 }
@@ -117,23 +117,38 @@ fn has_look(s: &Style) -> bool {
     s.background.is_some_and(|c| c.a > 0.0) || s.border.is_some_and(|Border { width, .. }| width > 0.0)
 }
 
-fn build_node(tree: &UiTree, id: WidgetId) -> Option<VNode> {
+/// CSS inherits `color`, `font-*` and `text-align` from the parent; the backend does the same
+/// for the properties the style subset has, per state (a hovered parent passes its hover colour on).
+fn inherit(styles: &mut [Style; 5], parent: &[Style; 5]) {
+    for (s, p) in styles.iter_mut().zip(parent) {
+        s.text_color = s.text_color.or(p.text_color);
+        s.font_size = s.font_size.or(p.font_size);
+        s.font = s.font.or(p.font);
+        s.bold = s.bold.or(p.bold);
+        s.text_align = s.text_align.or(p.text_align);
+    }
+}
+
+fn build_node(tree: &UiTree, id: WidgetId, parent: Option<&[Style; 5]>) -> Option<VNode> {
     let node = tree.get(id)?;
     let st = |hovered, pressed, focused| WidgetState { hovered, pressed, focused, disabled: false };
-    let styles = [
+    let mut styles = [
         tree.resolve(id, st(false, false, false))?,
         tree.resolve(id, st(true, false, false))?,
         tree.resolve(id, st(true, true, false))?,
         tree.resolve(id, st(false, false, true))?,
         tree.resolve(id, WidgetState { disabled: true, ..Default::default() })?,
     ];
+    if let Some(p) = parent {
+        inherit(&mut styles, p);
+    }
     let kind = node.kind().clone();
     let blocking = !matches!(kind, NodeKind::Container | NodeKind::Text { .. }) || has_look(&styles[NORMAL]);
     let children = tree
         .children(id)
         .iter()
         .filter(|c| tree.visible(**c).unwrap_or(false))
-        .filter_map(|c| build_node(tree, *c))
+        .filter_map(|c| build_node(tree, *c, Some(&styles)))
         .collect();
     Some(VNode { id, kind, styles, enabled: tree.is_enabled(id), blocking, hover_signals: node.hover_signals(), children })
 }
@@ -165,6 +180,22 @@ mod tests {
         let o = m.find(off).unwrap();
         assert!(!o.enabled);
         assert_eq!(o.styles[NORMAL].opacity, Some(0.5));
+    }
+
+    #[test]
+    fn unset_text_properties_are_inherited_like_css() {
+        use crate::style::Style;
+        let mut ui = UiTree::new();
+        let root = ui.layer("m", Layer::centered(1));
+        // The built-in theme gives every node a colour and size, so only properties it leaves
+        // unset (bold, font) reach the children; the web cascade does the same.
+        let col = ui.column(root).style(Style::new().bold(true)).id();
+        let t = ui.text(col, "hi").id();
+        let own = ui.text(col, "own").style(Style::new().bold(false)).id();
+        let m = Model::build(&ui);
+        let st = m.find(t).unwrap().style();
+        assert_eq!(st.bold, Some(true));
+        assert_eq!(m.find(own).unwrap().style().bold, Some(false));
     }
 
     #[test]

@@ -1,11 +1,11 @@
 //! Engine `InputEvent` -> iced `Event`.
 
-use iced_core::keyboard::key::{Named, NativeCode, Physical};
+use iced_core::keyboard::key::{Code, Named, NativeCode, Physical};
 use iced_core::keyboard::{self, Key, Location, Modifiers};
 use iced_core::{Event, Point, SmolStr, input_method, mouse, touch, window};
 
 use efeengine_core::input::{
-    ElementState, InputEvent, InputEventKind, Key as EKey, MouseButton, NamedKey, TouchPhase, WHEEL_LINES_PER_PAGE,
+    ElementState, InputEvent, InputEventKind, Key as EKey, KeyCode, MouseButton, NamedKey, TouchPhase, WHEEL_LINES_PER_PAGE,
     WHEEL_PIXELS_PER_LINE, WheelUnit, WindowEvent,
 };
 
@@ -73,14 +73,14 @@ impl Converter {
                     TouchPhase::Cancelled => touch::Event::FingerLost { id, position },
                 }));
             }
-            InputEventKind::Key { logical, state, repeat, mods, .. } => {
+            InputEventKind::Key { logical, state, repeat, mods, physical: code } => {
                 let m = modifiers(mods.bits());
                 if m != self.mods {
                     self.mods = m;
                     out.push(Event::Keyboard(keyboard::Event::ModifiersChanged(m)));
                 }
                 let key = key(logical);
-                let physical_key = Physical::Unidentified(NativeCode::Unidentified);
+                let physical_key = physical(*code);
                 out.push(Event::Keyboard(match state {
                     ElementState::Pressed => keyboard::Event::KeyPressed {
                         modified_key: key.clone(),
@@ -119,6 +119,52 @@ impl Converter {
         }
         cursor
     }
+}
+
+/// The engine's physical key (a position on a US-QWERTY keyboard) as iced's `Physical`.
+fn physical(k: KeyCode) -> Physical {
+    use KeyCode as K;
+    let c = match k {
+        K::A => Code::KeyA, K::B => Code::KeyB, K::C => Code::KeyC, K::D => Code::KeyD, K::E => Code::KeyE,
+        K::F => Code::KeyF, K::G => Code::KeyG, K::H => Code::KeyH, K::I => Code::KeyI, K::J => Code::KeyJ,
+        K::K => Code::KeyK, K::L => Code::KeyL, K::M => Code::KeyM, K::N => Code::KeyN, K::O => Code::KeyO,
+        K::P => Code::KeyP, K::Q => Code::KeyQ, K::R => Code::KeyR, K::S => Code::KeyS, K::T => Code::KeyT,
+        K::U => Code::KeyU, K::V => Code::KeyV, K::W => Code::KeyW, K::X => Code::KeyX, K::Y => Code::KeyY,
+        K::Z => Code::KeyZ,
+        K::Key0 => Code::Digit0, K::Key1 => Code::Digit1, K::Key2 => Code::Digit2, K::Key3 => Code::Digit3,
+        K::Key4 => Code::Digit4, K::Key5 => Code::Digit5, K::Key6 => Code::Digit6, K::Key7 => Code::Digit7,
+        K::Key8 => Code::Digit8, K::Key9 => Code::Digit9,
+        K::F1 => Code::F1, K::F2 => Code::F2, K::F3 => Code::F3, K::F4 => Code::F4, K::F5 => Code::F5,
+        K::F6 => Code::F6, K::F7 => Code::F7, K::F8 => Code::F8, K::F9 => Code::F9, K::F10 => Code::F10,
+        K::F11 => Code::F11, K::F12 => Code::F12,
+        K::Up => Code::ArrowUp, K::Down => Code::ArrowDown, K::Left => Code::ArrowLeft, K::Right => Code::ArrowRight,
+        K::LShift => Code::ShiftLeft, K::RShift => Code::ShiftRight,
+        K::LCtrl => Code::ControlLeft, K::RCtrl => Code::ControlRight,
+        K::LAlt => Code::AltLeft, K::RAlt => Code::AltRight,
+        K::LMeta => Code::SuperLeft, K::RMeta => Code::SuperRight,
+        K::Escape => Code::Escape, K::Space => Code::Space, K::Enter => Code::Enter, K::Backspace => Code::Backspace,
+        K::Tab => Code::Tab, K::Delete => Code::Delete, K::Insert => Code::Insert, K::Home => Code::Home,
+        K::End => Code::End, K::PageUp => Code::PageUp, K::PageDown => Code::PageDown,
+        K::CapsLock => Code::CapsLock, K::ScrollLock => Code::ScrollLock, K::NumLock => Code::NumLock,
+        K::Pause => Code::Pause,
+        K::Numpad0 => Code::Numpad0, K::Numpad1 => Code::Numpad1, K::Numpad2 => Code::Numpad2,
+        K::Numpad3 => Code::Numpad3, K::Numpad4 => Code::Numpad4, K::Numpad5 => Code::Numpad5,
+        K::Numpad6 => Code::Numpad6, K::Numpad7 => Code::Numpad7, K::Numpad8 => Code::Numpad8,
+        K::Numpad9 => Code::Numpad9,
+        K::NumpadAdd => Code::NumpadAdd, K::NumpadSubtract => Code::NumpadSubtract,
+        K::NumpadMultiply => Code::NumpadMultiply, K::NumpadDivide => Code::NumpadDivide,
+        K::NumpadEnter => Code::NumpadEnter, K::NumpadDecimal => Code::NumpadDecimal,
+        K::NumpadEqual => Code::NumpadEqual, K::NumpadComma => Code::NumpadComma,
+        K::Minus => Code::Minus, K::Equal => Code::Equal, K::LeftBracket => Code::BracketLeft,
+        K::RightBracket => Code::BracketRight, K::Backslash => Code::Backslash, K::Semicolon => Code::Semicolon,
+        K::Apostrophe => Code::Quote, K::Comma => Code::Comma, K::Period => Code::Period, K::Slash => Code::Slash,
+        K::Grave => Code::Backquote, K::IntlBackslash => Code::IntlBackslash, K::IntlRo => Code::IntlRo,
+        K::IntlYen => Code::IntlYen,
+        K::PrintScreen => Code::PrintScreen, K::ContextMenu => Code::ContextMenu,
+        K::Cut => Code::Cut, K::Copy => Code::Copy, K::Paste => Code::Paste, K::Undo => Code::Undo,
+        _ => return Physical::Unidentified(NativeCode::Unidentified),
+    };
+    Physical::Code(c)
 }
 
 fn modifiers(bits: u16) -> Modifiers {
@@ -231,6 +277,18 @@ mod tests {
         assert_eq!(ev.last(), Some(&Event::InputMethod(input_method::Event::Commit("a".into()))));
         let (ev, _) = conv(InputEventKind::TextEditing { text: "çay".into(), cursor: 1, len: 1 }, 1.0);
         assert_eq!(ev, vec![Event::InputMethod(input_method::Event::Preedit("çay".into(), Some(2..3)))]);
+    }
+
+    #[test]
+    fn physical_keys_are_mapped() {
+        assert_eq!(physical(KeyCode::W), Physical::Code(Code::KeyW));
+        assert_eq!(physical(KeyCode::Key3), Physical::Code(Code::Digit3));
+        assert_eq!(physical(KeyCode::LeftBracket), Physical::Code(Code::BracketLeft));
+        assert_eq!(physical(KeyCode::Unknown), Physical::Unidentified(NativeCode::Unidentified));
+        let kind = InputEventKind::key(KeyCode::Tab, EKey::Named(NamedKey::Tab), ElementState::Pressed, false, M::NONE);
+        let (ev, _) = conv(kind, 1.0);
+        let Event::Keyboard(keyboard::Event::KeyPressed { physical_key, .. }) = &ev[0] else { panic!() };
+        assert_eq!(*physical_key, Physical::Code(Code::Tab));
     }
 
     #[test]

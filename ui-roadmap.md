@@ -120,13 +120,13 @@ fn menu_system(mut signals: EventReader<UiSignal>, ...) {
 | same, `strip`ped | 10.09 MB | 13.95 MB | +3.86 MB (+38%) |
 | clean release build of `efeengine-ui` (core already built) | 3.2 s | 145.6 s | about +142 s (iced, cosmic-text, cryoglyph, lyon, ... plus the native module) |
 
-Frame time of the iced pass (`EFE_UI_STATS=1`, menu + HUD shown, release): steady state about 1.1 to 1.2 ms per frame (about 0.2 ms build + layout + update + draw on the CPU, about 1 ms in `present`: encoding and `queue.submit`); the first 300 frames, which include font loading and first text shaping, were 2.8 to 7 ms. The pass does nothing while no layer is shown (coin_dash is unaffected: it does not use the UI, and its tests pass). Optimization room if it ever matters: the whole interface is rebuilt and laid out every frame (iced's own runtime does the same, but only when something changed); skip rebuild and layout on frames without input, journal entries or animation requests.
+Frame time of the iced pass (`EFE_UI_STATS=1`, menu + HUD shown, release): steady state about 1.1 to 1.2 ms per frame (about 0.2 ms build + layout + update + draw on the CPU, about 1 ms in `present`: encoding and `queue.submit`); the first 300 frames, which include font loading and first text shaping, were 2.8 to 7 ms. The pass does nothing while no layer is shown (coin_dash is unaffected: it does not use the UI, and its tests pass). (Phase 3 skips rebuild and layout on idle frames, see below.)
 
 **Findings**
 - The commit needs no `[patch]`: iced main, the engine and cryoglyph agree on wgpu 30.0.2.
 - iced main changed its layout model: `Length::Fit` (intrinsic size, `Fill` children inside a `Fit` parent are "fluid") and `Length::min` / `max` (bounded lengths). With them `Auto`, `Stretch` and `min_*` / `max_*` map cleanly, so the style table has no gap there (API.md section 5 updated).
 - Gaps in iced for our style subset: no `justify` (emulated with `Fill` spacers, only when the main size is definite), buttons / checkboxes / sliders are not focusable (the focused style only shows on text inputs), a checkbox style paints the box, not the whole row, `opacity` is per colour, not per subtree.
-- `iced_wgpu::Engine::new` needs a `wgpu::Adapter` (unused without iced's image / svg features) and the core `Gpu` has none: the backend creates a throwaway adapter. Ask core for `Gpu.adapter` before enabling images.
+- `iced_wgpu::Engine::new` needs a `wgpu::Adapter` and the core `Gpu` had none: the spike created a throwaway adapter; Phase 3 uses `Gpu.adapter`.
 - Widget state lives in iced's `user_interface::Cache` keyed by tree position; the model is rebuilt on every journal batch, so state survives as long as the structure does not shift (a layer inserted below another shifts positions; fix in Phase 3 with ids or keyed children).
 - iced widgets produce `Msg`s that the backend applies to its own copy first (typing and dragging never wait a frame) and reports as `UiSignal`s; `max_len` is enforced on our side.
 
@@ -158,10 +158,28 @@ in headless tests.
 
 Started by the Phase 0 spike (`crates/ui/src/native/`); what is ticked works, the rest is listed in `crates/ui/structure.md` ("Not done yet").
 
-- [x] `UiTree` → iced `Element`s, iced messages → `UiSignal` (layers, container / row / column, text, button, text input, checkbox, slider, scroll; images are placeholders).
-- [ ] Style subset and themes mapped to iced styles (done for normal / hovered / pressed / focused / disabled of the widgets that support them); compare screenshots with the web backend.
-- [ ] Text input, IME and clipboard through SDL (text, `TextEditing` preedit and the `SetTextInput` / area commands are wired; preedit drawing and clipboard are not).
+- [x] `UiTree` → iced `Element`s, iced messages → `UiSignal` (layers, container / row / column, text, button, text input, checkbox, slider, scroll, images).
+- [x] Images: `Image` nodes through iced's image widget (`Handle::from_rgba`); a texture replaced in `Textures` refreshes both backends (plugin-level: new image in `UiBackendCx.images` + a synthesized `UiChange::Kind`; no web change needed).
+- [x] Fonts: Inter Regular and Bold (OFL, `crates/ui/assets/`, `THIRD_PARTY_NOTICES.md`) are the native default; `UiChange::Font` loads into iced's font system, `Style.font` is the family, `bold` the weight.
+- [x] Idle cost: frames without journal entries, input, window change or redraw request skip rebuild, layout and draw (they present the last drawn primitives again); the caret blink is honoured through `RedrawRequest`.
+- [x] Stable widget identity: `Keyed` wrapper around every row / column and the layer stack; focus and caret survive layer insertions and reorders (GPU test).
+- [x] Tab / Shift+Tab move between text inputs, Escape blurs; physical key codes are mapped to iced's `Physical`.
+- [x] Clipboard (copy, cut, paste) and mouse cursor icons through core's `clipboard` and `CursorIcon`.
+- [x] Style subset mapped to iced styles and checked property by property against the web backend; remaining differences are in `docs/ui/API.md` ("Per-backend notes"). Layer placement and `Auto` sizes fixed (see below).
+- [x] Screenshot comparison: `render_offscreen` renders a tree on the real GPU into a PNG (`cargo test -p ui_demo --test native_screenshot -- --ignored`); the demo menu is a centred panel, the HUD sits top-left, the Play button has its natural height, as on the web.
+- [ ] IME preedit drawn inline (the preedit reaches iced's editor, the OS popup works), focus style / tab stops for buttons, checkboxes and sliders, subtree opacity.
 - [x] DPI and resize through the engine's scale factor (`Viewport` from `Gpu.size` / `scale_factor`, events divided by the scale).
+
+**Frame cost with the Phase 3 work** (release, `EFE_UI_STATS=1`, Intel UHD 620 Vulkan, ui_demo menu + HUD):
+- Real window, nothing happening: about 1.0 to 1.1 ms per frame, all of it `present` (encode + `queue.submit` + compositing into the window's frame); the first active frames (font loading, first shaping) take 70 to 80 ms.
+- Offscreen (no window, vsync or compositor; `crates/ui/tests/native_gpu.rs`, release, 2 text inputs): idle (present only) 0.21 ms, active (rebuild + layout + update + draw + present) 0.28 ms. In debug builds 0.92 ms vs 1.13 ms. The saving is the CPU part, about 0.07 ms for a tiny interface and growing with the tree; `present` still costs the same because the engine re-draws its target every frame and the overlay must be composited again.
+- Bundled font: +832 KB in the binary (Inter Regular 412 KB + Bold 420 KB, no subsetting; the OFL allows it). Enabling the `image` features of iced adds the `image` crate and guillotiere to the native build.
+
+**Phase 3 findings**
+- Bug found by the screenshot: in this iced revision `Length::merge` makes "Fill win over Fit", so the old mapping (stretched `Auto` children are `Fill`, "fluid inside a `Fit` parent") made every auto-sized panel as big as its layer: layers looked glued together and the Play button grew to the bottom. Fixed: `Fill`, `Portion` and stretch are only `Fill` when the parent's size on that axis is definite, else the child keeps its own size (`Fluid(Max)` was tried and makes text widgets take all the space). Lost: stretching children to the widest sibling in an auto-sized parent.
+- `UserInterface::operate` runs one pass, `focus_next` / `focus_previous` are chained operations (`Outcome::Chain`): the backend loops until the chain ends.
+- iced's layer lists keep the primitives of the last `draw` until the next `ui.draw`, so re-presenting is valid (tested pixel for pixel).
+- iced's `Tree::diff` matches children by position only (`keyed::Column` only searches for a single insertion); `Keyed` permutes child trees by our own keys instead.
 
 **Exit:** the same settings menu, unchanged, works on native.
 
