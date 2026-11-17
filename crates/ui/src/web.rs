@@ -428,7 +428,10 @@ impl Inner {
         match node.kind() {
             NodeKind::Button { .. } => {
                 let _ = el.set_attribute("type", "button");
-                entry.label_text = Some(self.document.create_text_node(""));
+                // Shown until the button gets tree children (place_children swaps them in).
+                let t = self.document.create_text_node("");
+                let _ = el.append_child(&t);
+                entry.label_text = Some(t);
             }
             NodeKind::Checkbox { .. } => {
                 if let (Some(input), Some(span)) = (self.make_element("input"), self.make_element("span")) {
