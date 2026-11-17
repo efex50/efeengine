@@ -299,7 +299,7 @@ impl InnerWindow for SdlWindowManager {
                         id: finger_id, phase: TouchPhase::Ended, pos: (x * pw as f32, y * ph as f32),
                     });
                 }
-                SdlEvent::ControllerDeviceAdded { which, .. } => {
+                SdlEvent::GamepadAdded { which, .. } => {
                     // SDL3: `which` is the joystick instance id.
                     if let Some(g) = &self.gamepad_subsystem {
                         let known = self.open_pads.iter().any(|(id, _)| *id == which);
@@ -311,7 +311,7 @@ impl InnerWindow for SdlWindowManager {
                         }
                     }
                 }
-                SdlEvent::ControllerDeviceRemoved { which, .. } => {
+                SdlEvent::GamepadRemoved { which, .. } => {
                     self.open_pads.retain(|(id, _)| *id != which);
                 }
                 _ => {}
@@ -352,7 +352,7 @@ impl InnerWindow for SdlWindowManager {
         ];
         let mut ids = Vec::with_capacity(self.open_pads.len());
         for (joystick_id, pad) in &self.open_pads {
-            let id = GamepadId(*joystick_id);
+            let id = GamepadId(joystick_id.raw());
             ids.push(id);
             if state.get(id).is_none() {
                 state.connect(id, pad.name().unwrap_or_else(|| "gamepad".to_string()));

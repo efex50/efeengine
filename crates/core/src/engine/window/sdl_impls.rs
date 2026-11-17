@@ -429,12 +429,12 @@ pub(super) fn logical_key(
     let raw = unsafe {
         sdl3::sys::keyboard::SDL_GetKeyFromScancode(
             sc.into(),
-            layout_lookup_mods(keymod).bits(),
+            sdl3::sys::keycode::SDL_Keymod(layout_lookup_mods(keymod).bits()),
             false,
         )
     };
     // u32 -> i32 wraps for values with the high bits set, which then fail the checks.
-    match i32::try_from(raw) {
+    match i32::try_from(raw.0) {
         Ok(v) => character_from_raw(v).unwrap_or(Key::Unidentified),
         Err(_) => Key::Unidentified,
     }

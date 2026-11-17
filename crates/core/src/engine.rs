@@ -1146,26 +1146,33 @@ impl Engine {
         let mut drawn = false;
         let size = (gpu.config.width, gpu.config.height);
         if !gpu.is_suspended() && size.0 > 0 && size.1 > 0 {
-            match gpu.surface.get_current_texture() {
-                Ok(output) => {
-                    let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                    let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
-                    renderer.render(&gpu.gpu(), &view, &frame);
-                    drop(frame);
-                    drawn = true;
-                    let suboptimal = output.suboptimal;
-                    output.present();
-                    if suboptimal {
-                        gpu.reconfigure();
-                    }
-                }
+            use wgpu::CurrentSurfaceTexture as Cst;
+            let (output, suboptimal) = match gpu.surface.get_current_texture() {
+                Cst::Success(t) => (Some(t), false),
+                Cst::Suboptimal(t) => (Some(t), true),
                 // Surface no longer matches the window: reconfigure, next frame renders.
-                Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
+                Cst::Outdated | Cst::Lost => {
                     gpu.reconfigure();
                     renderer.resize(&gpu.gpu());
+                    (None, false)
                 }
-                Err(wgpu::SurfaceError::Timeout) => {}
-                Err(e) => logger.error(&format!("Render error: {e:?}")),
+                // Skip this frame (timeout, or the window is occluded / minimized).
+                Cst::Timeout | Cst::Occluded => (None, false),
+                Cst::Validation => {
+                    logger.error("Render error: surface texture validation failed");
+                    (None, false)
+                }
+            };
+            if let Some(output) = output {
+                let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
+                renderer.render(&gpu.gpu(), &view, &frame);
+                drop(frame);
+                drawn = true;
+                gpu.queue.present(output);
+                if suboptimal {
+                    gpu.reconfigure();
+                }
             }
         }
         if !drawn {

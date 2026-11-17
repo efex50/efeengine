@@ -62,7 +62,7 @@ fn notif(method: &str, params: Value) -> Message {
 fn result(out: &[Message], id: i32) -> Value {
     out.iter()
         .find_map(|m| match m {
-            Message::Response(r) if r.id == RequestId::from(id) => Some(r.result.clone().unwrap_or(Value::Null)),
+            Message::Response(r) if r.id == RequestId::from(id) => Some(r.response_result.clone().unwrap_or(Value::Null)),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no response {id}"))

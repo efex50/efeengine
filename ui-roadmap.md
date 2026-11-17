@@ -2,7 +2,9 @@
 
 > **Status:** Accepted direction, not started\
 > **Date:** 2026-11-17 (replaces the 2026-11-15 egui + iced proposal)\
-> **Scope:** Game-facing UI (menus, settings, HUD panels, dialogs, inventory) and developer tools
+> **Scope:** Game-facing UI (menus, settings, HUD panels, dialogs, inventory) and developer tools\
+> **Design docs:** [`docs/ui/API.md`](docs/ui/API.md) (common API, all backends),
+> [`docs/ui/FALLBACK_NATIVE.md`](docs/ui/FALLBACK_NATIVE.md) (taffy + glyphon backend and its roadmap)
 
 ## 1. Direction
 
@@ -25,8 +27,9 @@ canvas on the web too. They do not use the game UI API.
 - **HTML on the web** gives text input, IME, clipboard, font shaping, accessibility, browser zoom and
   real CSS for free, and keeps the wasm small (no font rasterizer or shaper shipped).
 - **iced on native** gives layout, text shaping, text editing and widget behaviour without writing
-  them. `iced_wgpu` 0.14 uses wgpu 27, the engine's version, so it can share the engine's device and
-  surface. It does not need winit (only `iced_winit` does, and we skip it).
+  them. The engine is on wgpu 30, the same as iced's main branch (`0.15.0-dev`, workspace
+  `wgpu = "30"`; the last release, 0.14 from Dec 2025, is still on wgpu 27), so iced can share the
+  engine's device and surface. Until 0.15 is released we depend on iced main by git, pinned to a commit. It does not need winit (only `iced_winit` does, and we skip it).
 - **An engine-owned API** in between, because iced widgets are opaque (`Widget` trait objects) and
   cannot be turned into HTML. iced itself had a DOM backend (`iced_web`, 0.1 to 0.3) and dropped it in
   2022, so "write iced, get HTML" is not an option.
@@ -62,7 +65,7 @@ crates/
 - Games opt in with a `UiPlugin`. A game without it pulls in neither iced nor the DOM backend.
 - iced types never appear in the `efeengine-ui` public API. That keeps the backend replaceable (see 6).
 
-### Shared API (sketch)
+### Shared API (sketch; full design in [`docs/ui/API.md`](docs/ui/API.md))
 
 ```rust
 // Build: nodes are owned by the UiTree resource, addressed by WidgetId.
@@ -103,6 +106,7 @@ fn menu_system(mut signals: EventReader<UiSignal>, ...) {
 
 ### Phase 0: native spike (about a day)
 
+- [ ] Add iced main as a git dependency pinned to a commit (`iced_wgpu`, `iced_runtime`, `iced_widget`).
 - [ ] Draw one iced button and one text input over coin_dash with `iced_wgpu` on the engine's device,
   queue and surface texture, in a pass after the sprite renderer.
 - [ ] Convert SDL events to iced events (mouse, keys, text, scale factor) and drive
@@ -168,7 +172,8 @@ share the surface or the costs are unacceptable, switch the native plan to secti
 
 | Risk | Plan |
 |---|---|
-| wgpu lock: the engine cannot move past the wgpu version iced uses (27 for iced 0.14), and iced releases slowly | Accept it; check before every wgpu upgrade. If it blocks, switch the native backend (section 6) |
+| wgpu lock: the engine cannot move past the wgpu version iced uses (30 on iced main), and iced releases slowly (0.14 had no successor for about a year) | Before every wgpu major upgrade, check iced main (not only the last release). If main lags too, keep `iced_wgpu` + `cryoglyph` current with a `[patch]` branch (all of iced's wgpu code is in those two crates, ~8.5k lines in `iced_wgpu`), or switch the native backend (section 6) |
+| iced main is a dev version (API can change before 0.15) | Pin a commit; move to the crates.io release when 0.15 ships |
 | Native and web look different | Small style subset, screenshot comparison in Phase 3 |
 | HTML is always above the canvas | World-space UI handled separately (see Later) |
 | Two implementations of every widget | Keep the widget set small; shared tests through the headless backend |
@@ -177,9 +182,12 @@ share the surface or the costs are unacceptable, switch the native plan to secti
 
 ## 6. Fallback for native
 
+Full design and phases F0-F4: [`docs/ui/FALLBACK_NATIVE.md`](docs/ui/FALLBACK_NATIVE.md).
+
+
 Because the API is engine-owned, the native backend can be replaced without changing game code:
 **taffy** (flexbox layout, no wgpu dependency) + **glyphon** (text on wgpu) + our own widgets. The
-newest glyphon (0.12) uses wgpu 30, so this needs a wgpu upgrade or an older glyphon. The hard part
+newest glyphon (0.12) uses wgpu 30, the engine's version. The hard part
 to write ourselves would be text editing (cursor, selection, IME).
 
 ## 7. Decision summary
@@ -188,7 +196,8 @@ to write ourselves would be text editing (cursor, selection, IME).
 |---|---|
 | Engine core | UI-toolkit agnostic |
 | Game UI API | Engine-owned `efeengine-ui` (UiTree, Style subset, UiSignal, bindings) |
-| Native game UI backend | iced 0.14 (`iced_wgpu` + `iced_runtime`), used as a dependency, not forked |
+| Native game UI backend | iced main / 0.15 (`iced_wgpu` + `iced_runtime`), git dependency pinned to a commit until 0.15 is released, not forked |
+| wgpu | 30 (engine, iced main, cryoglyph and glyphon all match) |
 | Web game UI backend | HTML + predefined CSS, layer above the canvas |
 | Native fallback | taffy + glyphon + own widgets |
 | Developer tools | egui, both platforms, separate from game UI |

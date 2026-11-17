@@ -159,6 +159,7 @@ impl Renderer for MyRenderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             // TODO: draw the sprites here:
             //   pass.set_pipeline(..); pass.set_bind_group(0, camera, ..);

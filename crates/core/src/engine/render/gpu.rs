@@ -47,9 +47,9 @@ impl GpuContext {
     /// because WebGL can only hand out an adapter for a given canvas.
     pub async fn new(window: &GameWindowManager) -> Result<Self, String> {
         #[cfg(not(target_arch = "wasm32"))]
-        let instance = Instance::new(&wgpu::InstanceDescriptor {
+        let instance = Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         #[cfg(target_arch = "wasm32")]
         let instance = web_instance().await;
@@ -60,6 +60,7 @@ impl GpuContext {
             power_preference: wgpu::PowerPreference::default(),
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }).await.map_err(|e| format!("no suitable graphics adapter: {e}"))?;
 
         let info = adapter.get_info();
@@ -94,6 +95,7 @@ impl GpuContext {
             alpha_mode: caps.alpha_modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Auto),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
         Ok(Self { instance, adapter, device, queue, surface, config, suspended: false })
@@ -144,9 +146,9 @@ impl GpuContext {
 async fn web_instance() -> Instance {
     use crate::config::{GraphicsBackend, startup_config};
 
-    let gl_only = || Instance::new(&wgpu::InstanceDescriptor {
+    let gl_only = || Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::GL,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let choice = startup_config().graphics_backend;
     if choice == GraphicsBackend::Webgl
@@ -155,9 +157,9 @@ async fn web_instance() -> Instance {
         return gl_only();
     }
     // Drops BROWSER_WEBGPU when `navigator.gpu` is missing or gives no adapter.
-    wgpu::util::new_instance_with_webgpu_detection(&wgpu::InstanceDescriptor {
+    wgpu::util::new_instance_with_webgpu_detection(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     }).await
 }
 
@@ -186,8 +188,18 @@ fn create_surface(instance: &Instance, window: &GameWindowManager) -> Result<Sur
     // the main thread.
     #[cfg(not(target_arch = "wasm32"))]
     unsafe {
-        let target = wgpu::SurfaceTargetUnsafe::from_window(window)
-            .map_err(|e| format!("no window handle: {e}"))?;
+        // wgpu 30 wants the display handle either on the instance or on the surface target
+        // (`SurfaceTargetUnsafe::from_window` leaves it empty, which fails on Wayland / X11).
+        // The SDL display is not `Send + Sync + 'static`, so it is passed per surface.
+        use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+        let raw_window_handle = window.window_handle()
+            .map_err(|e| format!("no window handle: {e}"))?.as_raw();
+        let raw_display_handle = window.display_handle()
+            .map_err(|e| format!("no display handle: {e}"))?.as_raw();
+        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: Some(raw_display_handle),
+            raw_window_handle,
+        };
         instance.create_surface_unsafe(target)
             .map_err(|e| format!("could not create surface: {e}"))
     }

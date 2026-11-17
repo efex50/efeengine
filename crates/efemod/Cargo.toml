@@ -16,7 +16,7 @@ write = ["dep:lzma-rust2", "lzma-rust2/encoder"]
 efevm = { path = "../efevm" }
 # Reader only: no AES, bzip2, PPMd, compressor or utility API.
 sevenz-rust2 = { version = "0.25", default-features = false }
-crc32fast = "1"
+crc32fast = "1.5.5"
 # Same crate sevenz-rust2 decodes with; named directly only for the writer's LZMA2 encoder.
 lzma-rust2 = { version = "0.25", default-features = false, features = ["std"], optional = true }
 

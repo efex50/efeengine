@@ -19,4 +19,4 @@ dependencies = ["sdl3"]
 
 [dependencies]
 efeengine-core = { path = "../../crates/core" }
-bytemuck = { version = "1.24.0", features = ["derive"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }

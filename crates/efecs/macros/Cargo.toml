@@ -10,9 +10,9 @@ license = "Apache-2.0"
 proc-macro = true
 
 [dependencies]
-syn = { version = "3.0.3", default-features = false, features = ["proc-macro", "parsing", "printing", "derive", "clone-impls", "visit-mut"] }
-quote = "1.0.3"
-proc-macro2 = "1.0.1"
+syn = { version = "3.0.10", default-features = false, features = ["proc-macro", "parsing", "printing", "derive", "clone-impls", "visit-mut"] }
+quote = "1.0.47"
+proc-macro2 = "1.0.107"
 
 [dev-dependencies]
 # Remarkably, this isn't a circular dependency. Test crates coexist

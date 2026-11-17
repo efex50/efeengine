@@ -55,8 +55,7 @@ fn response(out: &[Message], id: i32) -> lsp_server::Response {
 
 fn result(out: &[Message], id: i32) -> Value {
     let r = response(out, id);
-    assert!(r.error.is_none(), "error: {:?}", r.error);
-    r.result.unwrap_or(Value::Null)
+    r.response_result.unwrap_or_else(|e| panic!("error: {e:?}"))
 }
 
 fn notifications<'a>(out: &'a [Message], method: &'a str) -> impl Iterator<Item = &'a Value> + 'a {
@@ -287,28 +286,28 @@ fn discovers_a_single_efapi_in_the_root() {
 fn bad_input_gives_errors_not_panics() {
     let mut s = Server::new(None);
     let out = s.handle(req(1, "textDocument/hover", at(0, 0)));
-    assert_eq!(response(&out, 1).error.unwrap().code, -32002);
+    assert_eq!(response(&out, 1).response_result.unwrap_err().code, -32002);
     let mut s = start(None, None);
     let out = s.handle(req(2, "textDocument/hover", at(0, 0)));
-    assert_eq!(response(&out, 2).error.unwrap().code, -32602, "unknown document");
+    assert_eq!(response(&out, 2).response_result.unwrap_err().code, -32602, "unknown document");
     let out = s.handle(req(3, "textDocument/hover", json!({"nonsense": 1})));
-    assert_eq!(response(&out, 3).error.unwrap().code, -32602);
+    assert_eq!(response(&out, 3).response_result.unwrap_err().code, -32602);
     let out = s.handle(req(4, "no/such", json!(null)));
-    assert_eq!(response(&out, 4).error.unwrap().code, -32601);
+    assert_eq!(response(&out, 4).response_result.unwrap_err().code, -32601);
     open(&mut s, "ret\nfn \u{1F600}(\n");
     for (i, (l, c)) in [(0, 0), (1, 1), (1, 3), (99, 99), (0, 4_000_000_000u32)].into_iter().enumerate() {
         for m in ["textDocument/hover", "textDocument/definition", "textDocument/completion"] {
             let out = s.handle(req(10 + i as i32, m, at(l, c)));
-            assert!(response(&out, 10 + i as i32).error.is_none(), "{m} at {l}:{c}");
+            assert!(response(&out, 10 + i as i32).response_result.is_ok(), "{m} at {l}:{c}");
         }
     }
     s.handle(notif("textDocument/didChange", json!({"textDocument": {"uri": URI, "version": 3}, "contentChanges": [{"range": {"start": {"line": 50, "character": 9}, "end": {"line": 0, "character": 1}}, "text": "\u{1F600}x"}]})));
     s.handle(notif("textDocument/didChange", json!({"bogus": true})));
     s.handle(notif("textDocument/didClose", json!({"textDocument": {"uri": URI}})));
     let out = s.handle(req(90, "shutdown", json!(null)));
-    assert!(response(&out, 90).error.is_none());
+    assert!(response(&out, 90).response_result.is_ok());
     let out = s.handle(req(91, "textDocument/hover", at(0, 0)));
-    assert_eq!(response(&out, 91).error.unwrap().code, -32600);
+    assert_eq!(response(&out, 91).response_result.unwrap_err().code, -32600);
     s.handle(notif("exit", json!(null)));
     assert!(s.exited());
     assert_eq!(s.exit_code(), 0);
