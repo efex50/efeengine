@@ -20,6 +20,8 @@ pub use textures::{Image, TextureChanges, TextureError, Textures};
 
 /// Borrowed GPU handles for a [`Renderer`] call.
 pub struct Gpu<'a> {
+    /// The adapter the device was created from (renderers like `iced_wgpu` need it).
+    pub adapter: &'a wgpu::Adapter,
     pub device: &'a wgpu::Device,
     pub queue: &'a wgpu::Queue,
     /// Format of the surface; render pipelines that draw to `target` must use it.

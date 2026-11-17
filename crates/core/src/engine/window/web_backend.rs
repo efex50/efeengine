@@ -193,6 +193,7 @@ pub struct WebWindow{
     dpr_armed:f64,
     /// Remembered so it is re-applied when the canvas is re-resolved.
     cursor_visible:bool,
+    cursor_icon: crate::engine::window::CursorIcon,
     /// Last size sent as `Resized`, in physical pixels.
     last_size:(u32,u32),
     /// `getGamepads()` failure already logged.
@@ -220,6 +221,7 @@ impl WebWindow{
             dpr_listener: None,
             dpr_armed: 0.0,
             cursor_visible: true,
+            cursor_icon: crate::engine::window::CursorIcon::Default,
             last_size: (0,0),
             gamepad_warned: false,
             gamepad_ignored: HashSet::new(),
@@ -423,7 +425,7 @@ impl WebWindow{
     /// Cursor visibility via the canvas' CSS `cursor`.
     fn apply_cursor(&mut self) {
         let Some(canvas) = self.canvas() else { return };
-        let value = if self.cursor_visible { "auto" } else { "none" };
+        let value = if self.cursor_visible { self.cursor_icon.css() } else { "none" };
         if canvas.style().set_property("cursor", value).is_err() {
             debug_warn("could not set canvas cursor style");
         }
@@ -644,6 +646,11 @@ impl InnerWindow for WebWindow{
 
     fn set_cursor_visible(&mut self, visible: bool) {
         self.cursor_visible = visible;
+        self.apply_cursor();
+    }
+
+    fn set_cursor_icon(&mut self, icon: crate::engine::window::CursorIcon) {
+        self.cursor_icon = icon;
         self.apply_cursor();
     }
 

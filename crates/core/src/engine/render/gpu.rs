@@ -106,6 +106,7 @@ impl GpuContext {
     /// The borrowed view handed to the renderer.
     pub fn gpu(&self) -> Gpu<'_> {
         Gpu {
+            adapter: &self.adapter,
             device: &self.device,
             queue: &self.queue,
             surface_format: self.config.format,

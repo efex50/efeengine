@@ -11,6 +11,50 @@ pub mod sdl_backend;
 #[cfg(not(target_family = "wasm"))]
 mod sdl_impls;
 pub mod headless;
+pub mod clipboard;
+
+pub use clipboard::{clipboard_text, set_clipboard_text};
+
+/// Mouse cursor shape (`Commands::set_cursor_icon`). SDL has no grab cursors: `Grab` shows the
+/// pointer hand and `Grabbing` the move cursor there; the web uses the CSS `grab` / `grabbing`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+pub enum CursorIcon {
+    #[default]
+    Default,
+    Pointer,
+    Text,
+    Crosshair,
+    Grab,
+    Grabbing,
+    NotAllowed,
+    Wait,
+    Move,
+    ResizeEw,
+    ResizeNs,
+    ResizeNesw,
+    ResizeNwse,
+}
+
+impl CursorIcon {
+    /// The CSS `cursor` value.
+    pub fn css(self) -> &'static str {
+        match self {
+            CursorIcon::Default => "default",
+            CursorIcon::Pointer => "pointer",
+            CursorIcon::Text => "text",
+            CursorIcon::Crosshair => "crosshair",
+            CursorIcon::Grab => "grab",
+            CursorIcon::Grabbing => "grabbing",
+            CursorIcon::NotAllowed => "not-allowed",
+            CursorIcon::Wait => "wait",
+            CursorIcon::Move => "move",
+            CursorIcon::ResizeEw => "ew-resize",
+            CursorIcon::ResizeNs => "ns-resize",
+            CursorIcon::ResizeNesw => "nesw-resize",
+            CursorIcon::ResizeNwse => "nwse-resize",
+        }
+    }
+}
 
 use crate::engine::config::EngineConfig;
 use crate::engine::error::EngineError;
@@ -50,6 +94,8 @@ pub trait InnerWindow: HasWindowHandle + HasDisplayHandle{
     fn set_text_input_area(&mut self, _x: i32, _y: i32, _w: i32, _h: i32, _cursor: i32) {}
     /// Show/hide the cursor over the window. Default no-op.
     fn set_cursor_visible(&mut self, _visible: bool) {}
+    /// Change the cursor shape. Default no-op.
+    fn set_cursor_icon(&mut self, _icon: CursorIcon) {}
     /// Grab the pointer: relative mouse mode (native) / pointer lock (web). Default no-op.
     fn set_cursor_grab(&mut self, _grab: bool) {}
     /// Write the current gamepad snapshot into `state` (connect/update/retain). Default no-op.
@@ -65,6 +111,8 @@ pub trait WindowManager{
     fn set_text_input(&mut self, enabled: bool);
     fn set_text_input_area(&mut self, x: i32, y: i32, w: i32, h: i32, cursor: i32);
     fn set_cursor_visible(&mut self, visible: bool);
+    /// Change the cursor shape. Default no-op.
+    fn set_cursor_icon(&mut self, _icon: CursorIcon) {}
     fn set_cursor_grab(&mut self, grab: bool);
     fn poll_gamepads(&mut self, state: &mut GamepadState);
 }
@@ -73,6 +121,7 @@ pub struct GameWindowManager{
     injected: VecDeque<InputEvent>,
     headless: bool,
     text_input_area: Option<(i32, i32, i32, i32, i32)>,
+    cursor_icon: CursorIcon,
 }
 
 impl GameWindowManager {
@@ -91,6 +140,7 @@ impl GameWindowManager {
             injected: VecDeque::new(),
             headless: cfg.headless,
             text_input_area: None,
+            cursor_icon: CursorIcon::Default,
         })
     }
     /// Queue an event; drained into `out` before the backend's own events on the next poll.
@@ -100,6 +150,10 @@ impl GameWindowManager {
     /// The last `(x, y, w, h, cursor)` given to `set_text_input_area` (logical px).
     pub fn text_input_area(&self) -> Option<(i32, i32, i32, i32, i32)> {
         self.text_input_area
+    }
+    /// The last cursor icon given to `set_cursor_icon`.
+    pub fn cursor_icon(&self) -> CursorIcon {
+        self.cursor_icon
     }
     pub fn is_headless(&self) -> bool {
         self.headless
@@ -152,6 +206,13 @@ impl WindowManager for GameWindowManager {
 
     fn set_cursor_visible(&mut self, visible: bool) {
         self.inner.set_cursor_visible(visible);
+    }
+
+    fn set_cursor_icon(&mut self, icon: CursorIcon) {
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
+            self.inner.set_cursor_icon(icon);
+        }
     }
 
     fn set_cursor_grab(&mut self, grab: bool) {

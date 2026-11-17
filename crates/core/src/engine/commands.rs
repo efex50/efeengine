@@ -9,6 +9,7 @@ use hecs::{Component, DynamicBundle, Entity, EntityBuilder, World};
 
 use crate::engine::schedule::{ScheduleCommands, ScheduleOp};
 use crate::engine::types::TypeRegistry;
+use crate::engine::window::CursorIcon;
 
 /// A control request a system makes of the engine; applied after the stage ends.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +19,7 @@ pub enum EngineCommand {
     SetFrameRate(f32),
     SetCursorVisible(bool),
     SetCursorGrab(bool),
+    SetCursorIcon(CursorIcon),
     SetTextInput(bool),
     /// Where text is being typed, in logical pixels (IME popup placement) and the cursor
     /// offset in characters.
@@ -102,6 +104,10 @@ impl Commands {
     }
     pub fn set_cursor_grab(&mut self, g: bool) {
         self.list.push(EngineCommand::SetCursorGrab(g));
+    }
+    /// Change the mouse cursor's shape (applied after the stage; only sent to the window when it changes).
+    pub fn set_cursor_icon(&mut self, icon: CursorIcon) {
+        self.list.push(EngineCommand::SetCursorIcon(icon));
     }
     pub fn set_text_input(&mut self, on: bool) {
         self.list.push(EngineCommand::SetTextInput(on));
@@ -322,6 +328,9 @@ impl ParCommands {
     }
     pub fn set_cursor_grab(&mut self, g: bool) {
         self.inner.set_cursor_grab(g);
+    }
+    pub fn set_cursor_icon(&mut self, icon: CursorIcon) {
+        self.inner.set_cursor_icon(icon);
     }
     pub fn set_text_input(&mut self, on: bool) {
         self.inner.set_text_input(on);

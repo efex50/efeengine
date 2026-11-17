@@ -205,6 +205,11 @@ device. Code in `input/capture.rs`.
   `set_text_input_area(x, y, w, h, cursor)` (logical px, default no-op; SDL `set_rect`) places the IME
   popup; systems call `cx.commands.set_text_input_area(x, y, w, h, cursor)`. SDL `TextEditing` events
   become `InputEventKind::TextEditing`.
+- Cursor icon and clipboard: `cx.commands.set_cursor_icon(CursorIcon)` queues `SetCursorIcon`; `WindowManager::set_cursor_icon`
+  (default no-op) is only called when the icon changes (`GameWindowManager::cursor_icon()` reads the last one). SDL uses cached
+  system cursors (no grab cursors: `Grab` = hand, `Grabbing` = move); web sets the canvas `cursor` CSS. `window::clipboard_text()` /
+  `set_clipboard_text(&str)` (also `efeengine_core::clipboard`) are main-thread functions: SDL clipboard when SDL video is up,
+  else an in-process store (headless tests round-trip); on the web `None` / `false` (DOM inputs handle copy / paste).
 - Input filter: `Engine::add_input_filter(impl InputFilter)`; each raw event is offered to every filter
   (add order) before `InputState::apply`; any `Filter::Captured` sets `InputEvent::captured`. Captured events
   still reach `InputState` (raw queries) but `game_input()` ignores them. A key / button belongs to whoever

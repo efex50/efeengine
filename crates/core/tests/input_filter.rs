@@ -175,3 +175,28 @@ fn overlays_are_never_called_without_a_gpu() {
     e.run_frames(3, DT);
     assert!(log.borrow().is_empty());
 }
+
+#[test]
+fn clipboard_round_trips_through_the_fallback_store() {
+    use efeengine_core::clipboard::{clipboard_text, set_clipboard_text};
+    assert!(set_clipboard_text("hello clip"));
+    assert_eq!(clipboard_text().as_deref(), Some("hello clip"));
+    assert_eq!(efeengine_core::window::clipboard_text().as_deref(), Some("hello clip"));
+}
+
+#[test]
+fn set_cursor_icon_reaches_the_window() {
+    use efeengine_core::window::CursorIcon;
+    let mut e = engine();
+    assert_eq!(e.windows.cursor_icon(), CursorIcon::Default);
+    e.add_system(Stage::Update, |cx| cx.commands.set_cursor_icon(CursorIcon::Pointer));
+    e.run_frames(1, DT);
+    assert_eq!(e.windows.cursor_icon(), CursorIcon::Pointer);
+}
+
+#[test]
+fn gpu_exposes_the_adapter() {
+    // Compile-time check of the contract: `Gpu` carries the adapter next to the device.
+    #[allow(dead_code)]
+    fn adapter_info(gpu: &Gpu) -> wgpu::AdapterInfo { gpu.adapter.get_info() }
+}

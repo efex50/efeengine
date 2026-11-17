@@ -64,6 +64,17 @@ pub mod ecs {
     pub use crate::engine::{EngineState, WindowState};
 }
 
+pub mod window {
+    //! The window layer: `CursorIcon`, the clipboard functions, the window traits and backends.
+    pub use crate::engine::window::*;
+}
+
+pub mod clipboard {
+    //! System clipboard text (main thread). Native: SDL; headless / SDL not initialised: an
+    //! in-process store; web: unsupported (`None` / `false`, DOM inputs handle it).
+    pub use crate::engine::window::{clipboard_text, set_clipboard_text};
+}
+
 pub mod thread {
     //! The engine's global thread pool.
     pub use crate::engine::thread_pool::{GLOBAL_POOL, Jobs, init_global_pool, set_global_pool_size, global_pool_size, spawn_global, spawn_job_global};

@@ -8,7 +8,7 @@ use crate::engine::{
         axis_from_i16, trigger_from_i16, ElementState, GamepadAxis, GamepadButton, GamepadId, GamepadState, InputEvent, InputEventKind, TouchPhase, WheelUnit, WindowEvent as EngineWindowEvent,
         WindowId,
     },
-    window::InnerWindow,
+    window::{CursorIcon, InnerWindow},
 };
 
 /// SDL window + event pump. Neither is `Send`/`Sync`: SDL requires windows and
@@ -18,6 +18,8 @@ pub struct SdlWindowManager{
     // (they also hold their own subsystem clone, so this is belt and braces).
     /// Open gamepads with the joystick id they were opened with (kept because the
     /// id can no longer be queried from a pad once SDL has detached it).
+    /// Created system cursors (dropped before the window and SDL).
+    cursors: std::collections::HashMap<CursorIcon, sdl3::mouse::Cursor>,
     open_pads: Vec<(sdl3::joystick::JoystickId, sdl3::gamepad::Gamepad)>,
     gamepad_subsystem: Option<sdl3::GamepadSubsystem>,
     main_window:sdl3::video::Window,
@@ -90,6 +92,7 @@ impl SdlWindowManager {
         }
 
         Ok(Self{
+            cursors: std::collections::HashMap::new(),
             open_pads,
             gamepad_subsystem,
             main_window: window,
@@ -139,6 +142,32 @@ impl InnerWindow for SdlWindowManager {
 
     fn set_cursor_visible(&mut self, visible: bool) {
         self.mouse.show_cursor(visible);
+    }
+
+    fn set_cursor_icon(&mut self, icon: CursorIcon) {
+        use sdl3::mouse::{Cursor, SystemCursor as S};
+        if !self.cursors.contains_key(&icon) {
+            let sys = match icon {
+                CursorIcon::Default => S::Arrow,
+                CursorIcon::Pointer | CursorIcon::Grab => S::Hand,
+                CursorIcon::Text => S::IBeam,
+                CursorIcon::Crosshair => S::Crosshair,
+                CursorIcon::Grabbing | CursorIcon::Move => S::SizeAll,
+                CursorIcon::NotAllowed => S::No,
+                CursorIcon::Wait => S::Wait,
+                CursorIcon::ResizeEw => S::SizeWE,
+                CursorIcon::ResizeNs => S::SizeNS,
+                CursorIcon::ResizeNesw => S::SizeNESW,
+                CursorIcon::ResizeNwse => S::SizeNWSE,
+            };
+            match Cursor::from_system(sys) {
+                Ok(c) => { self.cursors.insert(icon, c); }
+                Err(_) => return,
+            }
+        }
+        if let Some(c) = self.cursors.get(&icon) {
+            c.set();
+        }
     }
 
     fn set_cursor_grab(&mut self, grab: bool) {
