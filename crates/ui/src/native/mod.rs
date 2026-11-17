@@ -19,6 +19,7 @@
 
 mod assets;
 mod convert;
+mod gpuview;
 mod keyed;
 mod model;
 pub mod offscreen;
@@ -54,6 +55,7 @@ use crate::theme::Theme as UiTheme;
 use crate::tree::UiTree;
 
 use convert::Converter;
+use gpuview::ViewPainter;
 use model::Model;
 use assets::Assets;
 use view::{Msg, iced_id};
@@ -102,6 +104,9 @@ pub struct IcedBackend {
     /// The text input with keyboard focus.
     focused: Option<WidgetId>,
     assets: Assets,
+    /// GPU-view painters (from the plugin) and the painting state.
+    painters: Option<crate::painter::UiPainters>,
+    view_painter: ViewPainter,
     /// The model, a message or an event changed something: rebuild, lay out and draw next frame.
     dirty: bool,
     /// What the last `update` asked for (caret blink, animations).
@@ -138,6 +143,8 @@ impl IcedBackend {
             hovering: HashSet::new(),
             focused: None,
             assets: Assets::new(),
+            painters: None,
+            view_painter: ViewPainter::default(),
             dirty: true,
             redraw: window::RedrawRequest::NextFrame,
             drawn: false,
@@ -200,9 +207,12 @@ impl IcedBackend {
         let mut probe = FocusProbe(None);
         ui.operate(&g.renderer, &mut probe);
         if let Some((gpu, target)) = draw {
+            self.assets.views.begin_draw();
             ui.draw(&mut g.renderer, &Theme::Dark, &renderer::Style { text_color: Color::WHITE }, cursor);
             self.cache = ui.into_cache();
             self.stats.active_build += self.stats_t0.elapsed();
+            self.view_painter.paint(&self.assets.views, self.painters.as_ref(), gpu);
+            let Some(g) = self.gpu.as_mut() else { return statuses };
             let _ = g.renderer.present(None, gpu.surface_format, target, &g.viewport);
         } else {
             self.cache = ui.into_cache();
@@ -336,6 +346,11 @@ impl IcedBackend {
                     self.push(id, UiSignalKind::Hover(true));
                 }
             }
+            Msg::Pointer(id, ev) => {
+                if self.model.find(id).is_some_and(|n| n.enabled && matches!(n.kind, NodeKind::GpuView { pointer: true, .. })) {
+                    self.push(id, UiSignalKind::Pointer { pos: ev.pos, buttons: ev.buttons, wheel: ev.wheel });
+                }
+            }
             Msg::Exit(id) => {
                 let _ = self.over.remove(&id);
                 if self.hovering.remove(&id) {
@@ -404,6 +419,10 @@ impl UiBackend for IcedBackend {
     fn init(&mut self, cx: &mut UiBackendCx) {
         self.conv.scale = cx.scale_factor.max(0.01);
         self.logical = Size::new(cx.logical_size.0, cx.logical_size.1);
+    }
+
+    fn set_painters(&mut self, painters: &crate::painter::UiPainters) {
+        self.painters = Some(painters.clone());
     }
 
     fn input(&mut self, ev: &InputEvent) -> Filter {
@@ -506,10 +525,14 @@ impl UiBackend for IcedBackend {
             let _ = self.update(&[Event::Window(window::Event::RedrawRequested(Instant::now()))], Some((gpu, target)), None);
             self.drawn = true;
             self.refresh_text_request();
-        } else if let Some(g) = self.gpu.as_mut() {
+        } else if self.gpu.is_some() {
             // Nothing changed: no rebuild, no layout, no draw; the renderer still holds the
             // primitives of the last frame, the engine cleared the target, so present again.
-            let _ = g.renderer.present(None, gpu.surface_format, target, &g.viewport);
+            // GPU views are repainted every frame (they animate); the rest is the old frame.
+            self.view_painter.paint(&self.assets.views, self.painters.as_ref(), gpu);
+            if let Some(g) = self.gpu.as_mut() {
+                let _ = g.renderer.present(None, gpu.surface_format, target, &g.viewport);
+            }
         }
         if self.stats_on {
             let el = t0.elapsed();

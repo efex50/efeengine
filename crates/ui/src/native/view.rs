@@ -26,6 +26,7 @@ use crate::node::{Anchor, ImageFit, NodeKind};
 use crate::style::{Align, Color, Direction, Edges, Justify, Size, Style, TextAlign};
 
 use super::assets::{Assets, DEFAULT_FAMILY};
+use super::gpuview::ViewProgram;
 use super::keyed::Keyed;
 
 use super::model::{DISABLED, FOCUSED, HOVERED, Model, NORMAL, PRESSED, VLayer, VNode};
@@ -40,6 +41,7 @@ pub enum Msg {
     Submit(WidgetId),
     Enter(WidgetId),
     Exit(WidgetId),
+    Pointer(WidgetId, crate::signal::PointerEvent),
 }
 
 pub type Element<'a> = iced_core::Element<'a, Msg, Theme, Renderer>;
@@ -254,9 +256,10 @@ fn node_el<'a>(n: &'a VNode, parent: Parent, fill: bool, a: &'a Assets) -> Eleme
                 None => space().width(w).height(h)._boxed(),
             }
         }
-        NodeKind::GpuView { .. } => {
+        NodeKind::GpuView { painter, pointer } => {
             let (w, h) = dims(st, parent);
-            space().width(w).height(h)._boxed()
+            let program = ViewProgram { id: n.id, painter: painter.clone(), pointer: *pointer, views: a.views.clone() };
+            iced_widget::shader(program).width(w).height(h)._boxed()
         }
         NodeKind::Button { label } => button_el(n, parent, label, a),
         NodeKind::Checkbox { label, checked } => {

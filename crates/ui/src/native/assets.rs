@@ -24,6 +24,8 @@ static INTER_BOLD: &[u8] = include_bytes!("../../assets/Inter-Bold.ttf");
 
 #[derive(Default)]
 pub struct Assets {
+    /// Shared state of the GPU views (see `gpuview.rs`).
+    pub views: super::gpuview::GpuViews,
     pub images: HashMap<TextureHandle, Handle>,
     /// `FontId` -> family name read from the font file (leaked once per font; fonts live as
     /// long as the process anyway).

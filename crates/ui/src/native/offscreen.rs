@@ -12,7 +12,12 @@ use iced_runtime::user_interface::{self, UserInterface};
 use iced_wgpu::graphics::{Shell, Viewport};
 use iced_wgpu::{Engine, Renderer, wgpu};
 
+use efeengine_core::render::Gpu;
+
+use crate::painter::UiPainters;
 use crate::tree::UiTree;
+
+use super::gpuview::ViewPainter;
 
 use super::assets::Assets;
 use super::model::Model;
@@ -38,15 +43,17 @@ impl Screenshot {
 
 /// Draws the visible layers of `tree` over `background` (a dark game-like colour) at the physical
 /// size `size` with the window `scale`. `images` are the textures `Image` nodes use. Needs a
-/// wgpu adapter; returns an error string without one.
+/// wgpu adapter; returns an error string without one. `painters` serve the `GpuView` nodes
+/// (the target format is `Rgba8UnormSrgb`; without painters the views stay transparent).
 pub fn render_offscreen(
     tree: &UiTree,
     images: &[(TextureHandle, Arc<Image>)],
     size: (u32, u32),
     scale: f32,
     background: [f32; 3],
+    painters: Option<&UiPainters>,
 ) -> Result<Screenshot, String> {
-    render(tree, images, size, scale, background, 1)
+    render(tree, images, size, scale, background, 1, painters)
 }
 
 /// Like [`render_offscreen`], but presents the drawn frame `passes` times (clearing the target
@@ -59,8 +66,9 @@ pub fn render_offscreen_represented(
     scale: f32,
     background: [f32; 3],
     passes: usize,
+    painters: Option<&UiPainters>,
 ) -> Result<Screenshot, String> {
-    render(tree, images, size, scale, background, passes.max(1))
+    render(tree, images, size, scale, background, passes.max(1), painters)
 }
 
 fn render(
@@ -70,6 +78,7 @@ fn render(
     scale: f32,
     background: [f32; 3],
     passes: usize,
+    painters: Option<&UiPainters>,
 ) -> Result<Screenshot, String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::from_env().unwrap_or_default(),
@@ -98,7 +107,20 @@ fn render(
     let mut bus = shell::Bus::new();
     let events = [iced_core::Event::Window(window::Event::RedrawRequested(Instant::now()))];
     let _ = ui.update(&window::Headless, &shell::Waker::noop(), &events, mouse::Cursor::Unavailable, &mut renderer, &mut bus);
+    let views = assets.views.clone();
+    views.begin_draw();
     ui.draw(&mut renderer, &Theme::Dark, &renderer::Style { text_color: Color::WHITE }, mouse::Cursor::Unavailable);
+    let gpu = Gpu {
+        adapter: &adapter,
+        instance: &instance,
+        backend: adapter.get_info().backend,
+        device: &device,
+        queue: &queue,
+        surface_format: format,
+        size,
+        scale_factor: scale,
+    };
+    ViewPainter::default().paint(&views, painters, &gpu);
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("efeengine-ui offscreen"),
