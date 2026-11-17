@@ -156,6 +156,9 @@ pub struct Style {
 - `Fill` means "take the remaining space", `Portion(n)` shares it n:m between siblings (CSS
   `flex-grow`, iced `FillPortion`, taffy `flex_grow`).
 - Every field is `Option`: `None` means "inherit from the classes, then the theme default".
+- **Web:** a node's inline `Style` is written to its element's `style` (one CSS property per set
+  field, mapped by the table below); kinds, classes and state styles come from the generated theme
+  stylesheet (section 6). A style change writes only the changed properties of that element.
 - Left out on purpose in v1: margins (use gap and padding), wrapping, absolute positioning inside
   layers, per-corner radius, shadows, transforms, animations. Each can be added when all three
   backends support it.
