@@ -35,8 +35,21 @@ pub enum TokenKind {
     Colon,
     Equals,
     Arrow,
-    /// `&`: only valid before a struct name in a provide type (efa-syntax 16.9).
+    /// `&`: bitwise and in a constant expression; before a struct name in a provide type
+    /// (efa-syntax 16.9) it is the reference sigil.
     Amp,
+    /// Constant-expression operators (efa-syntax 18). A `-` that directly starts a number
+    /// is part of the literal (`-5`), the parser splits it when it follows an operand.
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Pipe,
+    Caret,
+    Tilde,
+    Shl,
+    Shr,
     Newline,
     Eof,
 }
@@ -155,6 +168,18 @@ impl<'a> Lexer<'a> {
                 ':' => self.single(TokenKind::Colon),
                 '=' => self.single(TokenKind::Equals),
                 '&' => self.single(TokenKind::Amp),
+                '+' => self.single(TokenKind::Plus),
+                '*' => self.single(TokenKind::Star),
+                '/' => self.single(TokenKind::Slash),
+                '%' => self.single(TokenKind::Percent),
+                '|' => self.single(TokenKind::Pipe),
+                '^' => self.single(TokenKind::Caret),
+                '~' => self.single(TokenKind::Tilde),
+                '<' | '>' if self.peek(1) == Some(c) => {
+                    self.bump();
+                    self.bump();
+                    self.push(if c == '<' { TokenKind::Shl } else { TokenKind::Shr }, line, col);
+                }
                 '-' => self.minus(),
                 '0'..='9' => self.number(false),
                 '"' => self.string(),
@@ -220,14 +245,10 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     self.name(true);
                 } else {
-                    self.bump();
-                    self.error(line, col, 1, "unexpected character `-`");
+                    self.single(TokenKind::Minus);
                 }
             }
-            _ => {
-                self.bump();
-                self.error(line, col, 1, "unexpected character `-`");
-            }
+            _ => self.single(TokenKind::Minus),
         }
     }
 
@@ -736,15 +757,25 @@ mod tests {
         );
         assert_eq!(kinds("-> -1"), vec![Arrow, Int(-1), Newline, Eof]);
         assert_eq!(kinds("->-1"), vec![Arrow, Int(-1), Newline, Eof]);
-        // a detached or misplaced minus is an error and lexing goes on
-        assert_eq!(errs("- 1"), vec![(1, 1, 1, "unexpected character `-`".to_string())]);
-        assert_eq!(errs("-x"), vec![(1, 1, 1, "unexpected character `-`".to_string())]);
-        assert_eq!(errs("-info"), vec![(1, 1, 1, "unexpected character `-`".to_string())]);
-        let (t, _) = lex("a -x b", "t");
+        // a detached minus, or one before a name, is the operator of a constant expression
+        assert_eq!(kinds("- 1"), vec![Minus, Int(1), Newline, Eof]);
+        assert_eq!(kinds("-x"), vec![Minus, name("x"), Newline, Eof]);
+        assert_eq!(kinds("-info"), vec![Minus, name("info"), Newline, Eof]);
+        assert_eq!(kinds("-inf nan"), vec![Float("-inf".into()), Float("nan".into()), Newline, Eof]);
+        assert_eq!(kinds("a -x b"), vec![name("a"), Minus, name("x"), name("b"), Newline, Eof]);
+    }
+
+    #[test]
+    fn expression_operators() {
         assert_eq!(
-            t.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
-            vec![name("a"), name("x"), name("b"), Newline, Eof]
+            kinds("+ * / % | ^ ~ & << >> ( )"),
+            vec![Plus, Star, Slash, Percent, Pipe, Caret, Tilde, Amp, Shl, Shr, LParen, RParen, Newline, Eof]
         );
+        // a single `<` or `>` is still an error
+        assert_eq!(errs("<").len(), 1);
+        assert_eq!(errs(">").len(), 1);
+        // `4-1` lexes as `4` and the literal `-1`; the parser splits it
+        assert_eq!(kinds("4-1"), vec![Int(4), Int(-1), Newline, Eof]);
     }
 
     #[test]

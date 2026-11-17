@@ -44,8 +44,15 @@ pub trait Unit {
     /// The namespace that qualifies this unit's function names in the names section
     /// (`util.math`); empty for the root.
     fn namespace(&self) -> &str;
+    /// The units (by index) whose declarations this unit reads while declaring (the files it
+    /// `use`s): they are declared first, so [`Declared`] holds their values. A cycle is
+    /// tolerated; a unit of the cycle may then miss the values of a later one.
+    fn deps(&self) -> Vec<usize> {
+        Vec::new()
+    }
     /// Everything that decides indices and layout. No bodies, no layout-dependent values.
-    fn declare(&mut self, diags: &mut Vec<Diagnostic>) -> Decls;
+    /// `prior` holds the declarations of the units named by [`deps`](Unit::deps).
+    fn declare(&mut self, prior: &Declared<'_>, diags: &mut Vec<Diagnostic>) -> Decls;
     /// The values that depend on the layout, with every symbol known.
     fn resolve(&mut self, cx: &ResolveCx<'_>, diags: &mut Vec<Diagnostic>) -> Resolved;
     /// Emits the function bodies (with `cx.define`) and register names (with `cx.reg_name`).
@@ -202,6 +209,57 @@ pub struct MemoryDecl {
 pub struct ScratchDecl {
     pub size: u32,
     pub span: Span,
+}
+
+/// The declarations of the units declared so far, by unit index (`None`: not declared yet),
+/// with their file names.
+#[derive(Clone, Copy, Debug)]
+pub struct Declared<'a> {
+    pub decls: &'a [Option<Decls>],
+    pub files: &'a [String],
+}
+
+impl Declared<'_> {
+    pub const EMPTY: Declared<'static> = Declared { decls: &[], files: &[] };
+}
+
+/// A value name of a unit that is known when the unit is declared.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaticValue {
+    pub name: String,
+    /// `None` for a data address: it exists, but only the layout knows it.
+    pub value: Option<ConstValue>,
+    pub public: bool,
+    pub span: Span,
+}
+
+/// The value names of `d` that other units can use before the layout exists: consts, data
+/// symbols (without an address), `x.len` and the constants of the structs.
+pub fn static_values(d: &Decls) -> Vec<StaticValue> {
+    let mut v = Vec::new();
+    for c in &d.consts {
+        v.push(StaticValue { name: c.name.clone(), value: Some(c.value.clone()), public: c.public, span: c.span });
+    }
+    for x in &d.data {
+        v.push(StaticValue { name: x.name.clone(), value: None, public: x.public, span: x.span });
+        v.push(StaticValue {
+            name: format!("{}.len", x.name),
+            value: Some(ConstValue::Int(i128::from(x.size))),
+            public: x.public,
+            span: x.span,
+        });
+    }
+    for s in &d.structs {
+        for (name, val) in struct_consts(&s.desc) {
+            v.push(StaticValue {
+                name,
+                value: Some(ConstValue::Int(val)),
+                public: s.public || s.export,
+                span: s.span,
+            });
+        }
+    }
+    v
 }
 
 /// Everything a unit declares, in source order per kind.
@@ -500,13 +558,49 @@ pub struct LinkOptions<'a> {
     pub api: Option<&'a ApiIndex>,
 }
 
+/// Declares every unit, the units a unit depends on first (depth-first from the root; a cycle
+/// is cut at the back edge). Returns the declarations in unit order.
+pub(crate) fn declare_all(units: &mut [&mut dyn Unit], diags: &mut Vec<Diagnostic>) -> Vec<Decls> {
+    let n = units.len();
+    let files: Vec<String> = units.iter().map(|u| u.file().to_string()).collect();
+    let deps: Vec<Vec<usize>> = units.iter().map(|u| u.deps()).collect();
+    let mut order = Vec::with_capacity(n);
+    let mut seen = vec![false; n];
+    for root in 0..n {
+        let mut stack = vec![(root, 0usize)];
+        while let Some((u, k)) = stack.pop() {
+            if k == 0 {
+                if seen[u] {
+                    continue;
+                }
+                seen[u] = true;
+            }
+            match deps[u].get(k) {
+                Some(&d) => {
+                    stack.push((u, k + 1));
+                    if d < n && !seen[d] {
+                        stack.push((d, 0));
+                    }
+                }
+                None => order.push(u),
+            }
+        }
+    }
+    let mut decls: Vec<Option<Decls>> = vec![None; n];
+    for u in order {
+        let d = units[u].declare(&Declared { decls: &decls, files: &files }, diags);
+        decls[u] = Some(d);
+    }
+    decls.into_iter().map(Option::unwrap_or_default).collect()
+}
+
 /// Links `units` (unit 0 is the root) into one verified module. The diagnostics are not
 /// sorted; the caller orders them.
 pub fn link(units: &mut [&mut dyn Unit], opts: &LinkOptions) -> Result<efevm::Module, Vec<Diagnostic>> {
     let mut diags: Vec<Diagnostic> = Vec::new();
 
     // ---- Phase 1: declare and lay out. ----
-    let decls: Vec<Decls> = units.iter_mut().map(|u| u.declare(&mut diags)).collect();
+    let decls = declare_all(units, &mut diags);
     let views: Vec<&dyn Unit> = units.iter().map(|u| &**u as &dyn Unit).collect();
     let syms = layout::layout(&views, decls, &mut diags);
     let iface = layout::interface(&views, &syms, &mut diags);

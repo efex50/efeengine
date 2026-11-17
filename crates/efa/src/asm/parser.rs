@@ -9,16 +9,20 @@
 //! loop is guaranteed to make progress.
 
 use super::ast::{
-    AParam, AType, CallSugar, ConstDecl, DataDecl, DataKind, FieldDecl, FuncDecl, GlobalDecl, Ident,
+    AParam, AType, CallSugar, ConstDecl, ConstExpr, DataDecl, DataKind, FieldDecl, FuncDecl, GlobalDecl, Ident,
     EventForm, EventImportDecl, ImportDecl, Inst, Item, MemoryDecl, Module, Operand, Param, ProvideDecl,
     ProvideEventDecl, ScratchDecl, Signature,
     Span, Stmt, StmtKind, StructDecl, TableDecl, TableEntry, Ty, TypeRef, UseDecl,
 };
 use super::diag::Diagnostic;
 use super::lexer::{lex, Token, TokenKind};
+use efevm::{Op, Shape};
 
 /// Maximum nesting of operands (`f(g(h(...)))`), so hostile input cannot overflow the stack.
 const MAX_DEPTH: u32 = 64;
+
+/// Longest constant expression, in tokens: the evaluator recurses over the tree.
+const MAX_EXPR_TOKENS: usize = 1000;
 
 /// Words that start a top-level item; none of them is a valid first word of a statement.
 const ITEM_KEYWORDS: [&str; 12] = [
@@ -28,6 +32,37 @@ const ITEM_KEYWORDS: [&str; 12] = [
 /// Item keywords added for multi-file programs (efa-syntax 16.9): reserved, so a data item
 /// named after one of them gets an error that says so.
 const NEW_KEYWORDS: [&str; 5] = ["use", "pub", "provide", "struct", "scratch"];
+
+/// The operand position (0-based) of an instruction that is a constant expression: the offset
+/// of a load or store, the value of a `const.T`.
+fn const_operand_index(mnemonic: &str) -> Option<usize> {
+    let op = Op::ALL.iter().find(|o| o.name() == mnemonic)?;
+    match op.shape() {
+        Shape::Load | Shape::Store => Some(2),
+        Shape::ConstI32 | Shape::ConstI64 | Shape::ConstF32 | Shape::ConstF64 => Some(1),
+        _ => None,
+    }
+}
+
+/// Can `kind` follow an operand inside one constant expression? (An operator, or a literal
+/// that starts with `-`, which the lexer reads as a negative number.)
+fn continues_expr(kind: &TokenKind) -> bool {
+    match kind {
+        TokenKind::Plus
+        | TokenKind::Minus
+        | TokenKind::Star
+        | TokenKind::Slash
+        | TokenKind::Percent
+        | TokenKind::Amp
+        | TokenKind::Pipe
+        | TokenKind::Caret
+        | TokenKind::Shl
+        | TokenKind::Shr => true,
+        TokenKind::Int(v) => *v < 0,
+        TokenKind::Float(t) => t.starts_with('-') && !t.starts_with("-nan:"),
+        _ => false,
+    }
+}
 
 /// A syntax error that has already been recorded; the caller recovers.
 struct Abort;
@@ -72,6 +107,16 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::Equals => "`=`".to_string(),
         TokenKind::Arrow => "`->`".to_string(),
         TokenKind::Amp => "`&`".to_string(),
+        TokenKind::Plus => "`+`".to_string(),
+        TokenKind::Minus => "`-`".to_string(),
+        TokenKind::Star => "`*`".to_string(),
+        TokenKind::Slash => "`/`".to_string(),
+        TokenKind::Percent => "`%`".to_string(),
+        TokenKind::Pipe => "`|`".to_string(),
+        TokenKind::Caret => "`^`".to_string(),
+        TokenKind::Tilde => "`~`".to_string(),
+        TokenKind::Shl => "`<<`".to_string(),
+        TokenKind::Shr => "`>>`".to_string(),
         TokenKind::Newline => "end of line".to_string(),
         TokenKind::Eof => "end of file".to_string(),
     }
@@ -450,8 +495,8 @@ impl<'a> Parser<'a> {
 
     fn memory(&mut self) -> PResult<Item> {
         let start = self.bump();
-        let min = self.parse_operand()?;
-        let max = if self.at_eol() { None } else { Some(self.parse_operand()?) };
+        let min = self.const_operand()?;
+        let max = if self.at_eol() { None } else { Some(self.const_operand()?) };
         let span = start.join(self.prev);
         self.finish_line("the memory operands")?;
         Ok(Item::Memory(MemoryDecl { span, min, max }))
@@ -461,7 +506,7 @@ impl<'a> Parser<'a> {
         self.bump(); // `const`
         let name = self.ident("a constant name after `const`")?;
         self.expect_tok(TokenKind::Equals, "`=` after the constant name")?;
-        let value = self.parse_operand()?;
+        let value = self.const_operand()?;
         let span = start.join(self.prev);
         self.finish_line("the constant value")?;
         Ok(Item::Const(ConstDecl { span, public, name, value }))
@@ -480,7 +525,7 @@ impl<'a> Parser<'a> {
         self.expect_tok(TokenKind::Colon, "`:` after the global name")?;
         let ty = self.parse_type()?;
         self.expect_tok(TokenKind::Equals, "`=` after the global type")?;
-        let init = self.parse_operand()?;
+        let init = self.const_operand()?;
         let span = start.join(self.prev);
         self.finish_line("the global initialiser")?;
         Ok(Item::Global(GlobalDecl { span, exported, public, mutable, name, ty, init }))
@@ -535,7 +580,7 @@ impl<'a> Parser<'a> {
             },
             _ => return Err(self.data_kind_expected(&name.name)),
         };
-        let values = self.operands_to_eol()?;
+        let values = self.operands_to_eol(|_| true)?;
         let first = if public { start } else { name.span };
         let span = first.join(self.prev);
         self.eat_newline();
@@ -617,7 +662,7 @@ impl<'a> Parser<'a> {
     /// `scratch N`.
     fn scratch(&mut self) -> PResult<Item> {
         let start = self.bump(); // `scratch`
-        let size = self.parse_operand()?;
+        let size = self.const_operand()?;
         let span = start.join(self.prev);
         self.finish_line("the scratch size")?;
         Ok(Item::Scratch(ScratchDecl { span, size }))
@@ -762,7 +807,7 @@ impl<'a> Parser<'a> {
         let prim = self.ident("a field type (`u8 i8 u16 i16 u32 i32 u64 i64 f32 f64 bool entity`)")?;
         let count = if matches!(self.kind(), TokenKind::LBracket) {
             self.bump();
-            let n = self.parse_operand()?;
+            let n = self.const_operand()?;
             self.expect_tok(TokenKind::RBracket, "`]` after the array length")?;
             Some(n)
         } else {
@@ -901,7 +946,12 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 let mnemonic = self.ident("an instruction")?;
-                let operands = if self.at_eol() || self.brace_ends_stmt() { Vec::new() } else { self.operands_to_eol()? };
+                let const_at = const_operand_index(&mnemonic.name);
+                let operands = if self.at_eol() || self.brace_ends_stmt() {
+                    Vec::new()
+                } else {
+                    self.operands_to_eol(|k| Some(k) == const_at)?
+                };
                 let span = mnemonic.span.join(self.prev);
                 self.eat_newline();
                 let inst = Inst {
@@ -976,10 +1026,12 @@ impl<'a> Parser<'a> {
     // ---- operands -----------------------------------------------------------------------
 
     /// One or more operands separated by commas, up to the end of the line (not consumed).
-    fn operands_to_eol(&mut self) -> PResult<Vec<Operand>> {
+    /// `is_const(k)` says that operand `k` (0-based) is a constant-expression position.
+    fn operands_to_eol(&mut self, is_const: impl Fn(usize) -> bool) -> PResult<Vec<Operand>> {
         let mut ops = Vec::new();
         loop {
-            ops.push(self.parse_operand()?);
+            let op = if is_const(ops.len()) { self.const_operand()? } else { self.parse_operand()? };
+            ops.push(op);
             if matches!(self.kind(), TokenKind::Comma) {
                 self.bump();
                 continue;
@@ -989,6 +1041,170 @@ impl<'a> Parser<'a> {
             }
             return Err(self.expected("`,` or end of line after operand"));
         }
+    }
+
+    /// An operand in a constant-expression position (efa-syntax 18): a literal or name as
+    /// usual, or an expression with `+ - * / % << >> & | ^ ~` and parentheses, parsed by
+    /// `calc`. The expression ends at the first token that cannot continue it (`,`, end of
+    /// line, `]`, an operand that follows an operand).
+    fn const_operand(&mut self) -> PResult<Operand> {
+        let first = self.kind();
+        let starts = matches!(
+            first,
+            TokenKind::Name(_)
+                | TokenKind::Int(_)
+                | TokenKind::Float(_)
+                | TokenKind::Char(_)
+                | TokenKind::LParen
+                | TokenKind::Minus
+                | TokenKind::Plus
+                | TokenKind::Tilde
+        );
+        let single = matches!(
+            first,
+            TokenKind::Name(_) | TokenKind::Int(_) | TokenKind::Float(_) | TokenKind::Char(_)
+        );
+        if !starts || (single && !continues_expr(&self.tok_at(1).kind)) {
+            return self.parse_operand();
+        }
+        self.expression()
+    }
+
+    fn expression(&mut self) -> PResult<Operand> {
+        use calc::TokenKind as C;
+        let start = self.pos;
+        let mut toks: Vec<calc::Token> = Vec::new();
+        let mut spans: Vec<Span> = Vec::new();
+        // The efa token index each calc token came from.
+        let mut origin: Vec<usize> = Vec::new();
+        let mut depth = 0usize;
+        let mut after_operand = false;
+        let mut i = start;
+        while let Some(t) = self.toks.get(i) {
+            let span = t.span;
+            // A literal with a leading `-` right after an operand is a subtraction.
+            let split = |span: Span| {
+                (
+                    Span::new(span.line, span.column, 1),
+                    Span::new(span.line, span.column + 1, span.len.saturating_sub(1).max(1)),
+                )
+            };
+            let mut kinds: Vec<(C, Span)> = Vec::new();
+            match &t.kind {
+                TokenKind::Name(n) => kinds.push((C::Ident(n.clone()), span)),
+                TokenKind::Int(v) => match v.checked_neg().filter(|_| *v < 0 && after_operand) {
+                    Some(pos) => {
+                        let (m, n) = split(span);
+                        kinds.push((C::Minus, m));
+                        kinds.push((C::Int(pos), n));
+                    }
+                    None => kinds.push((C::Int(*v), span)),
+                },
+                TokenKind::Char(c) => kinds.push((C::Int(*c as i128), span)),
+                TokenKind::Float(text) => {
+                    let (neg, body) = match text.strip_prefix('-') {
+                        Some(b) => (true, b),
+                        None => (false, text.as_str()),
+                    };
+                    let x = if body == "inf" {
+                        f64::INFINITY
+                    } else if body == "nan" {
+                        f64::NAN
+                    } else if body.starts_with("nan:") {
+                        return Err(self.error(
+                            span,
+                            "`nan:0x...` (a NaN with a payload) cannot be part of a constant expression",
+                        ));
+                    } else {
+                        match body.parse::<f64>() {
+                            Ok(x) => x,
+                            Err(_) => return Err(self.error(span, format!("invalid float literal `{text}`"))),
+                        }
+                    };
+                    if neg && after_operand {
+                        let (m, n) = split(span);
+                        kinds.push((C::Minus, m));
+                        kinds.push((C::Float(x), n));
+                    } else {
+                        kinds.push((C::Float(if neg { -x } else { x }), span));
+                    }
+                }
+                TokenKind::LParen => {
+                    depth += 1;
+                    kinds.push((C::LParen, span));
+                }
+                TokenKind::RParen => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                    kinds.push((C::RParen, span));
+                }
+                TokenKind::Plus => kinds.push((C::Plus, span)),
+                TokenKind::Minus => kinds.push((C::Minus, span)),
+                TokenKind::Star => kinds.push((C::Star, span)),
+                TokenKind::Slash => kinds.push((C::Slash, span)),
+                TokenKind::Percent => kinds.push((C::Percent, span)),
+                TokenKind::Amp => kinds.push((C::Amp, span)),
+                TokenKind::Pipe => kinds.push((C::Pipe, span)),
+                TokenKind::Caret => kinds.push((C::Caret, span)),
+                TokenKind::Tilde => kinds.push((C::Tilde, span)),
+                TokenKind::Shl => kinds.push((C::Shl, span)),
+                TokenKind::Shr => kinds.push((C::Shr, span)),
+                _ => break,
+            }
+            after_operand = matches!(
+                t.kind,
+                TokenKind::Name(_)
+                    | TokenKind::Int(_)
+                    | TokenKind::Float(_)
+                    | TokenKind::Char(_)
+                    | TokenKind::RParen
+            );
+            for (k, sp) in kinds {
+                let at = toks.len();
+                toks.push(calc::Token::new(k, at, at + 1));
+                spans.push(sp);
+                origin.push(i);
+            }
+            i += 1;
+        }
+        let total = toks.len();
+        if total > MAX_EXPR_TOKENS {
+            let span = spans.get(MAX_EXPR_TOKENS).copied().unwrap_or_else(|| self.tok().span);
+            return Err(self.error(
+                span,
+                format!("the constant expression is too long (at most {MAX_EXPR_TOKENS} tokens)"),
+            ));
+        }
+        let mut src = calc::TokenIter(toks.into_iter());
+        let mut p = calc::Parser::new(&mut src);
+        let parsed = p.parse_expr().and_then(|e| {
+            let used = p.peek()?.map_or(total, |t| t.span.start);
+            Ok((e, used))
+        });
+        let (expr, used) = match parsed {
+            Ok(x) => x,
+            Err(e) => {
+                let at = |k: usize| spans.get(k).copied().unwrap_or_else(|| self.tok().span);
+                let span = match e.kind {
+                    calc::CalcErrorKind::UnexpectedEnd => at(total.saturating_sub(1)),
+                    _ => at(e.span.start).join(at(e.span.end.saturating_sub(1).max(e.span.start))),
+                };
+                let what = match e.kind {
+                    calc::CalcErrorKind::UnexpectedEnd => "the constant expression is incomplete".to_string(),
+                    calc::CalcErrorKind::UnclosedBracket => "unclosed `(` in a constant expression".to_string(),
+                    k => format!("invalid constant expression: {k}"),
+                };
+                return Err(self.error(span, what));
+            }
+        };
+        // Resume after the last token the expression used.
+        self.pos = origin.get(used).copied().unwrap_or(i);
+        let last = spans.get(used.saturating_sub(1)).copied().unwrap_or_else(Span::none);
+        self.prev = last;
+        let span = spans.first().copied().unwrap_or(last).join(last);
+        Ok(Operand::Expr(Box::new(ConstExpr { span, expr, spans })))
     }
 
     fn parse_operand(&mut self) -> PResult<Operand> {

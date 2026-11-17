@@ -26,7 +26,7 @@ impl Unit for TestUnit {
     fn namespace(&self) -> &str {
         &self.ns
     }
-    fn declare(&mut self, _diags: &mut Vec<Diagnostic>) -> Decls {
+    fn declare(&mut self, _prior: &Declared<'_>, _diags: &mut Vec<Diagnostic>) -> Decls {
         self.decls.clone()
     }
     fn resolve(&mut self, _cx: &ResolveCx<'_>, _diags: &mut Vec<Diagnostic>) -> Resolved {
@@ -92,7 +92,9 @@ fn go(units: &mut [TestUnit]) -> Result<efevm::Module, Vec<Diagnostic>> {
 
 fn lay(units: &mut [TestUnit]) -> (SymbolMap, Vec<Diagnostic>) {
     let mut diags = Vec::new();
-    let decls: Vec<Decls> = units.iter_mut().map(|u| u.declare(&mut diags)).collect();
+    let mut refs: Vec<&mut dyn Unit> = units.iter_mut().map(|u| u as &mut dyn Unit).collect();
+    let decls = declare_all(&mut refs, &mut diags);
+    drop(refs);
     let views: Vec<&dyn Unit> = units.iter().map(|u| u as &dyn Unit).collect();
     let syms = layout::layout(&views, decls, &mut diags);
     (syms, diags)

@@ -7,22 +7,28 @@ import engine.log.info
 ; `Sprite.size` is the size in bytes of the whole struct (a struct constant named `size` wins over a
 ; field named `size`), so the field `size` of Sprite is reached by its offset.
 pub const SPRITE_SIZE_AT = 20
-pub const HALF_X = 320.0
-pub const HALF_Y = 240.0
+pub const WIDTH = 640.0
+pub const HEIGHT = 480.0
+pub const HALF_X = WIDTH / 2.0
+pub const HALF_Y = HEIGHT / 2.0
 pub const MARGIN = 8.0           ; the player stays this far from the edge
 pub const PLAYER_SPEED = 110.0
-pub const COIN_PICK2 = 121.0     ; (player radius 5 + coin radius 6) squared
-pub const ENEMY_HIT2 = 121.0     ; (5 + 6) squared
+pub const PLAYER_R = 5.0         ; collision radii
+pub const COIN_R = 6.0
+pub const ENEMY_R = 6.0
+pub const COIN_PICK2 = (PLAYER_R + COIN_R) * (PLAYER_R + COIN_R)     ; squared pick-up distance
+pub const ENEMY_HIT2 = (PLAYER_R + ENEMY_R) * (PLAYER_R + ENEMY_R)   ; squared hit distance
 pub const INVULN = 1.0           ; seconds of immunity after a hit
 pub const LAYER_COIN = 1
 pub const MAX_COINS = 30
 
 ; ---- vectors in memory: an (x, y) pair of f32 at base + off ----
+const F32 = 4                    ; bytes in an f32: component k of a vector is at k * F32
 pub fn vec2_load(base: i64, off: i64) -> (f32, f32) {
     reg p, x, y
     i64.add p, base, off
     f32.load x, p
-    f32.load y, p, 4
+    f32.load y, p, 1 * F32
     ret (x, y)
 }
 
@@ -30,7 +36,7 @@ pub fn vec2_store(base: i64, off: i64, x: f32, y: f32) {
     reg p
     i64.add p, base, off
     f32.store x, p
-    f32.store y, p, 4
+    f32.store y, p, 1 * F32
     ret
 }
 

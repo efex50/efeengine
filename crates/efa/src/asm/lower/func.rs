@@ -261,7 +261,7 @@ impl<'a, 'm> Fl<'a, 'm> {
             self.errs.push(d);
         }
         if let Some((op, _)) = nregs_decl {
-            match self.env.const_int(&op) {
+            match self.env.int_known(&op) {
                 Ok(v) => match usize::try_from(v) {
                     Ok(n) if n <= usize::from(u16::MAX) => {
                         if n < required && self.errs.is_empty() {
@@ -389,6 +389,7 @@ impl<'a, 'm> Fl<'a, 'm> {
                 Some(v) => Ok(v.val.clone()),
                 None => Err(self.unknown_reg(id)),
             },
+            Operand::Expr(ce) => self.env.eval_known(ce),
             other => Err(self.d(
                 other.span(),
                 format!("expected a register or an immediate, found {}", describe(other)),

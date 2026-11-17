@@ -96,7 +96,7 @@ fn parse_f32(text: &str) -> Result<f32, String> {
     }
 }
 
-fn parse_f64(text: &str) -> Result<f64, String> {
+pub(super) fn parse_f64(text: &str) -> Result<f64, String> {
     match special(text) {
         Special::Inf(neg) => Ok(if neg { f64::NEG_INFINITY } else { f64::INFINITY }),
         Special::Nan(neg) => Ok(f64::from_bits(0x7ff8_0000_0000_0000 | (u64::from(neg) << 63))),
@@ -118,6 +118,7 @@ pub(super) fn describe(op: &Operand) -> String {
         Operand::Labels(..) => "a label list".into(),
         Operand::Tuple(..) => "a tuple".into(),
         Operand::Signature(_) => "a signature".into(),
+        Operand::Expr(_) => "a constant expression".into(),
     }
 }
 
@@ -129,4 +130,16 @@ pub(super) fn raw_reg(name: &str) -> Option<usize> {
         return None;
     }
     Some(digits.parse::<usize>().unwrap_or(usize::MAX))
+}
+
+/// The float text of a computed value: `{:?}` round-trips an `f64`; `inf` and `nan` are the
+/// literal words.
+pub(super) fn float_text(x: f64) -> String {
+    if x.is_nan() {
+        "nan".into()
+    } else if x.is_infinite() {
+        if x < 0.0 { "-inf".into() } else { "inf".into() }
+    } else {
+        format!("{x:?}")
+    }
 }

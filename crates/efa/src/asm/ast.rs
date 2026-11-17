@@ -329,6 +329,35 @@ pub enum Operand {
     Tuple(Vec<Operand>, Span),
     /// `(T, ...) -> R` or `(T, ...) -> (R, ...)`: a function signature (for `call_indirect`).
     Signature(Signature),
+    /// A constant expression that is more than one literal or name (efa-syntax 18). Only the
+    /// parser's constant-expression positions produce it; a lone literal or name stays
+    /// `Int` / `Float` / `Char` / `Name`.
+    Expr(Box<ConstExpr>),
+}
+
+/// A constant expression: `calc`'s tree plus the table that maps its token positions back to
+/// source spans. The `calc` tokens carry synthetic byte offsets: token `k` of the expression
+/// has the span `k..k + 1`, and `spans[k]` is its position in the `.efa` file (a negative
+/// literal that follows an operand is split into `-` and the number, two entries).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConstExpr {
+    /// The whole expression.
+    pub span: Span,
+    pub expr: calc::Expr,
+    pub spans: Vec<Span>,
+}
+
+impl ConstExpr {
+    /// The source span of a `calc` span (synthetic token offsets).
+    pub fn span_of(&self, s: calc::Span) -> Span {
+        let first = self.spans.get(s.start).copied();
+        let last = self.spans.get(s.end.saturating_sub(1).max(s.start)).copied();
+        match (first, last) {
+            (Some(a), Some(b)) => a.join(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => self.span,
+        }
+    }
 }
 
 impl Operand {
@@ -343,6 +372,7 @@ impl Operand {
             | Operand::Tuple(_, s) => *s,
             Operand::Call(c) => c.span,
             Operand::Signature(sig) => sig.span,
+            Operand::Expr(e) => e.span,
         }
     }
 }

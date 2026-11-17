@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use efevm::api::{ApiIndex, ApiType, FieldDesc, Prim, StructDesc};
+use efevm::api::{ApiIndex, ApiType, Prim, StructDesc};
 
 use efevm::{FuncType, Op, ValType};
 
@@ -27,8 +27,10 @@ use super::ast::{
 };
 use super::diag::{did_you_mean, Diagnostic};
 use crate::link::{self, layout::MAX_SCRATCH, DefineCx, ProvideType, ResolveCx, Resolved, Space, Symbol, SymRef};
+use consts::{Fail, Fold};
 use value::{raw_reg, type_val, Konst, Val};
 
+mod consts;
 mod func;
 mod value;
 
@@ -44,6 +46,9 @@ type Res<T> = Result<T, Diagnostic>;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VKind {
     Const,
+    /// A const that depends on a data address or an event id: its value is computed in
+    /// `resolve` (a placeholder until then).
+    LateConst,
     Data,
     DataLen,
     /// `ns.name.id` of an `import event`: known only after the linker numbered the events.
@@ -222,33 +227,6 @@ impl<'a> Env<'a> {
         self.funcs.insert(name.to_string(), sig);
     }
 
-    /// An integer literal, character or `const` name that holds an integer.
-    fn const_int(&self, op: &Operand) -> Res<i128> {
-        match op {
-            Operand::Int(v, _) => Ok(*v),
-            Operand::Char(c, _) => Ok(*c as i128),
-            Operand::Name(id) => match self.values.get(&id.name) {
-                Some(ValueInfo { val: Val::Int(v), kind: VKind::Const, .. }) => Ok(*v),
-                Some(ValueInfo { kind: VKind::Const, .. }) => {
-                    Err(self.err(id.span, format!("expected an integer, `{}` is a float", id.name)))
-                }
-                Some(ValueInfo { kind: VKind::Event, .. }) => Err(self.err(
-                    id.span,
-                    format!("`{}` is an event id, which is only known when the program is linked; it cannot be used here", id.name),
-                )),
-                Some(_) => Err(self.err(
-                    id.span,
-                    format!("expected an integer or a `const`, `{}` is a data symbol", id.name),
-                )),
-                None => Err(self.unknown_value(id)),
-            },
-            other => Err(self.err(
-                other.span(),
-                format!("expected an integer or a `const`, found {}", value::describe(other)),
-            )),
-        }
-    }
-
     /// The ``x is private to `file` `` error for `alias.x` in `space`, if `id` names one.
     fn private_err(&self, space: Space, id: &Ident) -> Option<Diagnostic> {
         let (file, decl) = self.private.get(&(space, id.name.clone()))?;
@@ -300,61 +278,11 @@ impl<'a> Env<'a> {
                 Some(v) => Ok(v.val.clone()),
                 None => Err(self.unknown_value(id)),
             },
+            Operand::Expr(ce) => self.eval_known(ce),
             other => Err(self.err(
                 other.span(),
                 format!("expected a literal or a constant, found {}", value::describe(other)),
             )),
-        }
-    }
-}
-
-/// The size in bytes a data item occupies (depends only on the count and kind of its values).
-fn data_size(env: &Env, d: &DataDecl, diags: &mut Vec<Diagnostic>) -> u64 {
-    let n = d.values.len() as u64;
-    match d.kind {
-        DataKind::Resb => {
-            let count = match d.values.as_slice() {
-                [one] => env.const_int(one).and_then(|v| {
-                    u64::try_from(v)
-                        .ok()
-                        .filter(|c| *c <= u64::from(u32::MAX))
-                        .ok_or_else(|| {
-                            env.err(one.span(), format!("`resb` size {v} is out of range"))
-                        })
-                }),
-                _ => Err(env.err(
-                    d.kind_span,
-                    format!("`resb` takes exactly one size, found {}", d.values.len()),
-                )),
-            };
-            match count {
-                Ok(c) => c,
-                Err(e) => {
-                    diags.push(e);
-                    0
-                }
-            }
-        }
-        _ => {
-            if d.values.is_empty() {
-                diags.push(env.err(
-                    d.kind_span,
-                    format!("`{}` needs at least one value", d.kind.name()),
-                ));
-            }
-            match d.kind {
-                DataKind::Db => d
-                    .values
-                    .iter()
-                    .map(|v| match v {
-                        Operand::Str(b, _) => b.len() as u64,
-                        _ => 1,
-                    })
-                    .sum(),
-                DataKind::Dw => 2 * n,
-                DataKind::Dd => 4 * n,
-                _ => 8 * n,
-            }
         }
     }
 }
@@ -493,6 +421,8 @@ struct State<'a> {
     table: Option<&'a TableDecl>,
     /// `alias -> unit index`.
     aliases: Vec<(String, usize)>,
+    /// The consts that depend on the layout (computed in `resolve`).
+    late: Vec<&'a ast::ConstDecl>,
 }
 
 /// One `.efa` file of a program, as a [`link::Unit`]. The driver ([`crate::asm::assemble_program`])
@@ -536,7 +466,7 @@ impl<'a> Unit<'a> {
         }
     }
 
-    fn declare_all(&self, diags: &mut Vec<Diagnostic>) -> (State<'a>, link::Decls) {
+    fn declare_all(&self, prior: &link::Declared<'_>, diags: &mut Vec<Diagnostic>) -> (State<'a>, link::Decls) {
         let m: &'a ast::Module = self.module;
         let mut env = Env::new(self.file, self.src);
         let mut out = link::Decls::default();
@@ -576,42 +506,100 @@ impl<'a> Unit<'a> {
             }
         }
 
-        // Constants.
-        for c in &consts {
-            env.check_name(&c.name, "constant", diags);
-            let val = match &c.value {
-                Operand::Int(v, _) => Some(Val::Int(*v)),
-                Operand::Char(ch, _) => Some(Val::Int(*ch as i128)),
-                Operand::Float(t, _) => Some(Val::Float(t.clone())),
-                other => {
-                    diags.push(env.err(
-                        other.span(),
-                        format!(
-                            "a `const` value must be one integer, float or character literal, found {}",
-                            value::describe(other)
-                        ),
-                    ));
-                    None
-                }
+        // The values of the used files that are known before the layout (`alias.NAME`).
+        let mut early_aliases: Vec<(String, usize)> = Vec::new();
+        for (k, u) in uses.iter().enumerate() {
+            let alias = match &u.alias {
+                Some(a) => a.name.clone(),
+                None => String::from_utf8_lossy(&u.path)
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(".efa")
+                    .to_string(),
             };
-            if let Some(val) = val {
-                let value = match &val {
-                    Val::Int(v) => link::ConstValue::Int(*v),
-                    Val::Float(t) => link::ConstValue::Float(t.clone()),
+            if let Some(Some(unit)) = self.uses.get(k) {
+                if !early_aliases.iter().any(|(a, _)| *a == alias) {
+                    early_aliases.push((alias, *unit));
+                }
+            }
+        }
+        for (alias, unit) in &early_aliases {
+            let Some(Some(decls)) = prior.decls.get(*unit) else { continue };
+            let file = prior.files.get(*unit).cloned().unwrap_or_default();
+            for v in link::static_values(decls) {
+                let key = format!("{alias}.{}", v.name);
+                if !v.public {
+                    env.private.entry((Space::Value, key)).or_insert((file.clone(), v.span));
+                    continue;
+                }
+                if env.values.contains_key(&key) {
+                    continue;
+                }
+                let (val, kind) = match v.value {
+                    Some(link::ConstValue::Int(n)) => (Val::Int(n), VKind::Const),
+                    Some(link::ConstValue::Float(t)) => (Val::Float(t), VKind::Const),
+                    None => (Val::Int(0), VKind::Data),
                 };
-                if env.define_value(&c.name.name, c.name.span, val, VKind::Const, diags) {
-                    out.consts.push(link::ConstDecl {
-                        name: c.name.name.clone(),
-                        value,
-                        public: c.public,
-                        span: c.name.span,
-                    });
+                env.value_names.push(key.clone());
+                env.values.insert(key, ValueInfo { val, span: v.span, kind });
+            }
+        }
+
+        // Event ids (`ns.name.id`) are known only after linking; until then the names exist as
+        // placeholders, so a use in a layout position gets a precise error.
+        for ev in &event_imports {
+            if let Some((ns, name)) = ev.split() {
+                if efevm::api::types::is_namespace(ns) && efevm::api::types::is_ident(name) {
+                    let key = format!("{}.id", ev.qualified.name);
+                    if !env.values.contains_key(&key) {
+                        env.value_names.push(key.clone());
+                        env.values.insert(key, ValueInfo { val: Val::Int(0), span: ev.qualified.span, kind: VKind::Event });
+                    }
                 }
             }
         }
 
+        // Consts, structs and data sizes can read each other in any order: `fold` evaluates
+        // each on demand (efa-syntax 18), the passes below only record the results in source
+        // order.
+        let mut fold = Fold::new(&consts, &structs, &datas);
+        let mut late: Vec<&'a ast::ConstDecl> = Vec::new();
+
+        // Constants.
+        for (k, c) in consts.iter().enumerate() {
+            env.check_name(&c.name, "constant", diags);
+            match fold.const_value(&env, diags, k) {
+                Ok(val) => {
+                    let value = match &val {
+                        Val::Int(v) => link::ConstValue::Int(*v),
+                        Val::Float(t) => link::ConstValue::Float(t.clone()),
+                    };
+                    if env.define_value(&c.name.name, c.name.span, val, VKind::Const, diags) {
+                        out.consts.push(link::ConstDecl {
+                            name: c.name.name.clone(),
+                            value,
+                            public: c.public,
+                            span: c.name.span,
+                        });
+                    }
+                }
+                Err(Fail::Late(l)) => {
+                    if c.public {
+                        diags.push(env.err(
+                            c.name.span,
+                            format!("`pub const {}` must be known when the file is assembled", c.name.name),
+                        ).with_note(l.message().replace("; it cannot be used here", "")));
+                    } else if env.define_value(&c.name.name, c.name.span, Val::Int(0), VKind::LateConst, diags) {
+                        late.push(c);
+                    }
+                }
+                Err(Fail::Reported) => {}
+            }
+        }
+
         // Structs (16.7): C layout, constants `S.size`, `S.align`, `S.<field>`.
-        for s in &structs {
+        for (k, s) in structs.iter().enumerate() {
             if !env.check_name(&s.name, "struct", diags) {
                 continue;
             }
@@ -628,75 +616,12 @@ impl<'a> Unit<'a> {
                 diags.push(env.first_defined(d, prev));
                 continue;
             }
-            let mut fields: Vec<FieldDesc> = Vec::new();
-            let mut field_spans: HashMap<&str, Span> = HashMap::new();
-            let mut cursor: u64 = 0;
-            let mut align: u32 = 1;
-            let mut ok = true;
-            for f in &s.fields {
-                if !env.check_name(&f.name, "field", diags) {
-                    ok = false;
-                    continue;
-                }
-                if let Some(prev) = field_spans.get(f.name.name.as_str()) {
-                    let d = env.err(f.name.span, format!("duplicate field `{}` in struct `{name}`", f.name.name));
-                    diags.push(env.first_defined(d, *prev));
-                    ok = false;
-                    continue;
-                }
-                field_spans.insert(&f.name.name, f.name.span);
-                let Some(prim) = prim_of(&f.prim.name) else {
-                    diags.push(
-                        env.err(f.prim.span, format!("unknown field type `{}`", f.prim.name))
-                            .with_note("use u8 i8 u16 i16 u32 i32 u64 i64 f32 f64 bool or entity"),
-                    );
-                    ok = false;
-                    continue;
-                };
-                let count = match &f.count {
-                    None => 1u32,
-                    Some(op) => match env.const_int(op) {
-                        Ok(n) if (1..=i128::from(u32::MAX)).contains(&n) => n as u32,
-                        Ok(n) => {
-                            diags.push(env.err(op.span(), format!("array length {n} must be at least 1")));
-                            ok = false;
-                            continue;
-                        }
-                        Err(e) => {
-                            diags.push(e);
-                            ok = false;
-                            continue;
-                        }
-                    },
-                };
-                let size = u64::from(prim.size());
-                let offset = link::layout::align_up(cursor, size);
-                cursor = offset.saturating_add(size.saturating_mul(u64::from(count)));
-                align = align.max(prim.size());
-                let mut fd = FieldDesc::new(f.name.name.clone(), u32::try_from(offset).unwrap_or(u32::MAX), prim, count);
-                if let Some(doc) = &f.doc {
-                    fd = fd.with_doc(String::from_utf8_lossy(doc));
-                }
-                fields.push(fd);
-            }
-            if s.fields.is_empty() {
-                diags.push(env.err(s.name.span, format!("struct `{name}` needs at least one field")));
-                ok = false;
-            }
-            let size = link::layout::align_up(cursor, u64::from(align));
-            let Ok(size) = u32::try_from(size) else {
-                diags.push(env.err(s.name.span, format!("struct `{name}` is too large ({size} bytes)")));
+            let (desc, registered) = fold.struct_layout(&env, diags, k);
+            if !registered {
                 continue;
-            };
+            }
             env.structs.insert(name.clone(), s.name.span);
-            if !ok {
-                continue;
-            }
-            let mut desc = StructDesc::new(name.clone(), size, align);
-            desc.fields = fields;
-            if let Some(doc) = &s.doc {
-                desc.doc = String::from_utf8_lossy(doc).into_owned();
-            }
+            let Some(desc) = desc else { continue };
             for (cname, v) in link::struct_consts(&desc) {
                 if !env.values.contains_key(&cname) {
                     env.value_names.push(cname.clone());
@@ -789,25 +714,11 @@ impl<'a> Unit<'a> {
             env.define_func(&f.name.name, sig, diags);
         }
 
-        // Event ids (`ns.name.id`) are known only after linking; until then the names exist as
-        // placeholders, so a use in a layout position gets a precise error.
-        for ev in &event_imports {
-            if let Some((ns, name)) = ev.split() {
-                if efevm::api::types::is_namespace(ns) && efevm::api::types::is_ident(name) {
-                    let key = format!("{}.id", ev.qualified.name);
-                    if !env.values.contains_key(&key) {
-                        env.value_names.push(key.clone());
-                        env.values.insert(key, ValueInfo { val: Val::Int(0), span: ev.qualified.span, kind: VKind::Event });
-                    }
-                }
-            }
-        }
-
         // Data sizes (addresses come from the linker).
         let mut data_syms = Vec::new();
         for (k, d) in datas.iter().enumerate() {
             env.check_name(&d.name, "data", diags);
-            let len = data_size(&env, d, diags);
+            let len = fold.data_len(&env, diags, k);
             let span = d.name.span;
             if env.define_value(&d.name.name, span, Val::Int(0), VKind::Data, diags) {
                 data_syms.push((d.name.name.clone(), k));
@@ -880,31 +791,30 @@ impl<'a> Unit<'a> {
                 diags.push(env.first_defined(d, first));
                 continue;
             }
-            let to_u32 = |op: &Operand| -> Res<u32> {
-                let v = env.const_int(op)?;
-                u32::try_from(v).map_err(|_| {
-                    env.err(op.span(), format!("memory size {v} must be a non-negative number that fits in u32"))
-                })
-            };
-            let min = match to_u32(&mem.min) {
-                Ok(v) => v,
-                Err(e) => {
-                    diags.push(e);
-                    out.memory = Some(link::MemoryDecl { min: None, max: None, span: mem.span });
-                    continue;
+            let mut to_u32 = |op: &Operand, diags: &mut Vec<Diagnostic>| -> Option<u32> {
+                let v = fold.int_now(&env, diags, op)?;
+                match u32::try_from(v) {
+                    Ok(v) => Some(v),
+                    Err(_) => {
+                        diags.push(env.err(
+                            op.span(),
+                            format!("memory size {v} must be a non-negative number that fits in u32"),
+                        ));
+                        None
+                    }
                 }
             };
+            let Some(min) = to_u32(&mem.min, diags) else {
+                out.memory = Some(link::MemoryDecl { min: None, max: None, span: mem.span });
+                continue;
+            };
             let max = match &mem.max {
-                Some(op) => match to_u32(op) {
-                    Ok(v) if v < min => {
+                Some(op) => match to_u32(op, diags) {
+                    Some(v) if v < min => {
                         diags.push(env.err(op.span(), format!("memory maximum {v} is below the minimum {min}")));
                         None
                     }
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        diags.push(e);
-                        None
-                    }
+                    other => other,
                 },
                 None => None,
             };
@@ -919,15 +829,15 @@ impl<'a> Unit<'a> {
                 diags.push(env.first_defined(d, first));
                 continue;
             }
-            match env.const_int(&s.size) {
-                Ok(v) if (0..=i128::from(MAX_SCRATCH)).contains(&v) => {
+            match fold.int_now(&env, diags, &s.size) {
+                Some(v) if (0..=i128::from(MAX_SCRATCH)).contains(&v) => {
                     out.scratch = Some(link::ScratchDecl { size: v as u32, span: s.span });
                 }
-                Ok(v) => diags.push(env.err(
+                Some(v) => diags.push(env.err(
                     s.size.span(),
                     format!("scratch size {v} is out of range (0 ..= {MAX_SCRATCH} bytes)"),
                 )),
-                Err(e) => diags.push(e),
+                None => {}
             }
         }
 
@@ -973,7 +883,7 @@ impl<'a> Unit<'a> {
                 || api.is_some_and(|a| a.types.iter().any(|t| t.name == alias.name))
             {
                 Some("a struct")
-            } else if env.values.get(&alias.name).is_some_and(|v| v.kind == VKind::Const) {
+            } else if env.values.get(&alias.name).is_some_and(|v| matches!(v.kind, VKind::Const | VKind::LateConst)) {
                 Some("a constant")
             } else if env.values.contains_key(&alias.name) {
                 Some("a data item")
@@ -1248,7 +1158,7 @@ impl<'a> Unit<'a> {
             });
         }
 
-        let state = State { env, funcs, globals, datas, data_syms, table: tables.first().copied(), aliases };
+        let state = State { env, funcs, globals, datas, data_syms, table: tables.first().copied(), aliases, late };
         (state, out)
     }
 }
@@ -1262,8 +1172,12 @@ impl<'a> link::Unit for Unit<'a> {
         &self.namespace
     }
 
-    fn declare(&mut self, diags: &mut Vec<Diagnostic>) -> link::Decls {
-        let (state, decls) = self.declare_all(diags);
+    fn deps(&self) -> Vec<usize> {
+        self.uses.iter().flatten().copied().collect()
+    }
+
+    fn declare(&mut self, prior: &link::Declared<'_>, diags: &mut Vec<Diagnostic>) -> link::Decls {
+        let (state, decls) = self.declare_all(prior, diags);
         self.state = Some(state);
         decls
     }
@@ -1337,16 +1251,39 @@ impl<'a> link::Unit for Unit<'a> {
                         }
                     }
                     Symbol::Value(v) => {
-                        if !env.values.contains_key(&key) {
-                            let val = match v {
-                                link::ConstValue::Int(n) => Val::Int(n),
-                                link::ConstValue::Float(t) => Val::Float(t),
-                            };
-                            env.value_names.push(key.clone());
-                            env.values.insert(key, ValueInfo { val, span: e.span, kind: VKind::Const });
+                        let val = match v {
+                            link::ConstValue::Int(n) => Val::Int(n),
+                            link::ConstValue::Float(t) => Val::Float(t),
+                        };
+                        match env.values.get_mut(&key) {
+                            // A data address known since the declare phase as a placeholder.
+                            Some(known) if known.kind == VKind::Data => known.val = val,
+                            Some(_) => {}
+                            None => {
+                                env.value_names.push(key.clone());
+                                env.values.insert(key, ValueInfo { val, span: e.span, kind: VKind::Const });
+                            }
                         }
                     }
                     Symbol::Struct(_) => {}
+                }
+            }
+        }
+
+        // The consts that depend on the layout.
+        if !st.late.is_empty() {
+            let mut fold = Fold::after_layout(&st.late);
+            let mut results = Vec::new();
+            for (k, c) in st.late.iter().enumerate() {
+                if let Ok(v) = fold.const_value(env, diags, k) {
+                    results.push((c.name.name.clone(), v));
+                }
+            }
+            for (name, v) in results {
+                if let Some(slot) = env.values.get_mut(&name) {
+                    if slot.kind == VKind::LateConst {
+                        slot.val = v;
+                    }
                 }
             }
         }

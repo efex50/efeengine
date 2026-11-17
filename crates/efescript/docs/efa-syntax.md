@@ -13,7 +13,7 @@ Contents: 1 lexical rules, 2 grammar, 3 top-level items, 4 functions and registe
 5 operand forms per instruction shape, 6 immediates and their types, 7 lowering,
 8 data layout, 9 names and lines, 10 extras, 11 round trip, 12 disassembler output,
 13 diagnostics, 14 decisions beyond the design, 15 complete example, 16 multi-file programs
-and the mod interface (E8).
+and the mod interface (E8), 17 events, 18 constant expressions.
 
 ## 1. Lexical rules
 
@@ -47,8 +47,11 @@ whitespace). Columns count chars (a tab is one column), lines and columns are 1-
 - **Strings**: `"..."` with escapes `\n \t \r \0 \\ \" \xNN` (`\'` is NOT valid in strings),
   unescaped to bytes (non-ASCII chars give their UTF-8 bytes). A string cannot span lines.
 - **Punctuation tokens**: `{ } ( ) [ ] , : = ->`. `->` is one token and wins over `-`.
-  A `-` that does not start a number, `inf`/`nan` or `->` is an error. There is no binary
-  minus: `i64.sub n, n, 1` is just the mnemonic `i64.sub` and three operands.
+- **Operator tokens** (constant expressions, section 18): `+ - * / % & | ^ ~ << >>`. A `-` that
+  touches a digit, `inf` or `nan` is part of the literal (`-5`, `-inf`); any other `-` is the
+  token `Minus`. In a constant expression the parser splits a negative literal that follows an
+  operand into `-` and the number (`4-1` is `4 - 1`). A single `<` or `>` is an error.
+  `i64.sub n, n, 1` is still just the mnemonic `i64.sub` and three operands.
 - **Errors recover**: the bad character or literal is skipped and lexing continues.
 - **Reserved words** (cannot be declared as names of anything): `import memory const global
   table fn export mut reg nregs null db dw dd dq resb i32 i64 f32 f64 inf nan use as pub
@@ -58,7 +61,8 @@ whitespace). Columns count chars (a tab is one column), lines and columns are 1-
 
 Token kinds (`asm::lexer::TokenKind`): `Name(String)`, `Int(i128)`, `Float(String)`,
 `Char(char)`, `Str(Vec<u8>)`, `LBrace RBrace LParen RParen LBracket RBracket Comma Colon
-Equals Arrow Amp Newline Eof` (`Amp` is `&`, section 16.9).
+Equals Arrow Amp Plus Minus Star Slash Percent Pipe Caret Tilde Shl Shr Newline Eof` (`Amp` is
+`&`: the reference sigil of 16.9 and bitwise and in section 18).
 
 ## 2. Grammar
 
@@ -70,13 +74,14 @@ module     = { NL | item } EOF
 item       = import | memory | const | global | table | data | func
 
 import     = "import" QNAME "(" [ type { "," type } ] ")" [ "->" results ] NL
-memory     = "memory" operand [ operand ] NL
-const      = "const" NAME "=" operand NL
-global     = [ "export" ] "global" [ "mut" ] NAME ":" type "=" operand NL
+memory     = "memory" cexpr [ cexpr ] NL
+const      = [ "pub" ] "const" NAME "=" cexpr NL
+global     = [ "export" ] "global" [ "mut" ] NAME ":" type "=" cexpr NL
 table      = "table" "[" [ tentry { "," tentry } ] "]" NL
 tentry     = NAME | "null"
-data       = NAME ( "db" | "dw" | "dd" | "dq" ) operand { "," operand } NL
-           | NAME "resb" operand NL
+data       = NAME ( "db" | "dw" | "dd" | "dq" ) dvalue { "," dvalue } NL
+           | NAME "resb" cexpr NL
+dvalue     = cexpr | STRING
 func       = [ "export" ] "fn" NAME "(" [ param { "," param } ] ")" [ "->" results ] "{" NL
              { stmt } "}" NL
 param      = NAME ":" type
@@ -99,7 +104,14 @@ operand    = NAME                                         (* register, label, fu
 callee     = NAME | INT | CHAR
 tuple      = "(" [ operand { "," operand } ] ")"
 sigres     = type | "(" [ type { "," type } ] ")"
+
+cexpr      = operand-literal-or-name | expression         (* section 18 *)
 ```
+
+`cexpr` replaces `operand` ONLY in: `memory`, `const`, `global` initialisers, `db/dw/dd/dq/resb`
+values, struct field counts `[N]`, `scratch`, the offset (third operand) of a load or store, and
+the value (second operand) of `const.i32/i64/f32/f64`. Instruction source operands stay plain
+operands because a `(` there starts a tuple (`ret (a, b)`).
 
 Disambiguation, in the parser:
 - `NAME`, `INT` or `CHAR` directly followed by `(` (whitespace allowed) is call sugar. The
@@ -126,9 +138,9 @@ only among items of the same kind (function index, global index, data layout, im
 | Item | Syntax | Notes |
 |---|---|---|
 | import | `import ns.name(i64, i64) -> i64` | Split at the LAST dot into namespace and name (builder `import(ns, name, ty)`); a dot is required. Results `-> t` or `-> (t, t)`; none = no results. Imports are function indices `0..` in source order; called with the qualified name `ns.name`. |
-| memory | `memory MIN [MAX]` | Pages of 64 KiB. Integer literals or `const` names, non-negative, fit `u32`. At most one. Default: the pages the data needs, at least 1, no max. Explicit MIN smaller than the data end is an error; MAX < MIN is an error. |
-| const | `const NAME = 123` | Value is ONE literal: integer, float or character (no names, no arithmetic). A character is an integer constant. |
-| global | `global NAME: i64 = 0`, `global mut NAME: f64 = 1.5`, `export global [mut] NAME: T = v` | Init is a literal, a `const`, a data symbol or `NAME.len`, typed as the global's type (6). `export` exports it under NAME. |
+| memory | `memory MIN [MAX]` | Pages of 64 KiB. Integer constant expressions (18), non-negative, fit `u32`. At most one. Default: the pages the data needs, at least 1, no max. Explicit MIN smaller than the data end is an error; MAX < MIN is an error. |
+| const | `const NAME = 123`, `const AREA = W * H` | A literal (integer, float or character) or a constant expression (18): arithmetic over literals and other consts, data lengths and struct constants, in any declaration order. A character is an integer constant. A const that uses another file's `pub const` works too (18.4). |
+| global | `global NAME: i64 = 0`, `global mut NAME: f64 = 1.5`, `export global [mut] NAME: T = v` | Init is a literal, a `const`, a data symbol or `NAME.len`, or a constant expression (18), typed as the global's type (6). `export` exports it under NAME. |
 | table | `table [f1, null, f2]` | Entries are functions/imports (`std.println`) or `null` (unset). At most one. Index 0.. in order. |
 | data | `NAME db "text", 10, 0xff`; `NAME dw 1, 2`; `NAME dd 1, 2.5`; `NAME dq 1, -0.5`; `NAME resb 64` | See 8. Needs at least one value (`resb` exactly one count). |
 | fn | `fn NAME(a: i64, b: f64) -> i64 { ... }`, `export fn ...` | `export` exports it under NAME. Parameters are `name: type`. |
@@ -244,8 +256,8 @@ Details:
 
 ## 6. Immediates and their types
 
-An immediate (integer, float, character, `const` name, data symbol, `NAME.len`) in a source
-position is loaded into a hidden temporary with a constant of the type the position expects.
+An immediate (integer, float, character, `const` name, data symbol, `NAME.len`; in the
+positions of 18.1 also a constant expression) in a source position is loaded into a hidden temporary with a constant of the type the position expects.
 `const.T d, imm` loads directly. Never in a destination position (error).
 
 Slot type per mnemonic (the type of the SOURCE operands):
@@ -384,7 +396,8 @@ and column of its mnemonic (for `ret`, `call`, ...).
 - `table [f, null, g]`: `null` leaves an entry unset.
 - `export global [mut] NAME: T = v`.
 - `dd` / `dq` accept float literals (f32 / f64 bits); `dw`/`dd`/`dq`/`db` values accept
-  integer literals, characters, consts and data symbols. No arithmetic expressions anywhere.
+  integer literals, characters, consts and data symbols, or constant expressions (18). Instruction
+  source operands take no expressions.
 - `nan:0x...` exact-bits float literal.
 
 ## 11. Round trip
@@ -888,8 +901,8 @@ provide   = "provide" NAME "(" [ aparam { "," aparam } ] ")"
 aparam    = NAME ":" atype
 atype     = "i32" | "i64" | "f32" | "f64" | "bool" | "entity" | "str" | "bytes" | "&" NAME
 struct    = [ "pub" | "export" ] "struct" NAME [ "," STRING ] "{" NL { field } "}" NL
-field     = NAME ":" NAME [ "[" operand "]" ] [ "," STRING ] NL
-scratch   = "scratch" operand NL
+field     = NAME ":" NAME [ "[" cexpr "]" ] [ "," STRING ] NL
+scratch   = "scratch" cexpr NL
 func, const, global, data: may start with "pub"
 ```
 
@@ -1034,3 +1047,100 @@ provide_event = "provide" "event" NAME "(" [ "&" NAME ] ")" "," STRING NL
 `provide` when a name follows. `import event.ping(i32)` (a function in namespace `event`),
 `provide event(...)` (a provide called `event`), and `event` as a label, register, const or data
 name keep their meaning. The reserved-word list of 16.9 is unchanged.
+
+## 18. Constant expressions
+
+A constant expression computes a number while the file is assembled. It is a literal or a name
+as before, or an arithmetic expression over them. The parser hands the tokens to the workspace
+crate `calc` (`crates/calc`), which parses and evaluates them.
+
+### 18.1 Where
+
+Only in these positions (a lone literal or name is parsed exactly as before):
+
+1. `const NAME = expr` and `pub const NAME = expr`;
+2. the offset (third operand) of a load or store: `f32.load y, p, 4 * 2`;
+3. `resb N` and the values of `db dw dd dq` (a string stays a string);
+4. `memory MIN [MAX]` (the two operands are separated by whitespace: `memory 1 + 1 2 * 4`; use
+   parentheses to be clear: `memory (1 + 1) (2 * 4)`);
+5. `global NAME: T = expr`;
+6. struct field array counts `a: u8[N * 2]`, and `scratch N`;
+7. the value of `const.T d, expr`.
+
+Not in instruction source operands, call arguments, `nregs`, `table`: a `(` there starts a tuple
+or a signature, and a source is a register or one literal. The expression ends at the first
+token that cannot continue it: a `,`, `]`, the end of the line, or an operand that follows an
+operand (`memory 1 2` is two expressions).
+
+### 18.2 Syntax and precedence
+
+Operands: integers, characters (an integer), floats (`1.5`, `inf`, `nan`; not `nan:0x...`, which
+is an exact bit pattern and is only allowed alone), names, and parenthesised expressions.
+Unary `-` and `~` bind tightest; the binary operators, from tight to loose, all left
+associative (C and Rust order):
+
+| Level | Operators |
+|---|---|
+| 1 | unary `-`, `~` |
+| 2 | `*` `/` `%` |
+| 3 | `+` `-` |
+| 4 | `<<` `>>` |
+| 5 | `&` |
+| 6 | `^` |
+| 7 | `\|` |
+
+`1 << 2 + 1` is `1 << 3`; `1 | 6 & 3 ^ 1` is `1 | ((6 & 3) ^ 1)`. Comparisons and `&&`/`||` are
+lexed by `calc` but not by `.efa`, and a truth value is never a constant here. `5-3`, `5 -3` and
+`5 - 3` are all subtractions (a negative literal right after an operand is split into `-` and
+the number); `5 - -3` is 8. Because of that, a `memory MIN MAX` whose MAX starts with `-` is read
+as one subtraction (a negative maximum is an error anyway). An expression has at most 1000
+tokens.
+
+### 18.3 Values and typing
+
+Integers are computed in `i128` with checked arithmetic, floats in `f64`; an integer mixed with a
+float is converted to float. `/` and `%` on two integers truncate toward zero (`7 / 2` is 3).
+The result is **folded wide, then narrowed at the use site**: the same rules as for a literal
+of section 6 apply to it (`i32` slot: `-2^31 ..= 2^32-1`; a float result in an integer slot is
+an error; an integer result in a float slot is converted; a byte of `db` is `-128 ..= 255`;
+`memory`, `resb`, counts and offsets must fit their own ranges). So `const.i32 d, 1 << 40` is
+"integer 1099511627776 does not fit in i32", while `const.i64 d, 1 << 40` is fine. A float result
+is handed on as its `f64` text (shortest text that round-trips) and parsed again as `f32` or
+`f64`, so `const.f32 d, 0.1 + 0.2` is `0.30000000000000004` rounded to `f32`. A lone float
+literal never goes through `f64`: it is parsed straight as `f32` or `f64` as before.
+
+Errors, each at the span of the offending operation or name: `overflow` (`i128`, or
+`1 << 200`), `division by zero` (also for floats), a type error (`1.5 << 2`: a float operand of a
+bitwise operator), `unknown constant X`, an incomplete or unbalanced expression, a cycle
+(```` `A` is defined in terms of itself ```` with the note `cycle: A -> B -> A`, reported at the
+use that closes the cycle), and the usual out-of-range and float-in-integer-slot errors of the
+use site, whose span is the whole expression. A const that failed does not make its users fail
+again.
+
+### 18.4 Names
+
+An expression may use: consts of the file (declared before or after: they are evaluated on
+demand, so there is no order); `NAME.len`; struct constants `S.size S.align S.<field>`
+(`S.id` of an API struct) of the file or the API index; a field-array length may use a const that
+uses `S.size` of another struct; and `alias.NAME` of the `pub` consts, `pub` structs and `pub`
+data lengths of a used file (16.3). A non-`pub` name of another file is the usual "private"
+error. Other files are declared before the files that `use` them, so their `pub const`
+values are known when this file is declared (a `use` cycle is cut at the back edge).
+
+A **data symbol** (`msg`, `alias.msg`) or an **event id** (`ns.name.id`) is a number the linker
+decides. It may be used in an expression where the value is only emitted: instruction
+immediates, offsets, `global` initial values, `db/dw/dd/dq` values, and `const`s used only
+there (such a const is computed after the layout). It cannot be used where the layout itself
+needs a number: `memory`, `scratch`, `resb`, struct array counts, and `pub const` (another file
+may be declared before this one has an address). The error names the root: ``` `E` depends on
+`msg` (a data address), which is only known when the program is linked; it cannot be used here ```.
+
+### 18.5 Implementation
+
+`asm::parser` (`const_operand`) converts the efa tokens of the expression into `calc` tokens
+with synthetic byte offsets (token `k` is `k..k+1`) and drives `calc::Parser` to parse one
+expression and stop. The AST keeps `Operand::Expr(Box<ConstExpr>)`: the `calc::Expr` plus a table
+`spans[k]` back to the file's line/column spans, so every `calc` error span maps to a source span.
+Evaluation is in `asm::lower::consts`: `Fold` evaluates consts, struct layouts and data sizes on
+demand during `declare` (cycle-checked), late consts in `resolve`, and everything else
+(instruction immediates, globals, data bytes) calls `Env::eval_known` with the final names.

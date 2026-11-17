@@ -666,8 +666,11 @@ msg.len)` where `msg db "hello"` declares the bytes and `msg.len` is their size.
 - **Memory is not where you think.** The first data item is at address 1024. Addresses
   below that are valid memory too, but nothing is there. Going past the end of the memory
   traps, so a loop that walks too far ends with "out of bounds memory access".
-- **`const` is one literal.** `const N = 4 * 8` is not allowed; there is no arithmetic in
-  the assembler.
+- **Constant expressions are computed by the assembler, not the machine.** `const N = 4 * 8`
+  works, and so do `memory`, `resb`, `global` initial values, `db`/`dd` values, load and store
+  offsets and `const.i32 d, 1 << 4`. An instruction source operand does not: `i64.add d, a, 2 + 3`
+  is an error (write `5`, or a const). Integer division in an expression truncates (`7 / 2` is 3);
+  see efa-syntax section 18.
 - **Calls and `r` registers.** If you mention a high raw register like `r9` anywhere, the
   assembler's hidden temporaries start above it. That is fine, but avoid reusing the window
   registers of a raw `call` for something else while a call is pending.
