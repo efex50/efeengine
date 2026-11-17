@@ -170,6 +170,13 @@ Semantics (each one has a test):
 11. Touch `Started`/`Moved` upsert, `Ended`/`Cancelled` remove.
 12. `Window(Resized | ScaleFactorChanged | CloseRequested)` do not change `InputState` (the engine handles them).
 
+UI capture (added later): `InputState::set_capture(InputCapture { pointer, keyboard })` /
+`capture()` (settable through `&InputState`; persists until set again, a UI plugin sets it each
+frame). Raw queries are unchanged; `InputState::game_input()` (also `Ctx::game_input()` /
+`ParCtx::game_input()`) returns a `GameInput` view with the same key / mouse / wheel / text
+queries that reports not pressed, no movement, `None` position and empty text for a captured
+device. Code in `input/capture.rs`.
+
 ## 4. Engine-owned input path (1.5)
 
 - `InnerWindow::poll_events(&mut self, out: &mut Vec<InputEvent>)`; same change on the

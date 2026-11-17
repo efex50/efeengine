@@ -135,6 +135,14 @@ its first run, so the first run sees everything as new) and a `this_run`.
   passes it next frame. Buffered `set`s are applied after the stage, so a module's own writes
   show as changed on the next frame.
 * The world clamps old ticks once per frame (`maybe_check_change_ticks`), so wrapping is safe.
+* **Resources** carry a `changed` tick too (`Resources::changed_tick::<T>()`, set on `insert`).
+  `ResMut` stamps its system's `this_run` on **`DerefMut`**, not on the borrow, so a read-only
+  `res_mut` is not a change; `Resources::get_mut` / `get_or_insert_with` (a bare `&mut T`) count
+  immediately, stamped with the tick the engine keeps in sync (`Resources::set_tick`: the
+  exclusive system's `this_run`; `Engine::insert_resource` / `resources_mut` bump the world tick).
+  `Ctx::res_changed::<T>()` / `ParCtx::res_changed::<T>()` mean "changed since this system last
+  ran" (own writes included, like components); `Engine::res_changed::<T>(since)` takes an explicit
+  tick. `Resources::check_ticks` clamps old resource ticks once per frame next to the world's.
 
 ## Spawn pools
 

@@ -889,6 +889,8 @@ impl Engine {
     }
 
     pub fn insert_resource<T: Send + Sync + 'static>(&mut self, value: T) -> &mut Self {
+        let tick = self.state.world.increment_change_tick();
+        self.state.resources.set_tick(tick);
         self.state.resources.insert(value);
         self
     }
@@ -897,8 +899,18 @@ impl Engine {
         &self.state.resources
     }
 
+    /// Exclusive access to the resources. Advances the world's change tick (like applying
+    /// commands does), so writes through it are newer than any tick saved before the call.
     pub fn resources_mut(&mut self) -> &mut Resources {
+        let tick = self.state.world.increment_change_tick();
+        self.state.resources.set_tick(tick);
         &mut self.state.resources
+    }
+
+    /// Whether resource `T` was inserted or changed after `since` (e.g. a tick saved from
+    /// [`change_tick`](Self::change_tick) earlier); `false` if missing.
+    pub fn res_changed<T: Send + Sync + 'static>(&self, since: hecs::Tick) -> bool {
+        self.state.resources.is_changed::<T>(since, self.state.world.change_tick())
     }
 
     /// The texture store. Changes made here reach the renderer through `RenderFrame::textures`.
@@ -1059,7 +1071,8 @@ impl Engine {
     fn apply_commands(&mut self) {
         // One tick for everything applied: newer than every system of the stage, so each of
         // them (the one that queued it included) sees it as added/changed on its next run.
-        self.state.world.increment_change_tick();
+        let tick = self.state.world.increment_change_tick();
+        self.state.resources.set_tick(tick);
         self.commands.apply(&mut self.state.world, &self.state.types);
         let sched = self.commands.take_sched();
         if !sched.is_empty() {
@@ -1281,6 +1294,7 @@ impl Engine {
         }
 
         self.state.world.maybe_check_change_ticks();
+        self.state.resources.check_ticks(self.state.world.change_tick());
         self.render_frame_to_surface();
     }
 

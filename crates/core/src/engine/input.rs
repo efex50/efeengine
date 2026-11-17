@@ -4,11 +4,13 @@
 //! folds them into queryable per-frame state. Nothing here depends on a
 //! windowing system.
 
+pub mod capture;
 pub mod events;
 pub mod gamepad;
 pub mod keys;
 pub mod state;
 
+pub use capture::{GameInput, InputCapture};
 pub use events::*;
 pub use gamepad::*;
 pub use keys::*;

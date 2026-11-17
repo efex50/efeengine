@@ -28,7 +28,7 @@ pub mod input {
     //! The input types: events, keys, modifiers, mouse and gamepads.
     pub use crate::engine::input::{
         InputEvent, InputEventKind, WindowEvent, WindowId, WheelUnit, TouchPhase, NamedKey, Modifiers, ElementState,
-        InputState, GamepadState, Gamepad, GamepadId, GamepadButton, GamepadAxis, WHEEL_PIXELS_PER_LINE, WHEEL_LINES_PER_PAGE,
+        InputState, InputCapture, GameInput, GamepadState, Gamepad, GamepadId, GamepadButton, GamepadAxis, WHEEL_PIXELS_PER_LINE, WHEEL_LINES_PER_PAGE,
         Key, KeyCode, MouseButton,
     };
 }

@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use super::capture::{CaptureCell, GameInput, InputCapture};
 use super::events::{InputEvent, InputEventKind, TouchPhase, WheelUnit, WindowEvent};
 use super::keys::{ElementState, KeyCode, Modifiers, MouseButton};
 
@@ -26,6 +27,7 @@ pub struct InputState {
     modifiers: Modifiers,
     focused: bool,
     events: Vec<InputEvent>,
+    capture: CaptureCell,
 }
 
 impl Default for InputState {
@@ -51,6 +53,7 @@ impl InputState {
             modifiers: Modifiers::NONE,
             focused: true,
             events: Vec::new(),
+            capture: CaptureCell::default(),
         }
     }
 
@@ -146,6 +149,17 @@ impl InputState {
             },
         }
     }
+
+    /// The UI capture flags (default: nothing captured). Persist until set again; a UI plugin
+    /// sets them every frame. They do not affect the raw queries of this type.
+    pub fn capture(&self) -> InputCapture { self.capture.get() }
+
+    /// Sets the UI capture flags (callable through `&InputState`, e.g. from `cx.input`).
+    pub fn set_capture(&self, c: InputCapture) { self.capture.set(c) }
+
+    /// A view with the key / mouse queries filtered by the capture flags: a captured device
+    /// reports nothing pressed and no movement. Game code should read input through this.
+    pub fn game_input(&self) -> GameInput<'_> { GameInput::new(self) }
 
     pub fn pressed(&self, k: KeyCode) -> bool { self.held.contains(&k) }
     pub fn just_pressed(&self, k: KeyCode) -> bool { self.just_pressed.contains(&k) }
@@ -336,6 +350,35 @@ mod tests {
         s.apply(&ev(InputEventKind::Window(WindowEvent::CloseRequested)));
         assert!(s.pressed(KeyCode::A) && s.focused());
         assert_eq!(s.events().len(), 4);
+    }
+
+    #[test]
+    fn capture_filters_game_input_only() {
+        use super::super::capture::InputCapture;
+        let mut s = InputState::new();
+        s.apply(&press(KeyCode::A));
+        s.apply(&mbtn(MouseButton::Left, ElementState::Pressed));
+        s.apply(&wheel((0.0, 2.0), WheelUnit::Line));
+        s.apply(&ev(InputEventKind::MouseMotion { pos: (3.0, 4.0), delta: (1.0, 1.0) }));
+        assert_eq!(s.capture(), InputCapture::default());
+        let g = s.game_input();
+        assert!(g.pressed(KeyCode::A) && g.just_pressed(KeyCode::A));
+        assert!(g.mouse_pressed(MouseButton::Left) && g.mouse_just_pressed(MouseButton::Left));
+        assert_eq!(g.wheel(), (0.0, 2.0));
+        assert_eq!(g.mouse_delta(), (1.0, 1.0));
+
+        s.set_capture(InputCapture { pointer: true, keyboard: false });
+        let g = s.game_input();
+        assert!(g.pressed(KeyCode::A));
+        assert!(!g.mouse_pressed(MouseButton::Left) && !g.mouse_just_pressed(MouseButton::Left));
+        assert_eq!((g.wheel(), g.mouse_delta(), g.mouse_pos()), (((0.0, 0.0)), (0.0, 0.0), None));
+        assert!(s.mouse_pressed(MouseButton::Left), "raw unchanged");
+
+        s.set_capture(InputCapture { pointer: false, keyboard: true });
+        let g = s.game_input();
+        assert!(!g.pressed(KeyCode::A) && !g.just_pressed(KeyCode::A) && !g.any_pressed());
+        assert!(g.mouse_pressed(MouseButton::Left));
+        assert!(s.pressed(KeyCode::A), "raw unchanged");
     }
 
     #[test]

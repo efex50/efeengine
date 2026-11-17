@@ -471,7 +471,18 @@ impl<'a> ParCtx<'a> {
     /// Like [`res_mut`](Self::res_mut); `None` if the resource is missing.
     pub fn try_res_mut<T: Send + Sync + 'static>(&self) -> Option<ResMut<'_, T>> {
         self.check_res(TypeId::of::<T>(), true);
-        self.resources.write::<T>()
+        self.resources.write::<T>(self.this_run)
+    }
+
+    /// Input filtered by the UI capture flags ([`InputState::game_input`]).
+    pub fn game_input(&self) -> crate::engine::input::GameInput<'_> {
+        self.input.game_input()
+    }
+
+    /// Whether resource `T` was inserted or mutably dereferenced since this system's last run
+    /// (`false` if missing). Not checked against the declared [`Access`].
+    pub fn res_changed<T: Send + Sync + 'static>(&self) -> bool {
+        self.resources.is_changed::<T>(self.last_run, self.this_run)
     }
 
     /// Events of type `T` readable this frame.

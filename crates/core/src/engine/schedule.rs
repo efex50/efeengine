@@ -128,6 +128,18 @@ impl<'a> Ctx<'a> {
         self.world.is_changed::<T>(e, self.last_run).unwrap_or(false)
     }
 
+    /// Input filtered by the UI capture flags ([`InputState::game_input`]).
+    pub fn game_input(&self) -> crate::engine::input::GameInput<'_> {
+        self.input.game_input()
+    }
+
+    /// Whether resource `T` was inserted or changed since this system's last run (`false` if
+    /// missing). Changes are `ResMut` mutable derefs (parallel systems) and `Resources::get_mut`
+    /// / `insert` (exclusive code).
+    pub fn res_changed<T: Send + Sync + 'static>(&self) -> bool {
+        self.resources.is_changed::<T>(self.last_run, self.this_run)
+    }
+
     /// The bytes of the mod-defined component `type_id` (an id from the [`TypeRegistry`], e.g.
     /// `types.by_name("mod:coins/Health")`) of `e`. Holds a shared column borrow until dropped.
     /// Use [`TypeRegistry::view`] for field access by name.
@@ -598,6 +610,7 @@ impl Schedule {
                 let this_run = cx.world.increment_change_tick();
                 cx.last_run = members[0].last_run;
                 cx.this_run = this_run;
+                cx.resources.set_tick(this_run);
                 f(cx);
                 members[0].last_run = this_run;
                 continue;

@@ -30,20 +30,21 @@ crates/core
         ├── config.rs     EngineConfig (title, size, vsync, fixed_dt, max_fps, threads, canvas_id, headless; merge with startup config, validate), StartupConfig / GraphicsBackend, set_startup_config, startup_config (set from JS on the web)
         ├── error.rs      EngineError (Window / Graphics / Config / ThreadPool, via thiserror), EngineResult
         ├── time.rs       Time: clamped delta, elapsed, frame counter, fixed-step accumulator and alpha
-        ├── resources.rs  Resources: type map (one value per `'static` type)
+        ├── resources.rs  Resources: type map (one value per `'static` type); per-resource `changed` tick (`changed_tick`, `is_changed`, `set_tick`, `check_ticks`; `ResMut` stamps on DerefMut)
         ├── events.rs     Events<T> (double-buffered typed queue) and EventRegistry (all `Events<T>`, type-erased)
-        ├── parallel.rs   Executor (run tasks on the caller plus pool helpers; the only `unsafe` of the scheduler), Access (declared component/resource reads and writes, `conflicts`), ParCtx (checked query/get/res/res_mut/events/send/commands, `par_for_each`, `last_run()` / `this_run()`; its queries carry the system's change ticks), ParCommands; see `docs/THREADING.md` and `docs/PARALLEL_SPEC.md`
+        ├── parallel.rs   Executor (run tasks on the caller plus pool helpers; the only `unsafe` of the scheduler), Access (declared component/resource reads and writes, `conflicts`), ParCtx (checked query/get/res/res_mut/events/send/commands, `par_for_each`, `last_run()` / `this_run()`, `res_changed`, `game_input`; its queries carry the system's change ticks), ParCommands; see `docs/THREADING.md` and `docs/PARALLEL_SPEC.md`
         ├── schedule.rs   Stage, Schedule (systems sorted by `(order, registration index)`, then batched by access over the active systems; lazy sort), `SystemEntry` handle (`.order(n)`, `.name(..)`, `.enabled(bool)`, `.run_if(cond)` with the read-only `RunCtx`), deferred schedule edits (`Ctx::schedule()` / `ParCommands::schedule()` -> `ScheduleCommands`: add, set_enabled, remove, applied at the end of the stage after Commands), `ScheduleError`; see `docs/SYSTEMS.md`, Ctx (what systems get; `Ctx::spawn`, change detection: `last_run()`, `this_run()`, `query::<Q>()` with the system's ticks, `changed::<T>(e)`; each `Sys` keeps its `last_run`, par batch ticks are assigned in sorted order); re-exports the commands types
         ├── order.rs      order-number constants (`INPUT` -1000, `EARLY`, `SCRIPTS`, `USER` 0, `PHYSICS` 500, `TRANSFORM` 900, `LATE`); re-exported as `efeengine_core::order`
         ├── plugin.rs     `Plugin` trait (name, dependencies, build) and `PluginError`; `Engine::add_plugin` / `has_plugin` / `plugins` (`PluginError::Closed` once the game loop started)
         ├── commands.rs   Commands (alias EngineCommands): control requests + queued world ops, `apply`, `append`
         ├── components.rs Transform, Velocity, MeshHandle (repr(C), Pod, ScriptType), Name (Rust-only)
         ├── types.rs      ScriptType / ScriptField traits, TypeRegistry, TypeEntry (byte read/write/insert/remove/has, `component_id(&World) -> Option<ComponentId>`), CompError, TypeError, entity_to_bits / entity_from_bits
-        ├── input.rs      declares and re-exports the three modules below
+        ├── input.rs      declares and re-exports the modules below
         ├── input
         │   ├── keys.rs     KeyCode (physical), Key / NamedKey (logical), Modifiers, ElementState, MouseButton
         │   ├── events.rs   InputEvent, InputEventKind, WindowEvent, WindowId, WheelUnit, TouchPhase
         │   ├── gamepad.rs  GamepadState (per-frame snapshot of pads), GamepadId, GamepadButton, GamepadAxis (not in InputEventKind)
+        │   ├── capture.rs  InputCapture (`pointer`/`keyboard` UI capture flags), GameInput (filtered view from `InputState::game_input()`)
         │   └── state.rs    InputState: held / just_pressed / just_released, mouse, wheel, touches, text, focus (unit tests)
         ├── flags.rs      `enum Flags { Flag(String) }` placeholder, unused
         ├── messages.rs   global flume message queue, `Message` enum (control commands only), wasm `send_message`
