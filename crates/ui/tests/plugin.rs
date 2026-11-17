@@ -526,3 +526,48 @@ fn bindings_resource_tick_does_not_move_every_frame() {
     let v = ticks.borrow().clone();
     assert!(v[2..].iter().all(|c| !c), "UiBindings tick moved every frame: {v:?}");
 }
+
+// ----- review regressions ---------------------------------------------------------------------
+
+#[test]
+fn signals_below_a_visible_modal_layer_are_dropped() {
+    let mut t = UiTest::new(|_| {});
+    let r = root(&mut t);
+    t.ui_mut().button(r, "under").key("under");
+    let modal = t.ui_mut().layer("modal", Layer::centered(10).modal());
+    t.ui_mut().button(modal, "over").key("over");
+    let above = t.ui_mut().layer("above", Layer::centered(20));
+    t.ui_mut().button(above, "top").key("top");
+    let log = recorder(&mut t);
+    t.click("under");
+    t.click("over");
+    t.click("top");
+    t.step(1);
+    let keys: Vec<String> = log.borrow().iter().map(|s| s.key_kind().0.to_string()).collect();
+    assert_eq!(keys, ["over", "top"]);
+    // hidden modal: nothing blocked
+    let m = t.id("modal");
+    t.ui_mut().set_visible(m, false);
+    t.click("under");
+    t.step(1);
+    assert_eq!(log.borrow().last().unwrap().key_kind().0, "under");
+}
+
+#[test]
+fn blur_passes_for_disabled_or_hidden_widgets() {
+    let mut t = UiTest::new(|_| {});
+    let r = root(&mut t);
+    t.ui_mut().text_input(r, "").key("in");
+    let log = recorder(&mut t);
+    let id = t.id("in");
+    t.ui_mut().set_enabled(id, false);
+    t.focus("in", true);
+    t.focus("in", false);
+    t.step(1);
+    assert_eq!(log.borrow().iter().map(|s| s.kind.clone()).collect::<Vec<_>>(), vec![UiSignalKind::Focus(false)]);
+    t.ui_mut().set_enabled(id, true);
+    t.ui_mut().set_visible(id, false);
+    t.focus("in", false);
+    t.step(1);
+    assert_eq!(log.borrow().len(), 2);
+}

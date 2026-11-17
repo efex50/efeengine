@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use crate::bindings::{Bind, BindTarget, BoundValue, Erased, TextSrc};
 use crate::id::{Owner, WidgetId};
 use crate::journal::UiChange;
-use crate::node::{ClassId, ImageFit, Layer, Node, NodeKind};
+use crate::node::{ClassId, ImageFit, Layer, Node, NodeKind, clamp_slider};
 use crate::signal::UiValue;
 use crate::style::*;
 use crate::theme::{Theme, WidgetState};
@@ -52,6 +52,7 @@ pub struct UiTree {
     slots: Vec<Slot>,
     free: Vec<u32>,
     len: usize,
+    next_seq: u64,
     keys: HashMap<Arc<str>, WidgetId>,
     class_ids: HashMap<Arc<str>, ClassId>,
     class_names: Vec<Arc<str>>,
@@ -77,6 +78,7 @@ impl UiTree {
             slots: Vec::new(),
             free: Vec::new(),
             len: 0,
+            next_seq: 0,
             keys: HashMap::new(),
             class_ids: HashMap::new(),
             class_names: Vec::new(),
@@ -204,14 +206,20 @@ impl UiTree {
 
     /// The layer roots, lowest z first (creation order for equal z).
     pub fn layers(&self) -> Vec<WidgetId> {
-        let mut v: Vec<(i32, WidgetId)> = self.iter().filter_map(|(id, n)| n.layer.map(|l| (l.z, id))).collect();
-        v.sort_by_key(|(z, id)| (*z, id.index));
-        v.into_iter().map(|(_, id)| id).collect()
+        let mut v: Vec<(i32, u64, WidgetId)> = self.iter().filter_map(|(id, n)| n.layer.map(|l| (l.z, n.seq, id))).collect();
+        v.sort_by_key(|(z, seq, _)| (*z, *seq));
+        v.into_iter().map(|(_, _, id)| id).collect()
     }
 
     /// `true` if a visible modal layer exists.
     pub fn modal_active(&self) -> bool {
         self.iter().any(|(id, n)| n.layer.is_some_and(|l| l.modal) && n.visible && self.is_shown(id))
+    }
+
+    /// `true` if a visible modal layer sits above the layer `id` lives on (higher `z`).
+    pub fn is_below_modal(&self, id: WidgetId) -> bool {
+        let Some(z) = self.layer_of(id).and_then(|l| self.get(l)).and_then(|n| n.layer).map(|l| l.z) else { return false };
+        self.iter().any(|(m, n)| n.layer.is_some_and(|l| l.modal && l.z > z) && self.is_shown(m))
     }
 
     /// All nodes under `id`, depth first, `id` itself first (empty for a stale id).
@@ -239,7 +247,11 @@ impl UiTree {
 
     /// The node with string key `key`.
     pub fn find(&self, key: &str) -> Option<WidgetId> {
-        self.keys.get(key).copied()
+        let id = self.keys.get(key).copied()?;
+        // Invariant: `remove` drops the key of every node it frees, so the table never holds a
+        // dead id. Checked anyway: a stale entry must never be handed out.
+        debug_assert!(self.contains(id), "key table holds a dead id for `{key}`");
+        self.contains(id).then_some(id)
     }
 
     pub fn key_of(&self, id: WidgetId) -> Option<&str> {
@@ -344,9 +356,42 @@ impl UiTree {
     }
 
     /// Takes the journal (the UI plugin does this once per frame before `sync`).
+    ///
+    /// `Moved` entries are coalesced here: one per node (the last one's place in the journal),
+    /// rewritten to the node's final parent and index, so every `index` is valid against the
+    /// final tree whatever moves, inserts and removals came after the entry was written (see
+    /// [`UiChange`]).
     pub fn take_changes(&mut self) -> Vec<UiChange> {
         self.fresh.clear();
-        std::mem::take(&mut self.journal)
+        let mut journal = std::mem::take(&mut self.journal);
+        let mut last: HashMap<WidgetId, usize> = HashMap::new();
+        for (i, c) in journal.iter().enumerate() {
+            if let UiChange::Moved { id, .. } = c {
+                last.insert(*id, i);
+            }
+        }
+        if !last.is_empty() {
+            let mut i = 0;
+            journal.retain_mut(|c| {
+                let keep = match c {
+                    UiChange::Moved { id, parent, index } => {
+                        if last.get(id) != Some(&i) {
+                            false
+                        } else if let Some(p) = self.get(*id).and_then(|n| n.parent) {
+                            *parent = p;
+                            *index = self.get(p).and_then(|pn| pn.children.iter().position(|c| c == id)).unwrap_or(0) as u32;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => true,
+                };
+                i += 1;
+                keep
+            });
+        }
+        journal
     }
 
     /// Whether the bindings system has anything to absorb (new registrations or removed ids).
@@ -361,8 +406,10 @@ impl UiTree {
 
     // ----- creation --------------------------------------------------------------------------
 
-    fn alloc(&mut self, node: Node) -> WidgetId {
+    fn alloc(&mut self, mut node: Node) -> WidgetId {
         self.len += 1;
+        node.seq = self.next_seq;
+        self.next_seq += 1;
         if let Some(i) = self.free.pop() {
             let slot = &mut self.slots[i as usize];
             slot.node = Some(node);
@@ -604,7 +651,8 @@ impl UiTree {
 
     /// Replaces the kind data. The node kind (`KindTag`) must stay the same (a different kind
     /// means remove and create).
-    pub fn set_kind(&mut self, id: WidgetId, kind: NodeKind) -> Result<(), TreeError> {
+    pub fn set_kind(&mut self, id: WidgetId, mut kind: NodeKind) -> Result<(), TreeError> {
+        kind.normalize();
         let node = self.get_mut(id).ok_or(TreeError::Stale)?;
         if node.kind.tag() != kind.tag() {
             return Err(TreeError::KindMismatch);
@@ -638,6 +686,7 @@ impl UiTree {
             node.kind = old;
             return false;
         }
+        node.kind.normalize();
         if node.kind != old {
             self.push(UiChange::Kind(id));
         }
@@ -662,11 +711,14 @@ impl UiTree {
         true
     }
 
-    /// Opts the node in or out of `Hover` signals. No journal entry (backends read the flag
-    /// from the node when they create it, and again on `Kind`).
+    /// Opts the node in or out of `Hover` signals. One `HoverSignals` entry if the flag changed
+    /// (a node created this frame is covered by `Created`).
     pub fn set_hover_signals(&mut self, id: WidgetId, on: bool) -> bool {
         let Some(n) = self.get_mut(id) else { return false };
-        n.hover_signals = on;
+        if n.hover_signals != on {
+            n.hover_signals = on;
+            self.push(UiChange::HoverSignals(id));
+        }
         true
     }
 
@@ -818,7 +870,7 @@ impl UiTree {
 fn sanitize(kind: &NodeKind, v: UiValue) -> Option<UiValue> {
     match (kind, v) {
         (NodeKind::Checkbox { .. }, UiValue::Bool(b)) => Some(UiValue::Bool(b)),
-        (NodeKind::Slider { min, max, .. }, UiValue::F32(x)) if !x.is_nan() => Some(UiValue::F32(x.clamp(*min, *max))),
+        (NodeKind::Slider { min, max, .. }, UiValue::F32(x)) if !x.is_nan() => Some(UiValue::F32(clamp_slider(*min, *max, x))),
         (NodeKind::TextInput { max_len, .. }, UiValue::Text(t)) => {
             let t = if *max_len > 0 && t.chars().count() > *max_len as usize { t.chars().take(*max_len as usize).collect() } else { t };
             Some(UiValue::Text(t))

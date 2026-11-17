@@ -28,19 +28,6 @@ impl StateStyles {
     pub fn normal(style: Style) -> Self {
         Self { normal: style, ..Default::default() }
     }
-
-    /// The state styles that apply for `state`, in override order: hovered, pressed, focused,
-    /// disabled (a later one wins).
-    fn active(&self, state: WidgetState) -> impl Iterator<Item = &Style> {
-        [
-            state.hovered.then_some(&self.hovered),
-            state.pressed.then_some(&self.pressed),
-            state.focused.then_some(&self.focused),
-            state.disabled.then_some(&self.disabled),
-        ]
-        .into_iter()
-        .flatten()
-    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -81,8 +68,10 @@ impl Theme {
     /// interaction `state`.
     ///
     /// Order, later wins: `base`, the kind's `normal`, each class's `normal`, the inline style;
-    /// then the state styles (hovered, pressed, focused, disabled, those that are active) of the
-    /// kind and of each class, on top of everything including the inline style.
+    /// then the active state styles on top of everything including the inline style, state by
+    /// state in the order hovered, pressed, focused, disabled (for each state the kind's style,
+    /// then each class's). So a later state beats an earlier one across kind and classes:
+    /// `disabled` always wins.
     pub fn resolve<'a>(&self, kind: KindTag, classes: impl IntoIterator<Item = &'a str> + Clone, inline: &Style, state: WidgetState) -> Style {
         let kind_styles = self.kinds.get(&kind);
         let mut out = self.base;
@@ -95,15 +84,25 @@ impl Theme {
             }
         }
         out.merge(inline);
-        if let Some(k) = kind_styles {
-            for s in k.active(state) {
-                out.merge(s);
+        // State layers on top of everything, one state at a time (hovered, pressed, focused,
+        // disabled), the kind's before the classes': a later state always beats an earlier one,
+        // whoever defines it, so `disabled` wins.
+        let layers: [(bool, fn(&StateStyles) -> &Style); 4] = [
+            (state.hovered, |s| &s.hovered),
+            (state.pressed, |s| &s.pressed),
+            (state.focused, |s| &s.focused),
+            (state.disabled, |s| &s.disabled),
+        ];
+        for (on, pick) in layers {
+            if !on {
+                continue;
             }
-        }
-        for c in classes {
-            if let Some(c) = self.classes.get(c) {
-                for s in c.active(state) {
-                    out.merge(s);
+            if let Some(k) = kind_styles {
+                out.merge(pick(k));
+            }
+            for c in classes.clone() {
+                if let Some(c) = self.classes.get(c) {
+                    out.merge(pick(c));
                 }
             }
         }

@@ -88,7 +88,7 @@ impl HeadlessHandle {
 
 /// The backend. Checks per `sync`: a created id is new and alive with an existing parent; a
 /// removed id is known and gone from the tree; every other change names a known, live id (a
-/// moved node's new parent must exist).
+/// moved node's parent must exist and hold it at `index`).
 pub struct HeadlessBackend {
     handle: HeadlessHandle,
     known: HashSet<WidgetId>,
@@ -140,8 +140,8 @@ impl UiBackend for HeadlessBackend {
                     self.check_live(tree, id, "Moved", &mut errors);
                     if !tree.contains(parent) {
                         errors.push(format!("Moved({id:?}): parent {parent:?} does not exist"));
-                    } else if tree.children(parent).get(index as usize).is_none() {
-                        errors.push(format!("Moved({id:?}): index {index} is out of range"));
+                    } else if tree.children(parent).get(index as usize) != Some(&id) {
+                        errors.push(format!("Moved({id:?}): index {index} is not the node's position in {parent:?}"));
                     }
                 }
                 UiChange::Kind(id) => self.check_live(tree, id, "Kind", &mut errors),
@@ -149,6 +149,7 @@ impl UiBackend for HeadlessBackend {
                 UiChange::Classes(id) => self.check_live(tree, id, "Classes", &mut errors),
                 UiChange::Visible(id) => self.check_live(tree, id, "Visible", &mut errors),
                 UiChange::Enabled(id) => self.check_live(tree, id, "Enabled", &mut errors),
+                UiChange::HoverSignals(id) => self.check_live(tree, id, "HoverSignals", &mut errors),
                 UiChange::Layer(id) => self.check_live(tree, id, "Layer", &mut errors),
                 UiChange::Theme => {}
                 UiChange::Font(id) => {

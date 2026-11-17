@@ -91,15 +91,52 @@ impl NodeKind {
         }
     }
 
-    /// A slider kind; `min`/`max` are ordered and `value` clamped.
+    /// A slider kind; `min`/`max` are ordered and `value` clamped (see [`normalize`](Self::normalize)).
     pub fn slider(min: f32, max: f32, value: f32) -> NodeKind {
-        let (min, max) = if min <= max { (min, max) } else { (max, min) };
-        NodeKind::Slider { min, max, step: 0.0, value: value.clamp(min, max) }
+        let mut k = NodeKind::Slider { min, max, step: 0.0, value };
+        k.normalize();
+        k
+    }
+
+    /// Makes the kind data consistent, never panics: a slider gets ordered limits (a NaN limit
+    /// takes the other one, both NaN give `0..=1`), a non-negative finite `step` (else 0) and a
+    /// `value` clamped to the limits (NaN becomes `min`); a text input's value is cut to
+    /// `max_len` chars. The tree applies this after `set_kind` and `edit_kind`.
+    pub fn normalize(&mut self) {
+        match self {
+            NodeKind::Slider { min, max, step, value } => {
+                let (lo, hi) = match (min.is_nan(), max.is_nan()) {
+                    (true, true) => (0.0, 1.0),
+                    (true, false) => (*max, *max),
+                    (false, true) => (*min, *min),
+                    (false, false) => (min.min(*max), min.max(*max)),
+                };
+                *min = lo;
+                *max = hi;
+                if step.is_nan() || *step < 0.0 {
+                    *step = 0.0;
+                }
+                *value = clamp_slider(lo, hi, *value);
+            }
+            NodeKind::TextInput { value, max_len, .. } => {
+                if *max_len > 0 && value.chars().count() > *max_len as usize {
+                    *value = value.chars().take(*max_len as usize).collect();
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn text_input(value: impl Into<String>) -> NodeKind {
         NodeKind::TextInput { value: value.into(), placeholder: String::new(), max_len: 0, password: false }
     }
+}
+
+/// `x` clamped to `min..=max` without `f32::clamp`'s panics: NaN `x` gives `min`, and `min`
+/// and `max` are ordered first.
+pub(crate) fn clamp_slider(min: f32, max: f32, x: f32) -> f32 {
+    let (lo, hi) = (min.min(max), min.max(max));
+    if x.is_nan() { lo } else { x.max(lo).min(hi) }
 }
 
 /// Where a layer's root sits in the window.
@@ -183,6 +220,8 @@ pub struct Node {
     pub(crate) owner: Owner,
     pub(crate) layer: Option<Layer>,
     pub(crate) hover_signals: bool,
+    /// Creation order (monotonic over the tree's life); ties between equal-z layers.
+    pub(crate) seq: u64,
 }
 
 impl Node {
@@ -199,6 +238,7 @@ impl Node {
             owner,
             layer: None,
             hover_signals: false,
+            seq: 0,
         }
     }
 

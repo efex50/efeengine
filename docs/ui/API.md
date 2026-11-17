@@ -68,7 +68,8 @@ ui.set_visible(pause, false);
 - `anchor` places the layer's root: `Fill`, `Center`, `TopLeft`, `Top`, `TopRight`, `Left`, `Right`,
   `BottomLeft`, `Bottom`, `BottomRight`, each with a logical-pixel `offset` (`Layer::top_right(z).offset(-8.0, 8.0)`). A layer root is a
   container node whose key is the layer name; `ui.layer(name, ..)` for an existing name updates it.
-- A visible `modal` layer captures all pointer and keyboard input below it, even outside its
+- Signals from widgets on layers below a visible modal layer (lower `z`) are dropped by the plugin
+  (a `Focus(false)` still passes). A visible `modal` layer captures all pointer and keyboard input below it, even outside its
   widgets (pause menus, dialogs).
 - Layers are the only absolute positioning in v1. Inside a layer everything is flex layout.
 
@@ -190,7 +191,9 @@ pub struct StateStyles { pub normal: Style, pub hovered: Style, pub pressed: Sty
 ```
 
 - Resolution order for a node: `base` → its kind → its classes in order → inline `style`, then the
-  state style (hovered/pressed/focused/disabled) of each of those on top.
+  active state styles on top, state by state in the order hovered → pressed → focused → disabled
+  (within one state: the kind's, then each class's). A later state beats an earlier one whoever
+  defines it, so `disabled` always wins over a class's hovered or pressed style.
 - The engine ships a default theme (dark, readable at 1x and 2x). `UiTree::set_theme` replaces it;
   the change is one journal entry and backends restyle everything.
 - **Web:** the theme becomes one generated stylesheet: `.efui-k-button`, `.efui-c-panel`,
@@ -350,10 +353,15 @@ pub trait UiBackend: 'static {
 pub enum UiChange {
     Created(WidgetId), Removed(WidgetId), Moved { id: WidgetId, parent: WidgetId, index: u32 },
     Kind(WidgetId), Style(WidgetId), Classes(WidgetId), Visible(WidgetId), Enabled(WidgetId),
-    Layer(WidgetId), Theme, Font(FontId),
+    HoverSignals(WidgetId), Layer(WidgetId), Theme, Font(FontId),
 }
 ```
 
+- Placement rule: a backend applies the journal against the FINAL tree of the frame. `Moved` is
+  coalesced when the frame's journal is taken: one entry per node, with its final parent and final
+  index (`tree.children(parent)[index] == id`); it is not a script of intermediate moves. `Created`
+  nodes sit where the tree has them. A backend may simply order the children of every parent named
+  by a `Created` or `Moved` entry like `tree.children(parent)`. The headless backend checks the index.
 - The journal names what changed, the backend reads the new state from the tree. A frame with no
   changes costs nothing in `sync`.
 - `UiPlugin` picks the backend: web on wasm, iced on native by default, the fallback with the

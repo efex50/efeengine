@@ -114,7 +114,8 @@ impl UiCtxExt for ParCtx<'_> {
 /// Validates the signals a backend produced against the tree and writes value changes back.
 ///
 /// Dropped: stale widgets, widgets that are not shown or not enabled (own flag or an
-/// ancestor's), kinds that do not fit the node (`Click` on a non-button, `Changed` with the
+/// ancestor's), widgets on a layer below a visible modal layer (lower `z`; API.md section 3),
+/// kinds that do not fit the node (`Click` on a non-button, `Changed` with the
 /// wrong value type, ...), `Hover` for nodes without `.hover_signals()`. Kept `Changed` values are
 /// sanitized (slider clamped, text cut to `max_len`), written into the tree WITHOUT a journal
 /// entry (the backend already shows them), and the signal carries the sanitized value. Key and
@@ -124,7 +125,10 @@ pub fn filter_signals(tree: &mut UiTree, raw: Vec<UiSignal>) -> Vec<UiSignal> {
     for mut s in raw {
         let id = s.widget;
         let Some(node) = tree.get(id) else { continue };
-        if !tree.is_shown(id) || !tree.is_enabled(id) {
+        // A blur must always get through (the widget may have been disabled or hidden while it
+        // had focus); everything else needs a shown, enabled widget that no modal layer covers.
+        let blur = matches!(s.kind, UiSignalKind::Focus(false));
+        if !blur && (!tree.is_shown(id) || !tree.is_enabled(id) || tree.is_below_modal(id)) {
             continue;
         }
         let kind = match s.kind {

@@ -9,6 +9,16 @@ use crate::style::FontId;
 /// Coalescing rules (applied by the tree): a node created this frame gets no further property
 /// entries (`Created` already covers its final state); a node created and removed in the same
 /// frame leaves no entry at all; removing a node drops its earlier entries.
+///
+/// Placement rule (`Created` and `Moved`): a backend applies the journal against the FINAL tree
+/// of the frame, so positions are always read from it. `Created` puts the node under its parent
+/// as it is in the tree now. `Moved { id, parent, index }` is coalesced by
+/// [`UiTree::take_changes`](crate::UiTree::take_changes): at most one entry per node, naming the
+/// node's final parent and its final index in `tree.children(parent)` (so
+/// `tree.children(parent)[index] == id` always holds when `sync` runs). The entries are NOT a
+/// script of intermediate moves: a backend that wants to be exact simply orders the children of
+/// every parent named by a `Created` or `Moved` entry like `tree.children(parent)`. The headless
+/// backend checks the index against the final tree.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum UiChange {
     Created(WidgetId),
@@ -21,6 +31,9 @@ pub enum UiChange {
     Classes(WidgetId),
     Visible(WidgetId),
     Enabled(WidgetId),
+    /// The node's `hover_signals` flag changed (a backend starts or stops watching pointer
+    /// enter / leave for it). Read the flag from the node.
+    HoverSignals(WidgetId),
     /// The `Layer` data (z, modal, anchor, offset) of a layer root changed.
     Layer(WidgetId),
     Theme,
@@ -38,6 +51,7 @@ impl UiChange {
             | UiChange::Classes(id)
             | UiChange::Visible(id)
             | UiChange::Enabled(id)
+            | UiChange::HoverSignals(id)
             | UiChange::Layer(id) => Some(id),
             UiChange::Moved { id, .. } => Some(id),
             UiChange::Theme | UiChange::Font(_) => None,
