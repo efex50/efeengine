@@ -26,6 +26,8 @@ pub struct Gpu<'a> {
     pub surface_format: wgpu::TextureFormat,
     /// Size of the surface in physical pixels.
     pub size: (u32, u32),
+    /// Window scale factor (physical pixels per logical pixel): logical = physical / scale.
+    pub scale_factor: f32,
 }
 
 /// The game's drawing code. The engine calls it on the main thread only (no `Send` needed;
@@ -43,6 +45,20 @@ pub trait Renderer: 'static {
     /// The engine presents it afterwards. `frame.textures` lists what to create, replace
     /// and drop in your GPU texture table; it is delivered once, so process it every call.
     fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView, frame: &RenderFrame);
+}
+
+/// Extra drawing on top of what the main [`Renderer`] drew (a UI layer, debug HUD, ...).
+/// Added with `Engine::add_render_overlay`; main thread only (no `Send` needed).
+pub trait RenderOverlay: 'static {
+    /// Once when the GPU is ready (or when added, if it already is).
+    fn init(&mut self, _gpu: &Gpu) {}
+    /// The surface was resized or the scale factor changed (`gpu.size` / `gpu.scale_factor`
+    /// are the new values).
+    fn resize(&mut self, _gpu: &Gpu) {}
+    /// Draw on top of what the main renderer drew into `target` this frame (use
+    /// `LoadOp::Load`, never clear). Called every rendered frame after `Renderer::render` and
+    /// before present, in the order the overlays were added.
+    fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView);
 }
 
 /// The default renderer: clears to the camera's clear colour (black without a camera) and

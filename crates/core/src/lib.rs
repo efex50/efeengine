@@ -19,7 +19,7 @@ pub mod math {
 
 pub mod render {
     //! Writing a renderer or touching the GPU: `Renderer`, `Gpu`, the `RenderFrame` and its parts, textures, plus the `wgpu` and `bytemuck` crates.
-    pub use crate::engine::render::{Renderer, Gpu, ClearRenderer, PngError, RenderFrame, CameraView, SpriteInstance, MeshInstance, TextureChanges, Textures, Image, TextureError, RenderWarnings, SpriteRenderer};
+    pub use crate::engine::render::{Renderer, RenderOverlay, Gpu, ClearRenderer, PngError, RenderFrame, CameraView, SpriteInstance, MeshInstance, TextureChanges, Textures, Image, TextureError, RenderWarnings, SpriteRenderer};
     pub use bytemuck;
     pub use wgpu;
 }
@@ -28,7 +28,7 @@ pub mod input {
     //! The input types: events, keys, modifiers, mouse and gamepads.
     pub use crate::engine::input::{
         InputEvent, InputEventKind, WindowEvent, WindowId, WheelUnit, TouchPhase, NamedKey, Modifiers, ElementState,
-        InputState, InputCapture, GameInput, GamepadState, Gamepad, GamepadId, GamepadButton, GamepadAxis, WHEEL_PIXELS_PER_LINE, WHEEL_LINES_PER_PAGE,
+        InputState, InputCapture, GameInput, Filter, InputFilter, GamepadState, Gamepad, GamepadId, GamepadButton, GamepadAxis, WHEEL_PIXELS_PER_LINE, WHEEL_LINES_PER_PAGE,
         Key, KeyCode, MouseButton,
     };
 }

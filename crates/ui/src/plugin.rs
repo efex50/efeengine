@@ -1,8 +1,10 @@
 //! The UI plugin: resources and the main-thread systems that drive the backend.
 //!
 //! Frame order:
-//! - `PreUpdate`, `order::INPUT + 5`: raw input events go to `backend.input`, window resizes to
-//!   `backend.resize`. A `Filter::Captured` result counts into this frame's capture.
+//! - Engine input filter (before `InputState::apply`): every raw input event goes to
+//!   `backend.input`; a `Filter::Captured` result counts into this frame's capture. The engine's
+//!   render overlay calls `gpu_init` / `gpu_resize` / `render`.
+//! - `PreUpdate`, `order::INPUT + 5`: window resizes to `backend.resize`.
 //! - `PreUpdate`, `order::INPUT + 10`: `backend.drain_signals`, checks and value write-back
 //!   ([`filter_signals`]); the signals become readable `Events<UiSignal>` for the rest of the
 //!   frame (`Ctx::send_batch_now`); `InputState::set_capture` is written (backend capture, a
@@ -18,7 +20,10 @@ use std::rc::Rc;
 use efeengine_core::input::{InputCapture, InputEventKind, WindowEvent};
 use efeengine_core::prelude::*;
 
-use crate::backend::{Filter, UiBackend, UiBackendCx};
+use efeengine_core::input::{Filter, InputEvent, InputFilter};
+use efeengine_core::render::{Gpu, RenderOverlay};
+
+use crate::backend::{UiBackend, UiBackendCx};
 use crate::bindings::{BindCx, UiBindings};
 use crate::headless::HeadlessBackend;
 use crate::journal::UiChange;
@@ -50,6 +55,17 @@ impl UiPlugin {
         Self { backend: RefCell::new(None), theme: None, headless: false }
     }
 
+    /// The default backend for this engine: the iced backend on native when the `iced` feature
+    /// is on and the engine has a window (not a headless config), else as [`new`](Self::new).
+    fn default_backend(engine: &Engine, headless: bool) -> Option<Box<dyn UiBackend>> {
+        #[cfg(all(feature = "iced", not(target_arch = "wasm32")))]
+        if !headless && !engine.config().headless {
+            return Some(Box::new(crate::native::IcedBackend::new()));
+        }
+        let _ = (engine, headless);
+        None
+    }
+
     /// Always the headless backend (and its `HeadlessHandle` resource), also on wasm32.
     pub fn headless() -> Self {
         Self { headless: true, ..Self::new() }
@@ -76,6 +92,9 @@ impl Plugin for UiPlugin {
             Some(b) => b,
             #[cfg(target_arch = "wasm32")]
             None if !self.headless => Box::new(crate::web::WebBackend::new()),
+            None if Self::default_backend(engine, self.headless).is_some() => {
+                Self::default_backend(engine, self.headless).unwrap()
+            }
             None => {
                 let (b, handle) = HeadlessBackend::new();
                 engine.insert_resource(handle);
@@ -93,21 +112,26 @@ impl Plugin for UiPlugin {
 
         let mut bcx = UiBackendCx::new((0.0, 0.0), 1.0);
         backend.init(&mut bcx);
-        let backend = Rc::new(RefCell::new(backend));
+        let backend: Shared = Rc::new(RefCell::new(backend));
         let bcx = Rc::new(RefCell::new(bcx));
         // Pointer / keyboard input the backend consumed since the last `ui_signals` run.
         let consumed = Rc::new(Cell::new((false, false)));
 
-        // Raw input and window changes.
+        // Raw input: the engine's input filter hands every event to the backend before the game
+        // sees it. `try_borrow_mut`: a filter call can never re-enter a system holding the
+        // backend (it runs while events are applied, not inside a system), but never panic.
+        engine.add_input_filter(UiInputFilter { backend: backend.clone(), consumed: consumed.clone() });
+
+        // Native overlay: GPU init / resize / draw.
+        engine.add_render_overlay(UiOverlay { backend: backend.clone() });
+
+        // Window size changes (logical size and scale for the backend and `UiBackendCx`).
         {
             let backend = backend.clone();
             let bcx = bcx.clone();
-            let consumed = consumed.clone();
             let physical = Cell::new((0u32, 0u32));
             engine
                 .add_system(Stage::PreUpdate, move |cx| {
-                    let Some(tree) = cx.resources.get::<UiTree>() else { return };
-                    let mut be = backend.borrow_mut();
                     let mut size_changed = false;
                     let mut scale = bcx.borrow().scale_factor;
                     for ev in cx.input.events() {
@@ -122,18 +146,6 @@ impl Plugin for UiPlugin {
                             }
                             _ => {}
                         }
-                        if be.input(ev, &tree) == Filter::Captured {
-                            let (mut p, mut k) = consumed.get();
-                            match &ev.kind {
-                                InputEventKind::Key { .. } | InputEventKind::Text(_) => k = true,
-                                InputEventKind::MouseMotion { .. }
-                                | InputEventKind::MouseButton { .. }
-                                | InputEventKind::MouseWheel { .. }
-                                | InputEventKind::Touch { .. } => p = true,
-                                InputEventKind::Window(_) => {}
-                            }
-                            consumed.set((p, k));
-                        }
                     }
                     if size_changed {
                         let (w, h) = physical.get();
@@ -141,11 +153,11 @@ impl Plugin for UiPlugin {
                         let mut c = bcx.borrow_mut();
                         c.logical_size = logical;
                         c.scale_factor = scale;
-                        be.resize(logical, scale);
+                        backend.borrow_mut().resize(logical, scale);
                     }
                 })
                 .order(order::INPUT + 5)
-                .name("ui_input");
+                .name("ui_resize");
         }
 
         // Signals in, capture out.
@@ -155,11 +167,19 @@ impl Plugin for UiPlugin {
             engine
                 .add_system(Stage::PreUpdate, move |cx| {
                     let mut raw = Vec::new();
-                    let capture = {
+                    let (capture, text_input) = {
                         let mut be = backend.borrow_mut();
                         be.drain_signals(&mut raw);
-                        be.capture()
+                        (be.capture(), be.take_text_input())
                     };
+                    match text_input {
+                        Some(Some(a)) => {
+                            cx.commands.set_text_input(true);
+                            cx.commands.set_text_input_area(a.x, a.y, a.w, a.h, a.cursor);
+                        }
+                        Some(None) => cx.commands.set_text_input(false),
+                        None => {}
+                    }
                     let (cp, ck) = consumed.replace((false, false));
                     let Some(tree) = cx.resources.get_mut::<UiTree>() else { return };
                     let signals = filter_signals(tree, raw);
@@ -233,5 +253,48 @@ impl Plugin for UiPlugin {
                 .order(order::LATE + 20)
                 .name("ui_sync");
         }
+    }
+}
+
+type Shared = Rc<RefCell<Box<dyn UiBackend>>>;
+
+struct UiInputFilter {
+    backend: Shared,
+    consumed: Rc<Cell<(bool, bool)>>,
+}
+
+impl InputFilter for UiInputFilter {
+    fn filter(&mut self, ev: &InputEvent) -> Filter {
+        let Ok(mut be) = self.backend.try_borrow_mut() else { return Filter::Pass };
+        let f = be.input(ev);
+        if f == Filter::Captured {
+            let (mut p, mut k) = self.consumed.get();
+            match &ev.kind {
+                InputEventKind::Key { .. } | InputEventKind::Text(_) | InputEventKind::TextEditing { .. } => k = true,
+                InputEventKind::MouseMotion { .. }
+                | InputEventKind::MouseButton { .. }
+                | InputEventKind::MouseWheel { .. }
+                | InputEventKind::Touch { .. } => p = true,
+                InputEventKind::Window(_) => {}
+            }
+            self.consumed.set((p, k));
+        }
+        f
+    }
+}
+
+struct UiOverlay {
+    backend: Shared,
+}
+
+impl RenderOverlay for UiOverlay {
+    fn init(&mut self, gpu: &Gpu) {
+        self.backend.borrow_mut().gpu_init(gpu);
+    }
+    fn resize(&mut self, gpu: &Gpu) {
+        self.backend.borrow_mut().gpu_resize(gpu);
+    }
+    fn render(&mut self, gpu: &Gpu, target: &efeengine_core::wgpu::TextureView) {
+        self.backend.borrow_mut().render(gpu, target);
     }
 }

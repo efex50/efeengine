@@ -1,8 +1,10 @@
 //! UI demo: a settings menu and a HUD built with the `efeengine-ui` view layer.
 //!
-//! On native, `UiPlugin::new()` uses the headless backend, so nothing is drawn: the menu only
-//! runs (messages, state and log lines in the terminal). On the web, the plugin picks the DOM
-//! backend and the menu and HUD are visible in the page; the log lines go to the browser console.
+//! On native, `UiPlugin::new()` uses the iced backend (default feature `iced`; without it the
+//! headless backend, so nothing is drawn): the menu and HUD are drawn over the game and driven
+//! by mouse and keyboard. `EFE_UI_STATS=1` logs the cost of the iced pass. On the web, the plugin
+//! picks the DOM backend and the menu and HUD are visible in the page; the log lines go to the
+//! browser console.
 //!
 //! Run natively with `cargo xtask run ui_demo native`, on the web with `cargo xtask run ui_demo web`.
 use efeengine_core::prelude::*;

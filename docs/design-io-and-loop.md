@@ -61,6 +61,7 @@ impl From<InputEventKind> for InputEvent
 pub enum InputEventKind {
     Key { physical: KeyCode, logical: Key, state: ElementState, repeat: bool, mods: Modifiers },
     Text(String),
+    TextEditing { text: String, cursor: i32, len: i32 }, // IME preedit; raw only (events()), never in InputState::text()
     MouseMotion { pos: (f32, f32), delta: (f32, f32) },
     MouseButton { button: MouseButton, state: ElementState, pos: (f32, f32) },
     MouseWheel { delta: (f32, f32), unit: WheelUnit },
@@ -201,6 +202,13 @@ device. Code in `input/capture.rs`.
 - Store a `VideoSubsystem` in `SdlWindowManager` (needed for text input).
 - Text input: `video.text_input().start(&window)` at creation. Trait method
   `InnerWindow::set_text_input(&mut self, enabled: bool) {}` (default no-op) toggles it.
+  `set_text_input_area(x, y, w, h, cursor)` (logical px, default no-op; SDL `set_rect`) places the IME
+  popup; systems call `cx.commands.set_text_input_area(x, y, w, h, cursor)`. SDL `TextEditing` events
+  become `InputEventKind::TextEditing`.
+- Input filter: `Engine::add_input_filter(impl InputFilter)`; each raw event is offered to every filter
+  (add order) before `InputState::apply`; any `Filter::Captured` sets `InputEvent::captured`. Captured events
+  still reach `InputState` (raw queries) but `game_input()` ignores them. A key / button belongs to whoever
+  got its press (repeats do not change that) and the release follows the owner, so nothing sticks.
 - Keys: `physical` from Scancode (exhaustive match, extended for the new `KeyCode`s:
   NonUsBackslash→IntlBackslash, International1→IntlRo, International3→IntlYen, Application/Menu→ContextMenu, …).
   `logical`: named keys from the SDL `Keycode`; printable keys → `Character` from the keycode's
@@ -246,7 +254,7 @@ device. Code in `input/capture.rs`.
 - 1.10: DPR changes via a `matchMedia("(resolution: …dppx)")` listener, re-armed from the per-frame poll
   (the per-frame size poll also stays as the safety net). Text: on keydown, when `key` is a single
   grapheme and no Ctrl/Meta is held (unless AltGraph is active), emit `Text(key)` (repeats included); plus
-  `compositionend` on `window` → `Text(data)`. A hidden-input IME path is out of scope; note it.
+  `compositionupdate` on `window` → `TextEditing { text: data, cursor: chars, len: 0 }`, `compositionend` → empty `TextEditing` then `Text(data)`. A hidden-input IME path is out of scope; note it.
 - 1.11: `set_title` also sets `document.title`; cursor visibility via canvas CSS `cursor`;
   grab via `requestPointerLock` / `exitPointerLock` (while locked, `MouseMotion.delta` comes
   from `movementX/Y`).

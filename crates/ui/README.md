@@ -3,7 +3,7 @@
 The engine-owned UI API: a retained tree (`UiTree`) with a change journal, styles, themes, signals, bindings and a backend trait. Backends turn the tree into real widgets (web DOM, iced, a native fallback); a headless backend and `UiTest` drive it in tests. Design: `docs/ui/API.md`. Layout and details: `structure.md`.
 
 ```rust
-engine.add_plugin(UiPlugin::new())?;            // web DOM backend on wasm32, headless elsewhere (UiPlugin::headless() forces headless)
+engine.add_plugin(UiPlugin::new())?;            // web DOM backend on wasm32, iced on native (feature `iced`, default) when there is a window, else headless (UiPlugin::headless() forces headless)
 
 let ui = engine.resources_mut().get_mut::<UiTree>().unwrap();
 let root = ui.layer("menu", Layer::centered(10));

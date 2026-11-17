@@ -9,6 +9,20 @@ efeengine-core = { path = "../core" }
 smallvec = "1.16.5"
 thiserror = "2.0.21"
 
+[features]
+default = ["iced"]
+# Native backend (Phase 0/3). Never pulled into wasm32 builds (the dependencies sit under a
+# non-wasm target table); `UiPlugin::new()` falls back to headless without it.
+iced = ["dep:iced_wgpu", "dep:iced_widget", "dep:iced_runtime", "dep:iced_core", "dep:pollster"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# iced main, pinned to a commit whose workspace uses wgpu 30 (same as the engine).
+iced_wgpu = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", default-features = false, optional = true }
+iced_widget = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", features = ["wgpu"], optional = true }
+iced_runtime = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", optional = true }
+iced_core = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", optional = true }
+pollster = { version = "1.0.2", optional = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # versions match crates/core
 wasm-bindgen = "0.2.130"

@@ -12,13 +12,18 @@ use crate::signal::UiSignal;
 use crate::theme::Theme;
 use crate::tree::UiTree;
 
-/// Whether a backend used a raw input event.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Filter {
-    /// The game sees the event.
-    Pass,
-    /// The UI used it.
-    Captured,
+pub use efeengine_core::input::Filter;
+use efeengine_core::render::Gpu;
+
+/// Where the OS text-input (IME) area should be, in logical pixels; `cursor` is the caret offset
+/// in characters inside the area. Sent by the plugin as `set_text_input_area`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct TextInputArea {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub cursor: i32,
 }
 
 impl UiBackendCx {
@@ -44,14 +49,14 @@ pub struct UiBackendCx {
 /// only and need not be `Send` (web-sys elements, iced renderer); the UI plugin keeps the boxed
 /// backend inside main-thread engine systems.
 ///
-/// `render(gpu, target)` (native backends) comes with the core overlay render pass; until then
-/// there is no GPU type in this trait.
 pub trait UiBackend: 'static {
     /// Once, when the plugin is built.
     fn init(&mut self, cx: &mut UiBackendCx);
 
-    /// A raw input event, before the game sees it (native backends; web: no-op).
-    fn input(&mut self, _ev: &InputEvent, _tree: &UiTree) -> Filter {
+    /// A raw input event, before the game sees it (native backends; web: no-op). Called from the
+    /// engine's input filter, so it also sees window events; it must not call back into the
+    /// engine. The backend keeps its own copy of what it needs from the tree.
+    fn input(&mut self, _ev: &InputEvent) -> Filter {
         Filter::Pass
     }
 
@@ -68,4 +73,20 @@ pub trait UiBackend: 'static {
 
     /// Window size in logical pixels and scale factor changed.
     fn resize(&mut self, _logical: (f32, f32), _scale: f32) {}
+
+    /// Native: the GPU is ready (the engine's render overlay `init`).
+    fn gpu_init(&mut self, _gpu: &Gpu) {}
+
+    /// Native: surface size or scale factor changed (overlay `resize`).
+    fn gpu_resize(&mut self, _gpu: &Gpu) {}
+
+    /// Native: draw the UI on top of the game into `target` (`LoadOp::Load`).
+    fn render(&mut self, _gpu: &Gpu, _target: &efeengine_core::wgpu::TextureView) {}
+
+    /// Native: the text-input request of the UI since the last call. `Some(Some(area))` means
+    /// "a text field has focus here", `Some(None)` "no text field has focus", `None` no change.
+    /// The plugin turns it into `SetTextInput` / `SetTextInputArea` commands.
+    fn take_text_input(&mut self) -> Option<Option<TextInputArea>> {
+        None
+    }
 }

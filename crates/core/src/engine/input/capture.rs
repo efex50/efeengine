@@ -61,26 +61,26 @@ impl<'a> GameInput<'a> {
     }
 
     /// Key held (`false` while the keyboard is captured).
-    pub fn pressed(&self, k: KeyCode) -> bool { !self.capture.keyboard && self.input.pressed(k) }
+    pub fn pressed(&self, k: KeyCode) -> bool { !self.capture.keyboard && self.input.game_pressed(k) }
     /// Key pressed this frame (`false` while the keyboard is captured).
-    pub fn just_pressed(&self, k: KeyCode) -> bool { !self.capture.keyboard && self.input.just_pressed(k) }
+    pub fn just_pressed(&self, k: KeyCode) -> bool { !self.capture.keyboard && self.input.game_just_pressed(k) }
     /// Key released this frame (`false` while the keyboard is captured).
-    pub fn just_released(&self, k: KeyCode) -> bool { !self.capture.keyboard && self.input.just_released(k) }
+    pub fn just_released(&self, k: KeyCode) -> bool { !self.capture.keyboard && self.input.game_just_released(k) }
     /// Any key held (`false` while the keyboard is captured).
-    pub fn any_pressed(&self) -> bool { !self.capture.keyboard && self.input.any_pressed() }
+    pub fn any_pressed(&self) -> bool { !self.capture.keyboard && self.input.game_any_pressed() }
     /// Typed text this frame (empty while the keyboard is captured).
-    pub fn text(&self) -> &'a str { if self.capture.keyboard { "" } else { self.input.text() } }
+    pub fn text(&self) -> &'a str { if self.capture.keyboard { "" } else { self.input.game_text() } }
 
     /// Mouse button held (`false` while the pointer is captured).
-    pub fn mouse_pressed(&self, b: MouseButton) -> bool { !self.capture.pointer && self.input.mouse_pressed(b) }
+    pub fn mouse_pressed(&self, b: MouseButton) -> bool { !self.capture.pointer && self.input.game_mouse_pressed(b) }
     /// Mouse button pressed this frame (`false` while the pointer is captured).
-    pub fn mouse_just_pressed(&self, b: MouseButton) -> bool { !self.capture.pointer && self.input.mouse_just_pressed(b) }
+    pub fn mouse_just_pressed(&self, b: MouseButton) -> bool { !self.capture.pointer && self.input.game_mouse_just_pressed(b) }
     /// Mouse button released this frame (`false` while the pointer is captured).
-    pub fn mouse_just_released(&self, b: MouseButton) -> bool { !self.capture.pointer && self.input.mouse_just_released(b) }
+    pub fn mouse_just_released(&self, b: MouseButton) -> bool { !self.capture.pointer && self.input.game_mouse_just_released(b) }
     /// Pointer position (`None` while the pointer is captured).
     pub fn mouse_pos(&self) -> Option<(f32, f32)> { if self.capture.pointer { None } else { self.input.mouse_pos() } }
     /// Pointer movement this frame (zero while the pointer is captured).
-    pub fn mouse_delta(&self) -> (f32, f32) { if self.capture.pointer { (0.0, 0.0) } else { self.input.mouse_delta() } }
+    pub fn mouse_delta(&self) -> (f32, f32) { if self.capture.pointer { (0.0, 0.0) } else { self.input.game_mouse_delta() } }
     /// Wheel movement in lines this frame (zero while the pointer is captured).
-    pub fn wheel(&self) -> (f32, f32) { if self.capture.pointer { (0.0, 0.0) } else { self.input.wheel() } }
+    pub fn wheel(&self) -> (f32, f32) { if self.capture.pointer { (0.0, 0.0) } else { self.input.game_wheel() } }
 }

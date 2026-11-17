@@ -293,15 +293,27 @@ impl WebWindow{
         }
     }
 
-    /// Composed text (IME) arrives as `compositionend` on `window`. A hidden-input path for
-    /// virtual keyboards is out of scope.
+    /// IME on `window`: `compositionupdate` gives `TextEditing` (the preedit string, caret at its
+    /// end), `compositionend` gives an empty `TextEditing` (composition over) and then the
+    /// committed text as `Text`. `compositionstart` needs nothing (the first update carries the
+    /// text). A hidden-input path for virtual keyboards is out of scope.
     fn attach_composition_listener(&mut self) {
         let Some(window) = web_sys::window() else { return };
+        let shared = self.shared.clone();
+        self.add_listener(window.clone().into(), "compositionupdate", move |e: Event| {
+            if !shared.text_input.get() || is_editable_target(&e) { return; }
+            let time = event_ns(&e);
+            let Ok(e) = e.dyn_into::<CompositionEvent>() else { return };
+            let text = e.data().unwrap_or_default();
+            let cursor = text.chars().count() as i32;
+            shared.push(time, InputEventKind::TextEditing { text, cursor, len: 0 });
+        });
         let shared = self.shared.clone();
         self.add_listener(window.into(), "compositionend", move |e: Event| {
             if !shared.text_input.get() || is_editable_target(&e) { return; }
             let time = event_ns(&e);
             let Ok(e) = e.dyn_into::<CompositionEvent>() else { return };
+            shared.push(time, InputEventKind::TextEditing { text: String::new(), cursor: 0, len: 0 });
             if let Some(data) = e.data().filter(|d| !d.is_empty()) {
                 shared.push(time, InputEventKind::Text(data));
             }

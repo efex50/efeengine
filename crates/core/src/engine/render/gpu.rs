@@ -20,6 +20,8 @@ pub(crate) struct GpuContext {
     /// The window has a zero side (minimized): no texture is acquired and nothing is
     /// reconfigured until a non-zero size arrives.
     suspended: bool,
+    /// Window scale factor (physical per logical pixel).
+    pub scale_factor: f32,
 }
 
 /// What a resize event asks of the surface.
@@ -98,7 +100,7 @@ impl GpuContext {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
-        Ok(Self { instance, adapter, device, queue, surface, config, suspended: false })
+        Ok(Self { instance, adapter, device, queue, surface, config, suspended: false, scale_factor: sanitize_scale(window.scale_factor()) })
     }
 
     /// The borrowed view handed to the renderer.
@@ -108,6 +110,7 @@ impl GpuContext {
             queue: &self.queue,
             surface_format: self.config.format,
             size: (self.config.width, self.config.height),
+            scale_factor: self.scale_factor,
         }
     }
 
@@ -217,4 +220,9 @@ mod tests {
         assert_eq!(plan_resize((800, 0)), ResizePlan { suspended: true, reconfigure: false });
         assert_eq!(plan_resize((800, 600)), ResizePlan { suspended: false, reconfigure: true });
     }
+}
+
+/// Scale factors that are not finite and positive count as 1.0.
+pub(crate) fn sanitize_scale(s: f64) -> f32 {
+    if s.is_finite() && s > 0.0 { s as f32 } else { 1.0 }
 }

@@ -23,16 +23,20 @@ pub struct InputEvent {
     pub timestamp_ns: u64,
     pub window: WindowId,
     pub kind: InputEventKind,
+    /// Set by the engine when an [`InputFilter`](super::InputFilter) answered `Captured`
+    /// (a UI consumed it). Captured events still reach `InputState` (raw queries), but
+    /// `game_input()` ignores them. Always `false` from backends and `new` / `with_time`.
+    pub captured: bool,
 }
 
 impl InputEvent {
     /// Timestamp 0, main window. Mostly for tests.
     pub fn new(kind: InputEventKind) -> Self {
-        Self { timestamp_ns: 0, window: WindowId::MAIN, kind }
+        Self { timestamp_ns: 0, window: WindowId::MAIN, kind, captured: false }
     }
 
     pub fn with_time(kind: InputEventKind, timestamp_ns: u64, window: WindowId) -> Self {
-        Self { timestamp_ns, window, kind }
+        Self { timestamp_ns, window, kind, captured: false }
     }
 }
 
@@ -46,6 +50,10 @@ impl From<InputEventKind> for InputEvent {
 pub enum InputEventKind {
     Key { physical: KeyCode, logical: Key, state: ElementState, repeat: bool, mods: Modifiers },
     Text(String),
+    /// IME composition in progress (`text` is the preedit string, empty when the composition
+    /// ended or was cancelled; `cursor` / `len` select the part being edited, in characters).
+    /// The committed text arrives as `Text`. Not folded into `InputState::text()`.
+    TextEditing { text: String, cursor: i32, len: i32 },
     MouseMotion { pos: (f32, f32), delta: (f32, f32) },
     MouseButton { button: MouseButton, state: ElementState, pos: (f32, f32) },
     MouseWheel { delta: (f32, f32), unit: WheelUnit },

@@ -19,6 +19,9 @@ pub enum EngineCommand {
     SetCursorVisible(bool),
     SetCursorGrab(bool),
     SetTextInput(bool),
+    /// Where text is being typed, in logical pixels (IME popup placement) and the cursor
+    /// offset in characters.
+    SetTextInputArea { x: i32, y: i32, w: i32, h: i32, cursor: i32 },
     /// `Engine::reload_mods`, the report is logged.
     ReloadMods,
     /// `Engine::unload_mods`, the report is logged.
@@ -102,6 +105,12 @@ impl Commands {
     }
     pub fn set_text_input(&mut self, on: bool) {
         self.list.push(EngineCommand::SetTextInput(on));
+    }
+
+    /// Tell the OS where the text cursor is (logical pixels) so the IME popup appears next to
+    /// it. `cursor` is the caret offset in characters within the area.
+    pub fn set_text_input_area(&mut self, x: i32, y: i32, w: i32, h: i32, cursor: i32) {
+        self.list.push(EngineCommand::SetTextInputArea { x, y, w, h, cursor });
     }
 
     // ---- world ----

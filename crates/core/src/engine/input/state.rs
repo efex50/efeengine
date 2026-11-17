@@ -28,6 +28,18 @@ pub struct InputState {
     focused: bool,
     events: Vec<InputEvent>,
     capture: CaptureCell,
+    // Game view (what `game_input()` reads): events flagged `captured` are left out. A key /
+    // button belongs to the game or to the UI according to its PRESS (the one that put it
+    // into the held set); a repeat never changes that, and the release follows the owner.
+    captured_keys: HashSet<KeyCode>,
+    captured_buttons: HashSet<MouseButton>,
+    game_just_pressed: HashSet<KeyCode>,
+    game_just_released: HashSet<KeyCode>,
+    game_mouse_just_pressed: HashSet<MouseButton>,
+    game_mouse_just_released: HashSet<MouseButton>,
+    game_mouse_delta: (f32, f32),
+    game_wheel: (f32, f32),
+    game_text: String,
 }
 
 impl Default for InputState {
@@ -54,6 +66,15 @@ impl InputState {
             focused: true,
             events: Vec::new(),
             capture: CaptureCell::default(),
+            captured_keys: HashSet::new(),
+            captured_buttons: HashSet::new(),
+            game_just_pressed: HashSet::new(),
+            game_just_released: HashSet::new(),
+            game_mouse_just_pressed: HashSet::new(),
+            game_mouse_just_released: HashSet::new(),
+            game_mouse_delta: (0.0, 0.0),
+            game_wheel: (0.0, 0.0),
+            game_text: String::new(),
         }
     }
 
@@ -68,6 +89,13 @@ impl InputState {
         self.wheel = (0.0, 0.0);
         self.text.clear();
         self.events.clear();
+        self.game_just_pressed.clear();
+        self.game_just_released.clear();
+        self.game_mouse_just_pressed.clear();
+        self.game_mouse_just_released.clear();
+        self.game_mouse_delta = (0.0, 0.0);
+        self.game_wheel = (0.0, 0.0);
+        self.game_text.clear();
     }
 
     pub fn apply(&mut self, ev: &InputEvent) {
@@ -84,19 +112,44 @@ impl InputState {
                         if newly && !*repeat {
                             self.just_pressed.insert(*physical);
                         }
+                        if newly {
+                            if ev.captured {
+                                self.captured_keys.insert(*physical);
+                            } else {
+                                self.captured_keys.remove(physical);
+                                if !*repeat {
+                                    self.game_just_pressed.insert(*physical);
+                                }
+                            }
+                        }
                     }
                     ElementState::Released => {
                         if self.held.remove(physical) {
                             self.just_released.insert(*physical);
+                            // The game sees the release of a press it saw, captured or not.
+                            if !self.captured_keys.remove(physical) {
+                                self.game_just_released.insert(*physical);
+                            }
                         }
                     }
                 }
             }
-            InputEventKind::Text(s) => self.text.push_str(s),
+            InputEventKind::Text(s) => {
+                self.text.push_str(s);
+                if !ev.captured {
+                    self.game_text.push_str(s);
+                }
+            }
+            // IME composition is only reported in `events()`; the committed text is a `Text`.
+            InputEventKind::TextEditing { .. } => {}
             InputEventKind::MouseMotion { pos, delta } => {
                 self.mouse_pos = Some(*pos);
                 self.mouse_delta.0 += delta.0;
                 self.mouse_delta.1 += delta.1;
+                if !ev.captured {
+                    self.game_mouse_delta.0 += delta.0;
+                    self.game_mouse_delta.1 += delta.1;
+                }
             }
             InputEventKind::MouseButton { button, state, pos } => {
                 self.mouse_pos = Some(*pos);
@@ -104,11 +157,20 @@ impl InputState {
                     ElementState::Pressed => {
                         if self.mouse_held.insert(*button) {
                             self.mouse_just_pressed.insert(*button);
+                            if ev.captured {
+                                self.captured_buttons.insert(*button);
+                            } else {
+                                self.captured_buttons.remove(button);
+                                self.game_mouse_just_pressed.insert(*button);
+                            }
                         }
                     }
                     ElementState::Released => {
                         if self.mouse_held.remove(button) {
                             self.mouse_just_released.insert(*button);
+                            if !self.captured_buttons.remove(button) {
+                                self.game_mouse_just_released.insert(*button);
+                            }
                         }
                     }
                 }
@@ -121,6 +183,10 @@ impl InputState {
                 };
                 self.wheel.0 += delta.0 * k;
                 self.wheel.1 += delta.1 * k;
+                if !ev.captured {
+                    self.game_wheel.0 += delta.0 * k;
+                    self.game_wheel.1 += delta.1 * k;
+                }
             }
             InputEventKind::Touch { id, phase, pos } => match phase {
                 TouchPhase::Started | TouchPhase::Moved => {
@@ -138,6 +204,18 @@ impl InputState {
                 WindowEvent::Focused(true) => self.focused = true,
                 WindowEvent::Focused(false) => {
                     self.focused = false;
+                    for k in self.held.iter() {
+                        if !self.captured_keys.contains(k) {
+                            self.game_just_released.insert(*k);
+                        }
+                    }
+                    for b in self.mouse_held.iter() {
+                        if !self.captured_buttons.contains(b) {
+                            self.game_mouse_just_released.insert(*b);
+                        }
+                    }
+                    self.captured_keys.clear();
+                    self.captured_buttons.clear();
                     self.just_released.extend(self.held.drain());
                     self.mouse_just_released.extend(self.mouse_held.drain());
                     self.modifiers = Modifiers::NONE;
@@ -160,6 +238,21 @@ impl InputState {
     /// A view with the key / mouse queries filtered by the capture flags: a captured device
     /// reports nothing pressed and no movement. Game code should read input through this.
     pub fn game_input(&self) -> GameInput<'_> { GameInput::new(self) }
+
+    // Game view (used by `GameInput`): same queries without events flagged `captured`. A key or
+    // button pressed while captured stays invisible to the game until it is released (its
+    // release is dropped too); one pressed while not captured stays visible, release included,
+    // even if a later event of it is captured.
+    pub(super) fn game_pressed(&self, k: KeyCode) -> bool { self.held.contains(&k) && !self.captured_keys.contains(&k) }
+    pub(super) fn game_just_pressed(&self, k: KeyCode) -> bool { self.game_just_pressed.contains(&k) }
+    pub(super) fn game_just_released(&self, k: KeyCode) -> bool { self.game_just_released.contains(&k) }
+    pub(super) fn game_any_pressed(&self) -> bool { self.held.len() > self.captured_keys.len() }
+    pub(super) fn game_text(&self) -> &str { &self.game_text }
+    pub(super) fn game_mouse_pressed(&self, b: MouseButton) -> bool { self.mouse_held.contains(&b) && !self.captured_buttons.contains(&b) }
+    pub(super) fn game_mouse_just_pressed(&self, b: MouseButton) -> bool { self.game_mouse_just_pressed.contains(&b) }
+    pub(super) fn game_mouse_just_released(&self, b: MouseButton) -> bool { self.game_mouse_just_released.contains(&b) }
+    pub(super) fn game_mouse_delta(&self) -> (f32, f32) { self.game_mouse_delta }
+    pub(super) fn game_wheel(&self) -> (f32, f32) { self.game_wheel }
 
     pub fn pressed(&self, k: KeyCode) -> bool { self.held.contains(&k) }
     pub fn just_pressed(&self, k: KeyCode) -> bool { self.just_pressed.contains(&k) }

@@ -4,9 +4,9 @@ use once_cell::sync::{Lazy, OnceCell};
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::{debug_info, engine::{config::{EngineConfig, Threads}, error::EngineError, events::EventRegistry, parallel::Executor, input::{GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::{Res, Resources}, schedule::{Access, Ctx, EngineCommand, Commands, ParCtx, Schedule, ScheduleError, Stage, SystemEntry}, plugin::{Plugin, PluginError}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, window::WindowManager};
+use crate::{debug_info, engine::{config::{EngineConfig, Threads}, error::EngineError, events::EventRegistry, parallel::Executor, input::{Filter, InputFilter, GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::{Res, Resources}, schedule::{Access, Ctx, EngineCommand, Commands, ParCtx, Schedule, ScheduleError, Stage, SystemEntry}, plugin::{Plugin, PluginError}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, window::WindowManager};
 use crate::engine::components::{Camera, GlobalTransform, MeshHandle, Parent, Sprite, TextureHandle, Transform, Velocity, Visibility};
-use crate::engine::render::{self as rendering, gpu::GpuContext, ClearRenderer, RenderFrame, Renderer, Textures};
+use crate::engine::render::{self as rendering, gpu::GpuContext, ClearRenderer, RenderFrame, RenderOverlay, Renderer, Textures};
 use crate::{global_info, thread_pool::{init_global_pool, init_global_pool_auto}};
 pub mod window;
 pub mod messages;
@@ -119,6 +119,10 @@ pub struct Engine{
     // `gpu` was created from `windows`' raw window handle, so `renderer` and `gpu` must be
     // declared (and so dropped) before `windows`.
     renderer: Box<dyn Renderer>,
+    /// Drawn after the renderer, before present, in add order.
+    overlays: Vec<Box<dyn RenderOverlay>>,
+    /// Run for every raw input event before `InputState::apply`, in add order.
+    input_filters: Vec<Box<dyn InputFilter>>,
     gpu: Option<GpuContext>,
     pub windows:GameWindowManager,
     lifecycle: Lifecycle,
@@ -229,6 +233,8 @@ impl Engine {
 
         let mut engine = Self {
             renderer: Box::new(ClearRenderer),
+            overlays: Vec::new(),
+            input_filters: Vec::new(),
             gpu: None,
             windows: w,
             lifecycle: Lifecycle::Created,
@@ -936,6 +942,26 @@ impl Engine {
         }
     }
 
+    /// Add a [`RenderOverlay`]: drawn on top of the renderer's output every rendered frame, in
+    /// add order. If the GPU is already up, `init` runs at once; otherwise when it comes up.
+    /// Never called without a GPU (headless).
+    pub fn add_render_overlay(&mut self, overlay: impl RenderOverlay) -> &mut Self {
+        let mut overlay: Box<dyn RenderOverlay> = Box::new(overlay);
+        if let Some(gpu) = &self.gpu {
+            overlay.init(&gpu.gpu());
+        }
+        self.overlays.push(overlay);
+        self
+    }
+
+    /// Add an [`InputFilter`]: asked about every raw input event (also in headless mode and for
+    /// injected events) before `InputState::apply`, in add order; any `Captured` marks the
+    /// event (`InputEvent::captured`).
+    pub fn add_input_filter(&mut self, f: impl InputFilter) -> &mut Self {
+        self.input_filters.push(Box::new(f));
+        self
+    }
+
     pub fn time(&self) -> &Time {
         &self.state.time
     }
@@ -1087,6 +1113,7 @@ impl Engine {
                 EngineCommand::SetCursorVisible(v) => self.windows.set_cursor_visible(v),
                 EngineCommand::SetCursorGrab(g) => self.windows.set_cursor_grab(g),
                 EngineCommand::SetTextInput(on) => self.windows.set_text_input(on),
+                EngineCommand::SetTextInputArea { x, y, w, h, cursor } => self.windows.set_text_input_area(x, y, w, h, cursor),
                 EngineCommand::ReloadMods => {
                     let report = self.reload_mods();
                     self.log_load_report(&report);
@@ -1131,6 +1158,9 @@ impl Engine {
         match GpuContext::new(&self.windows).await {
             Ok(gpu) => {
                 self.renderer.init(&gpu.gpu());
+                for o in &mut self.overlays {
+                    o.init(&gpu.gpu());
+                }
                 self.gpu = Some(gpu);
                 self.logger.info("Graphics Context Initialized!");
             }
@@ -1143,6 +1173,9 @@ impl Engine {
         if let Some(gpu) = &mut self.gpu {
             if gpu.resize(size) {
                 self.renderer.resize(&gpu.gpu());
+                for o in &mut self.overlays {
+                    o.resize(&gpu.gpu());
+                }
             }
         }
     }
@@ -1151,7 +1184,7 @@ impl Engine {
     /// (headless, failed init). If the frame could not be drawn, its texture changes are put
     /// back so the renderer still sees them once.
     fn render_frame_to_surface(&mut self) {
-        let Engine { renderer, gpu, state, logger, .. } = self;
+        let Engine { renderer, overlays, gpu, state, logger, .. } = self;
         let Some(gpu) = gpu else { return };
         if !state.resources.contains::<RenderFrame>() {
             return;
@@ -1167,6 +1200,9 @@ impl Engine {
                 Cst::Outdated | Cst::Lost => {
                     gpu.reconfigure();
                     renderer.resize(&gpu.gpu());
+                    for o in overlays.iter_mut() {
+                        o.resize(&gpu.gpu());
+                    }
                     (None, false)
                 }
                 // Skip this frame (timeout, or the window is occluded / minimized).
@@ -1181,6 +1217,9 @@ impl Engine {
                 let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
                 renderer.render(&gpu.gpu(), &view, &frame);
                 drop(frame);
+                for o in overlays.iter_mut() {
+                    o.render(&gpu.gpu(), &view);
+                }
                 drawn = true;
                 gpu.queue.present(output);
                 if suboptimal {
@@ -1205,6 +1244,15 @@ impl Engine {
             }
             WindowEvent::ScaleFactorChanged { scale } => {
                 self.state.window.scale_factor = scale;
+                if let Some(gpu) = &mut self.gpu {
+                    let s = crate::engine::render::gpu::sanitize_scale(scale);
+                    if gpu.scale_factor != s {
+                        gpu.scale_factor = s;
+                        for o in &mut self.overlays {
+                            o.resize(&gpu.gpu());
+                        }
+                    }
+                }
             }
             WindowEvent::Focused(f) => {
                 self.state.window.focused = f;
@@ -1250,7 +1298,13 @@ impl Engine {
         self.event_buf.clear();
         self.windows.poll_events(&mut self.event_buf);
         let events = std::mem::take(&mut self.event_buf);
-        for ev in &events {
+        let mut events = events;
+        for ev in &mut events {
+            let mut captured = false;
+            for f in &mut self.input_filters {
+                captured |= f.filter(ev) == Filter::Captured;
+            }
+            ev.captured = captured;
             self.handle_window_event(ev);
             self.state.input.apply(ev);
         }

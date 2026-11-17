@@ -104,18 +104,33 @@ fn menu_system(mut signals: EventReader<UiSignal>, ...) {
 
 ## 3. Phases
 
-### Phase 0: native spike (about a day)
+### Phase 0: native spike (about a day) — DONE, verdict: GO
 
-- [ ] Add iced main as a git dependency pinned to a commit (`iced_wgpu`, `iced_runtime`, `iced_widget`).
-- [ ] Draw one iced button and one text input over coin_dash with `iced_wgpu` on the engine's device,
-  queue and surface texture, in a pass after the sprite renderer.
-- [ ] Convert SDL events to iced events (mouse, keys, text, scale factor) and drive
-  `iced_runtime::UserInterface` from the engine loop.
-- [ ] Report whether iced consumed the input; the game ignores clicks on the button.
-- [ ] Measure binary size, compile time and frame time cost.
+- [x] Add iced main as a git dependency pinned to a commit (`iced_wgpu`, `iced_runtime`, `iced_widget`, `iced_core`): `e5c350f271a8046f875c6662d452fde9e462d486` (iced main, 2026-11-16, `0.15.0-dev`). Its workspace uses `wgpu = 30`; `cargo tree -d` shows exactly one `wgpu` (30.0.2, shared with the engine) and no duplicate naga / wgpu-* crates. The dependencies live in `crates/ui` under `cfg(not(target_arch = "wasm32"))` behind the default feature `iced`; the wasm32 build does not see them (`cargo tree --target wasm32-unknown-unknown` has no iced). Only `iced_wgpu`, `iced_runtime`, `iced_widget`, `iced_core` are used (no `iced_winit`, no winit; cosmic-text and cryoglyph come in as iced's git dependencies).
+- [x] Draw iced widgets over the game with `iced_wgpu` on the engine's device, queue and surface texture, in a pass after the game renderer: the engine's `RenderOverlay` (`LoadOp::Load`) calls `Renderer::present` with the engine's target view. Written as the real backend (`crates/ui/src/native/`), not throwaway code: layers (z stack, anchors, modal backdrop), container / row / column, text, button, text input, checkbox, slider, scroll.
+- [x] Engine events to iced events (mouse, wheel, touch, keys with modifiers, text -> `InputMethod::Commit`, IME preedit, focus, scale factor) and `iced_runtime::UserInterface` driven from the engine loop (one build + `update` per input event from the engine's `InputFilter`, one per frame for drawing).
+- [x] Report whether iced consumed the input: the filter answers `Captured` from iced's event status, "pointer over a blocking node" and "text input focused"; `InputState` flags the events and `cx.game_input()` ignores them.
+- [x] Measure binary size, compile time and frame time cost (numbers below).
 
-**Exit:** the button and text field work on native and the costs are written down. If iced cannot
-share the surface or the costs are unacceptable, switch the native plan to section 6 now.
+**Measurements** (this machine: Intel UHD 620, Vulkan, Fedora; `examples/ui_demo`, release profile of the workspace, i.e. no strip / LTO):
+
+| | without `iced` | with `iced` | delta |
+|---|---|---|---|
+| release binary | 13.25 MB | 18.13 MB | +4.88 MB (+37%) |
+| same, `strip`ped | 10.09 MB | 13.95 MB | +3.86 MB (+38%) |
+| clean release build of `efeengine-ui` (core already built) | 3.2 s | 145.6 s | about +142 s (iced, cosmic-text, cryoglyph, lyon, ... plus the native module) |
+
+Frame time of the iced pass (`EFE_UI_STATS=1`, menu + HUD shown, release): steady state about 1.1 to 1.2 ms per frame (about 0.2 ms build + layout + update + draw on the CPU, about 1 ms in `present`: encoding and `queue.submit`); the first 300 frames, which include font loading and first text shaping, were 2.8 to 7 ms. The pass does nothing while no layer is shown (coin_dash is unaffected: it does not use the UI, and its tests pass). Optimization room if it ever matters: the whole interface is rebuilt and laid out every frame (iced's own runtime does the same, but only when something changed); skip rebuild and layout on frames without input, journal entries or animation requests.
+
+**Findings**
+- The commit needs no `[patch]`: iced main, the engine and cryoglyph agree on wgpu 30.0.2.
+- iced main changed its layout model: `Length::Fit` (intrinsic size, `Fill` children inside a `Fit` parent are "fluid") and `Length::min` / `max` (bounded lengths). With them `Auto`, `Stretch` and `min_*` / `max_*` map cleanly, so the style table has no gap there (API.md section 5 updated).
+- Gaps in iced for our style subset: no `justify` (emulated with `Fill` spacers, only when the main size is definite), buttons / checkboxes / sliders are not focusable (the focused style only shows on text inputs), a checkbox style paints the box, not the whole row, `opacity` is per colour, not per subtree.
+- `iced_wgpu::Engine::new` needs a `wgpu::Adapter` (unused without iced's image / svg features) and the core `Gpu` has none: the backend creates a throwaway adapter. Ask core for `Gpu.adapter` before enabling images.
+- Widget state lives in iced's `user_interface::Cache` keyed by tree position; the model is rebuilt on every journal batch, so state survives as long as the structure does not shift (a layer inserted below another shifts positions; fix in Phase 3 with ids or keyed children).
+- iced widgets produce `Msg`s that the backend applies to its own copy first (typing and dragging never wait a frame) and reports as `UiSignal`s; `max_len` is enforced on our side.
+
+**Exit:** the button and text field work on native and the costs are written down: +4.9 MB, +142 s clean build, about 1 ms per frame. Not unacceptable for a native-only, default-on-but-optional feature. **Go: native stays on iced** (section 6 fallback is not needed now). Re-check at every wgpu upgrade (section 5).
 
 ### Phase 1: shared API (`efeengine-ui`)
 
@@ -141,10 +156,12 @@ in headless tests.
 
 ### Phase 3: native backend (iced)
 
-- [ ] `UiTree` → iced `Element`s, iced messages → `UiSignal`.
-- [ ] Style subset and themes mapped to iced styles; compare screenshots with the web backend.
-- [ ] Text input, IME and clipboard through SDL.
-- [ ] DPI and resize through the engine's scale factor.
+Started by the Phase 0 spike (`crates/ui/src/native/`); what is ticked works, the rest is listed in `crates/ui/structure.md` ("Not done yet").
+
+- [x] `UiTree` → iced `Element`s, iced messages → `UiSignal` (layers, container / row / column, text, button, text input, checkbox, slider, scroll; images are placeholders).
+- [ ] Style subset and themes mapped to iced styles (done for normal / hovered / pressed / focused / disabled of the widgets that support them); compare screenshots with the web backend.
+- [ ] Text input, IME and clipboard through SDL (text, `TextEditing` preedit and the `SetTextInput` / area commands are wired; preedit drawing and clipboard are not).
+- [x] DPI and resize through the engine's scale factor (`Viewport` from `Gpu.size` / `scale_factor`, events divided by the scale).
 
 **Exit:** the same settings menu, unchanged, works on native.
 

@@ -6,12 +6,14 @@
 
 pub mod capture;
 pub mod events;
+pub mod filter;
 pub mod gamepad;
 pub mod keys;
 pub mod state;
 
 pub use capture::{GameInput, InputCapture};
 pub use events::*;
+pub use filter::{Filter, InputFilter};
 pub use gamepad::*;
 pub use keys::*;
 pub use state::*;

@@ -132,6 +132,11 @@ impl InnerWindow for SdlWindowManager {
         }
     }
 
+    fn set_text_input_area(&mut self, x: i32, y: i32, w: i32, h: i32, cursor: i32) {
+        let rect = sdl3::rect::Rect::new(x, y, w.max(0) as u32, h.max(0) as u32);
+        self.video.text_input().set_rect(&self.main_window, rect, cursor);
+    }
+
     fn set_cursor_visible(&mut self, visible: bool) {
         self.mouse.show_cursor(visible);
     }
@@ -243,6 +248,9 @@ impl InnerWindow for SdlWindowManager {
                     if !text.is_empty() {
                         push(timestamp, win_id(&self.main_window, window_id), InputEventKind::Text(text));
                     }
+                }
+                SdlEvent::TextEditing { timestamp, window_id, text, start, length } => {
+                    push(timestamp, win_id(&self.main_window, window_id), InputEventKind::TextEditing { text, cursor: start, len: length });
                 }
                 SdlEvent::MouseMotion { timestamp, window_id, which, x, y, xrel, yrel, .. } => {
                     if which == sdl3::sys::touch::SDL_TOUCH_MOUSEID { continue; }

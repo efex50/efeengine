@@ -471,7 +471,7 @@ fn captured_events_and_ui_capture_filter_game_input() {
     struct Eats;
     impl UiBackend for Eats {
         fn init(&mut self, _: &mut UiBackendCx) {}
-        fn input(&mut self, ev: &InputEvent, _: &UiTree) -> Filter {
+        fn input(&mut self, ev: &InputEvent) -> Filter {
             if matches!(ev.kind, InputEventKind::MouseButton { .. }) { Filter::Captured } else { Filter::Pass }
         }
         fn sync(&mut self, _: &UiTree, _: &[UiChange], _: &Theme, _: &mut UiBackendCx) {}

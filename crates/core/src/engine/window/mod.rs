@@ -45,6 +45,9 @@ pub trait InnerWindow: HasWindowHandle + HasDisplayHandle{
     fn poll_events(&mut self, out: &mut Vec<InputEvent>);
     /// Start/stop OS text input (Text events). Default no-op.
     fn set_text_input(&mut self, _enabled: bool) {}
+    /// Where text is typed, in logical pixels, plus the caret offset (IME popup placement).
+    /// Default no-op.
+    fn set_text_input_area(&mut self, _x: i32, _y: i32, _w: i32, _h: i32, _cursor: i32) {}
     /// Show/hide the cursor over the window. Default no-op.
     fn set_cursor_visible(&mut self, _visible: bool) {}
     /// Grab the pointer: relative mouse mode (native) / pointer lock (web). Default no-op.
@@ -60,6 +63,7 @@ pub trait WindowManager{
     fn poll_events(&mut self, out: &mut Vec<InputEvent>);
     fn set_title(&mut self,title:String);
     fn set_text_input(&mut self, enabled: bool);
+    fn set_text_input_area(&mut self, x: i32, y: i32, w: i32, h: i32, cursor: i32);
     fn set_cursor_visible(&mut self, visible: bool);
     fn set_cursor_grab(&mut self, grab: bool);
     fn poll_gamepads(&mut self, state: &mut GamepadState);
@@ -68,6 +72,7 @@ pub struct GameWindowManager{
     inner: Box<dyn InnerWindow>,
     injected: VecDeque<InputEvent>,
     headless: bool,
+    text_input_area: Option<(i32, i32, i32, i32, i32)>,
 }
 
 impl GameWindowManager {
@@ -85,11 +90,16 @@ impl GameWindowManager {
             inner,
             injected: VecDeque::new(),
             headless: cfg.headless,
+            text_input_area: None,
         })
     }
     /// Queue an event; drained into `out` before the backend's own events on the next poll.
     pub fn inject(&mut self, ev: InputEvent) {
         self.injected.push_back(ev);
+    }
+    /// The last `(x, y, w, h, cursor)` given to `set_text_input_area` (logical px).
+    pub fn text_input_area(&self) -> Option<(i32, i32, i32, i32, i32)> {
+        self.text_input_area
     }
     pub fn is_headless(&self) -> bool {
         self.headless
@@ -133,6 +143,11 @@ impl WindowManager for GameWindowManager {
 
     fn set_text_input(&mut self, enabled: bool) {
         self.inner.set_text_input(enabled);
+    }
+
+    fn set_text_input_area(&mut self, x: i32, y: i32, w: i32, h: i32, cursor: i32) {
+        self.text_input_area = Some((x, y, w, h, cursor));
+        self.inner.set_text_input_area(x, y, w, h, cursor);
     }
 
     fn set_cursor_visible(&mut self, visible: bool) {

@@ -174,13 +174,13 @@ pub struct Style {
 | Property | CSS | iced | taffy / fallback |
 |---|---|---|---|
 | direction | `flex-direction` | `row` / `column` | `flex_direction` |
-| justify, align | `justify-content`, `align-items` | `align_x` / `align_y` on the container | `justify_content`, `align_items` |
+| justify, align | `justify-content`, `align-items` | align: `align_x` / `align_y` on the row / column (`Stretch` = children `Fill`, fluid inside a `Fit` parent); justify: `Fill` spacers around the children, only when the container's main size is definite (iced has no justify) | `justify_content`, `align_items` |
 | gap, padding | `gap`, `padding` | `spacing`, `padding` | `gap`, `padding` |
-| width/height Fill, Portion | `flex-grow` | `Length::Fill`, `FillPortion` | `flex_grow` |
-| min/max | `min-width` ... | `min_width` / `max_width` (check heights in the spike) | `min_size`, `max_size` |
+| width/height Auto, Fill, Portion | `flex-grow` | `Length::Fit` (Auto), `Length::Fill`, `FillPortion` | `flex_grow` |
+| min/max | `min-width` ... | `Length::min(v)` / `Length::max(v)` on the width / height (iced main's bounded lengths; spike: works for both axes) | `min_size`, `max_size` |
 | background, border, radius | `background`, `border`, `border-radius` | `container::Style` | quad pipeline |
 | text color, size, bold, align | `color`, `font-size`, `font-weight`, `text-align` | `text` style | glyphon attrs |
-| opacity | `opacity` | per-widget color alpha (check in the spike) | multiply alpha |
+| opacity | `opacity` | folded into every colour's alpha of the node (background, border, text); a child does not inherit it (the theme puts it on the node that needs it, e.g. disabled) | multiply alpha |
 
 ## 6. Themes and classes
 
@@ -225,7 +225,7 @@ pub struct StateStyles { pub normal: Style, pub hovered: Style, pub pressed: Sty
     all pointer events, so the content may sit anywhere by its anchor. Inside layers a node takes
     pointer events (`auto`), except a Container or Text without background and border, which lets
     the pointer through to the game (a transparent layout box does not block clicks).
-- **iced:** the theme becomes style functions per kind and class (`button::Style` for each state).
+- **iced:** the theme is resolved per node when the tree changes (`WidgetState` variants: normal, hovered, pressed, focused, disabled) and the widgets' status closures pick one (`button::Style` for Active / Hovered / Pressed / Disabled, `text_input` Active / Hovered / Focused / Disabled, checkbox and slider Active / Hovered(Dragged) / Disabled). iced buttons, checkboxes and sliders are not focusable, so only text inputs show `focused`. A checkbox's background / border style paints its box (not the whole row as on the web).
 - **Fallback:** resolved per node at sync time and cached until the node, its classes or the theme
   change.
 
@@ -351,8 +351,8 @@ pub type UiCapture = efeengine_core::input::InputCapture;   // { pointer: bool, 
   font (listed in `THIRD_PARTY_NOTICES.md`) as the native default; the web default is the browser's
   sans-serif unless the game loads a font.
 - **Text input on native** needs IME composition events. The engine's `InputEventKind` has
-  `Text(String)` but no composition event yet: add `TextEditing { text, cursor, len }` from SDL3, and
-  a `set_text_input_area(rect)` on the window trait so IME popups appear next to the field.
+  `Text(String)` and `TextEditing { text, cursor, len }` (IME preedit, from SDL3), and
+  `cx.commands.set_text_input_area(x, y, w, h, cursor)` places the IME popup next to the field.
 - **Images** reference engine `TextureHandle`s. Web: the backend draws the decoded RGBA into a
   `<canvas>` (`putImageData`) when the node is created or its kind changes; a texture replaced
   later in `Textures` does not refresh the widget yet. iced: `image::Handle::from_rgba`. Fallback:
@@ -362,16 +362,22 @@ pub type UiCapture = efeengine_core::input::InputCapture;   // { pointer: bool, 
 
 ## 12. Engine integration (changes in efeengine-core)
 
-1. **Overlay render pass:** `Renderer` is a single slot today. Add an overlay list that renders into
-   the same surface texture after the main renderer, before present:
-   `engine.add_render_overlay(impl RenderOverlay)` with `init`, `resize`, `render(gpu, target, frame)`.
-2. **Input pre-filter:** `engine.set_input_filter(impl InputFilter)`, called for each raw
-   `InputEvent` before `InputState::apply`, returning `Captured` / `Pass`. Captured events still reach
-   `InputState` but are flagged, which the filtered helpers use.
+1. **Overlay render pass (done):** `engine.add_render_overlay(impl RenderOverlay)`; trait
+   `RenderOverlay { init(&Gpu), resize(&Gpu), render(&Gpu, &wgpu::TextureView) }` renders into the same
+   surface texture after `Renderer::render`, before present, in add order (`LoadOp::Load`). `resize` is
+   also called when the scale factor changes; `Gpu` has `scale_factor: f32`. Not called headless.
+2. **Input pre-filter (done):** `engine.add_input_filter(impl InputFilter)` (`filter(&mut self, &InputEvent)
+   -> Filter::{Pass, Captured}`), every filter is called for each raw `InputEvent` in add order before
+   `InputState::apply`; any `Captured` sets `InputEvent::captured`. Captured events still reach
+   `InputState`; `game_input()` ignores them. A key / button belongs to whoever got its press (repeats do
+   not change that) and the release follows the owner, so a captured press never becomes a game press
+   and a game press always gets its release.
 3. **Main-thread backend slot:** the backend holds non-`Send` objects (web-sys elements, iced
    renderer). It lives in the engine next to the renderer, not in resources, and is driven from the
    frame: `sync` after `PostUpdate`, `render` in the overlay pass, input in the pre-filter.
-4. **IME and text input area** on the window trait (section 11).
+4. **IME and text input area (done):** `InputEventKind::TextEditing { text, cursor, len }` (SDL3, web
+   composition events) and `cx.commands.set_text_input_area(x, y, w, h, cursor)` (logical px) →
+   `WindowManager::set_text_input_area` (SDL `SDL_SetTextInputArea`, no-op on the web).
 5. **Web (done):** a `uiLayerId` in the startup config (default `"ui"`; the backend creates the
    element in the canvas's parent when missing), and the template's `#ui` element above the canvas
    inside `#stage` (so fullscreen includes it); key handling in `web_backend.rs` as in section 10.
@@ -381,11 +387,14 @@ pub type UiCapture = efeengine_core::input::InputCapture;   // { pointer: bool, 
 ```rust
 pub trait UiBackend: 'static {
     fn init(&mut self, cx: &mut UiBackendCx);                          // GPU/DOM resources
-    fn input(&mut self, ev: &InputEvent, tree: &UiTree) -> Filter;     // native only; web: no-op
+    fn input(&mut self, ev: &InputEvent) -> Filter;                    // native only; web: no-op (no tree: the backend keeps its own copy)
     fn sync(&mut self, tree: &UiTree, changes: &[UiChange], theme: &Theme, cx: &mut UiBackendCx);
     fn drain_signals(&mut self, out: &mut Vec<UiSignal>);
     fn capture(&self) -> UiCapture;
-    fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView) {}   // native only
+    fn gpu_init(&mut self, gpu: &Gpu) {}                               // native only (overlay init)
+    fn gpu_resize(&mut self, gpu: &Gpu) {}                             // native only (surface size / scale)
+    fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView) {}   // native only, LoadOp::Load
+    fn take_text_input(&mut self) -> Option<Option<TextInputArea>> { None }  // Some(Some(area)): a text field has focus
     fn resize(&mut self, logical: (f32, f32), scale: f32) {}
 }
 
@@ -405,7 +414,8 @@ pub enum UiChange {
   changes costs nothing in `sync`.
 - `UiBackendCx.images` carries the engine RGBA images of the textures that `Image` nodes created
   or changed in this `sync` use (filled by the plugin from `Textures`).
-- `UiPlugin::new()` picks the backend: web on wasm32 (`UiPlugin::headless()` forces headless; `UiTest` uses it), iced on native by default, the fallback with the
+- The plugin installs one engine `InputFilter` (calls `backend.input`, answers `Filter::Captured` / `Pass`) and one `RenderOverlay` (`gpu_init`, `gpu_resize`, `render`). The backend never calls back into the engine: signals and the text-input request are queued and the plugin's `ui_signals` system hands them over (`cx.commands.set_text_input(bool)`, `set_text_input_area`). The filter uses `try_borrow_mut`, never a blocking borrow of the shared backend.
+- `UiPlugin::new()` picks the backend: web on wasm32 (`UiPlugin::headless()` forces headless; `UiTest` uses it), iced on native when the default `iced` cargo feature is on and the engine is not headless (`EngineConfig::headless`), the fallback with the
   `ui-fallback` feature, headless when there is no window (tests, servers).
 
 ## 14. Testing (headless backend)

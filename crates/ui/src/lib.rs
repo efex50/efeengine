@@ -12,6 +12,8 @@ pub mod dom_plan;
 pub mod headless;
 pub mod id;
 pub mod journal;
+#[cfg(all(feature = "iced", not(target_arch = "wasm32")))]
+pub mod native;
 pub mod node;
 pub mod plugin;
 pub mod signal;
@@ -23,7 +25,7 @@ pub mod view;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
-pub use backend::{Filter, UiBackend, UiBackendCx};
+pub use backend::{Filter, TextInputArea, UiBackend, UiBackendCx};
 pub use bindings::{Bind, BindCx, BindTarget, BindUpdate, BoundValue, TextSrc, UiBindings};
 pub use capture::UiCapture;
 pub use headless::{HeadlessBackend, HeadlessHandle};
