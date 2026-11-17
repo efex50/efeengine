@@ -9,34 +9,36 @@
 use efeengine_core::efevm::ValType::{F32, I64};
 use efeengine_core::efevm::*;
 use efeengine_core::prelude::*;
+use efeengine_core::scripting::{LogLevel, Script};
+use efeengine_core::ecs::{entity_to_bits};
 
 const FRAMES: usize = 300;
 const ENTITIES: usize = 2000;
 const REPEATS: usize = 20;
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, Default, PartialEq)]
 struct Health {
     hp: f32,
     regen: f32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, Default, PartialEq)]
 struct Heat {
     value: f32,
     _pad: u32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, Default, PartialEq)]
 struct Tag {
     n: u32,
     _pad: u32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, Default, PartialEq)]
 struct Life {
     ttl: i32,
     _pad: u32,
@@ -143,10 +145,10 @@ fn build_with(threads: Threads, mixed: bool) -> Engine {
     let cfg = EngineConfig { fixed_dt: 1.0 / 60.0, threads, ..EngineConfig::headless() };
     let mut e = Engine::with_config(cfg).expect("headless engine");
     for r in [
-        e.register_component::<Health>(),
-        e.register_component::<Heat>(),
-        e.register_component::<Tag>(),
-        e.register_component::<Life>(),
+        e.register::<Health>(),
+        e.register::<Heat>(),
+        e.register::<Tag>(),
+        e.register::<Life>(),
     ] {
         r.expect("register");
     }

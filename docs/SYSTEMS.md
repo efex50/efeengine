@@ -92,3 +92,43 @@ that match nothing are logged and skipped. Late-added systems must be `Send` (th
 
 Par systems queue through `cx.commands().schedule()` with the same methods. Their queues merge in
 sorted system order, like their world commands, so the result is the same for every thread count.
+
+## Components
+
+```rust
+#[script_component]                 // repr(C) + Clone, Copy, Pod, Zeroable, ScriptType
+#[derive(Default, Debug)]
+pub struct Patrol { pub origin: Vec2, pub range: f32 }
+
+#[script_component(name = "Hp", tracked)]   // other script name, change tracking on
+pub struct Health { pub hp: f32 }
+
+#[script_component(readonly)]       // scripts read it; set / insert / remove give status 5
+pub struct Score { pub value: i64 }
+
+#[derive(Component)]                // Rust-only, optional: only adds engine metadata
+#[component(tracked)]
+pub struct Target(pub Entity);
+
+engine.register::<Patrol>()?;       // one call for both kinds
+```
+
+`register` records the plugin being built as the owner (else `engine`) and fails with
+`TypeError::Closed` once the game has started. Plain types still work as components without any
+macro. A `readonly` component is checked when a script runs (status 5), not by the assembler.
+
+## Imports
+
+Three layers, all public:
+
+- `use efeengine_core::prelude::*;` is the everyday set (engine, config, systems, components,
+  `Entity`/`World`, `Vec2`.., `Res`, `Time`, common keys, log functions).
+- Domain modules at the crate root are extra front doors for rarer things: `render` (renderer
+  authors: `Renderer`, `Gpu`, `RenderFrame`, `wgpu`, `bytemuck`, ...), `input`, `scripting`, `mods`,
+  `ecs`, `math` (all of glam), `cache`, `log`, `thread`. Import them where needed, e.g.
+  `use efeengine_core::render::*;`.
+- `efeengine_core::engine::...` is the full internals (`engine::window`, `messages`, `types`,
+  `schedule`, ...), as public as the code makes it. The facades hide nothing.
+
+The crate root also re-exports `hecs`, `glam`, `wgpu`, `bytemuck`, `efevm`, `efemod`, `efa`. The
+full list is in `crates/core/structure.md`.

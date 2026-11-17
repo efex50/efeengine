@@ -12,11 +12,14 @@ use std::path::{Path, PathBuf};
 use efeengine_core::efa::asm::FsSource;
 use efeengine_core::efa::mod_folder::{BuildLimits, build_mod, list_assets, read_mod_toml};
 use efeengine_core::prelude::*;
+use efeengine_core::cache::{CacheConfig, CacheDir};
+use efeengine_core::mods::{Grant, ModError, ModRequest};
+use efeengine_core::scripting::{LogLevel, ModuleId, ScriptError};
 use script_demo::{Score, setup};
 
-fn mod_err(e: efeengine_core::prelude::LoadError) -> ModError {
+fn mod_err(e: efeengine_core::mods::LoadError) -> ModError {
     match e {
-        efeengine_core::prelude::LoadError::Mod(m) => m,
+        efeengine_core::mods::LoadError::Mod(m) => m,
         other => panic!("expected a mod error, got: {other}"),
     }
 }

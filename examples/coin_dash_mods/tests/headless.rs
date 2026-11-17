@@ -11,6 +11,9 @@ use efeengine_core::efa::mod_folder::{BuildLimits, build_mod, list_assets};
 use efeengine_core::efemod::{Package, ReadLimits};
 use efeengine_core::efevm::ApiIndex;
 use efeengine_core::prelude::*;
+use efeengine_core::cache::{CacheConfig, CacheDir};
+use efeengine_core::mods::{LoadError, LoadInput, LoadReport, ModError};
+use efeengine_core::scripting::{LogLevel, ModuleId};
 
 const DT: f64 = 1.0 / 60.0;
 

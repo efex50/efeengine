@@ -6,6 +6,11 @@ use std::sync::{Arc, Mutex};
 use efeengine_core::efa::asm::MemSource;
 use efeengine_core::efevm::{ApiType, EventDesc, HostFn, HostOk, StructDesc};
 use efeengine_core::prelude::*;
+use efeengine_core::cache::{CacheConfig};
+use efeengine_core::ecs::{PluginError};
+use efeengine_core::cache::{CacheDir};
+use efeengine_core::mods::{Grant, LoadInput, ModRequest};
+use efeengine_core::ecs::{ScheduleError};
 
 fn config() -> EngineConfig {
     EngineConfig {
@@ -34,8 +39,8 @@ fn take_log(e: &mut Engine) -> Vec<&'static str> {
 
 // ---- registration lock ----
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, Default, PartialEq)]
 struct Late {
     v: f32,
     _pad: u32,

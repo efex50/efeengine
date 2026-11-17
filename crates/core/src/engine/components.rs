@@ -2,14 +2,14 @@
 //! so they can be copied to and from VM memory as bytes; they are registered in the
 //! [`TypeRegistry`](crate::engine::types::TypeRegistry) by `Engine::with_config`.
 
-use efeengine_macros::ScriptType;
+use efeengine_macros::script_component;
 use glam::{Affine2, Mat4, Vec2};
 
 use crate::engine::types::ScriptField;
 
 /// Position, rotation and scale of an entity in 2D world space.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component(tracked)]
+#[derive(Debug, PartialEq)]
 pub struct Transform {
     /// World position.
     pub position: Vec2,
@@ -33,8 +33,8 @@ impl Transform {
 }
 
 /// Linear and angular velocity.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, Default, PartialEq)]
 pub struct Velocity {
     /// World units per second.
     pub linear: Vec2,
@@ -44,16 +44,16 @@ pub struct Velocity {
 
 /// Handle of the mesh an entity is drawn with. Meshes are collected into
 /// `RenderFrame::meshes`; what the id means is up to the game's renderer.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct MeshHandle {
     /// Mesh id (0 = none; the engine gives it no further meaning).
     pub id: u32,
 }
 
 /// Handle of a texture in the [`Textures`](crate::engine::render::Textures) store.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, Default, PartialEq, Eq, Hash)]
 pub struct TextureHandle {
     /// Texture id; 0 is "no texture" (draw plain white, so the tint is the colour).
     pub id: u32,
@@ -77,8 +77,8 @@ impl ScriptField for TextureHandle {
 /// A camera. Its position and rotation are those of its entity's `Transform` (or
 /// `GlobalTransform`, once propagated); its scale is ignored. Exactly one camera is used per
 /// frame: the active one with the lowest entity id (see `RenderFrame`).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, PartialEq)]
 pub struct Camera {
     /// 0 = orthographic 2D, 1 = perspective (reserved for the 3D phase).
     pub kind: u32,
@@ -125,8 +125,8 @@ impl Camera {
 }
 
 /// A textured, tinted quad drawn at its entity's transform, centred on the origin.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, PartialEq)]
 pub struct Sprite {
     /// The texture; id 0 = none (flat white).
     pub texture: TextureHandle,
@@ -169,8 +169,8 @@ impl Default for Sprite {
 }
 
 /// Whether an entity is drawn. A missing component means visible. Not inherited by children.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Visibility {
     /// Non-zero: drawn.
     pub visible: u32,
@@ -189,8 +189,8 @@ impl Visibility {
 
 /// The entity this one is attached to: its `Transform` is relative to the parent's. A parent
 /// that is gone (or has no `Transform`) makes this entity a root.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Parent {
     /// The parent, as `entity_to_bits` encodes it (0 = none).
     #[script(entity)]
@@ -208,37 +208,82 @@ impl Parent {
 }
 
 /// The entities whose `Parent` is this one, in entity-id order. Rust-only; rebuilt every
-/// frame by the transform propagation system, so do not edit it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Children(pub Vec<hecs::Entity>);
+/// frame by the transform propagation system. Read-only: the list is private, game code reads
+/// it with [`entities`](Self::entities) and cannot build or change one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Children(Vec<hecs::Entity>);
 
-/// World-space 2D affine transform, computed every frame in `PostUpdate` from `Transform`
-/// and the `Parent` chain. Read-only by convention: writes are overwritten.
-///
-/// The matrix columns are `x_axis` / `y_axis` (the local axes, scale and rotation included)
-/// and `translation`; it maps local points to world as `p' = x_axis * p.x + y_axis * p.y + translation`.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
-pub struct GlobalTransform {
-    /// World direction (and length) of the local x axis.
-    pub x_axis: Vec2,
-    /// World direction (and length) of the local y axis.
-    pub y_axis: Vec2,
-    /// World position of the origin.
-    pub translation: Vec2,
-}
+impl Children {
+    pub(crate) fn new(list: Vec<hecs::Entity>) -> Self {
+        Self(list)
+    }
 
-impl Default for GlobalTransform {
-    fn default() -> Self {
-        Self::IDENTITY
+    pub(crate) fn set(&mut self, list: Vec<hecs::Entity>) {
+        self.0 = list;
+    }
+
+    /// The children, in entity-id order.
+    pub fn entities(&self) -> &[hecs::Entity] {
+        &self.0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = hecs::Entity> + '_ {
+        self.0.iter().copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
-impl GlobalTransform {
-    pub const IDENTITY: GlobalTransform = GlobalTransform { x_axis: Vec2::X, y_axis: Vec2::Y, translation: Vec2::ZERO };
+/// World-space 2D affine transform, computed every frame in `PostUpdate` from `Transform`
+/// and the `Parent` chain. Read-only: the fields are private (read them with the getters) and
+/// scripts get status 5 for `set`/`insert`/`remove`.
+///
+/// The matrix columns are `x_axis` / `y_axis` (the local axes, scale and rotation included)
+/// and `translation`; it maps local points to world as `p' = x_axis * p.x + y_axis * p.y + translation`.
+#[script_component(tracked, readonly)]
+#[derive(Debug, PartialEq)]
+pub struct GlobalTransform {
+    /// World direction (and length) of the local x axis.
+    x_axis: Vec2,
+    /// World direction (and length) of the local y axis.
+    y_axis: Vec2,
+    /// World position of the origin.
+    translation: Vec2,
+}
 
-    pub fn from_affine(a: Affine2) -> Self {
+impl GlobalTransform {
+    pub(crate) const IDENTITY: GlobalTransform = GlobalTransform { x_axis: Vec2::X, y_axis: Vec2::Y, translation: Vec2::ZERO };
+
+    pub(crate) fn from_affine(a: Affine2) -> Self {
         Self { x_axis: a.matrix2.x_axis, y_axis: a.matrix2.y_axis, translation: a.translation }
+    }
+
+    /// An identity value for tests that need to spawn one. Not for game code: the engine
+    /// computes every `GlobalTransform`.
+    #[doc(hidden)]
+    pub fn __identity_for_tests() -> Self {
+        Self::IDENTITY
+    }
+
+    /// World direction (and length) of the local x axis.
+    pub fn x_axis(&self) -> Vec2 {
+        self.x_axis
+    }
+
+    /// World direction (and length) of the local y axis.
+    pub fn y_axis(&self) -> Vec2 {
+        self.y_axis
+    }
+
+    /// World position of the origin.
+    pub fn translation(&self) -> Vec2 {
+        self.translation
     }
 
     pub fn affine(&self) -> Affine2 {

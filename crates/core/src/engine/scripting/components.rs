@@ -36,7 +36,18 @@ pub use efemod::components::{component_name, parse_components_raw, ModComponent,
 /// Marks the module whose script spawned an entity. Rust-only and untracked (not in the
 /// `TypeRegistry`, so scripts never see it); an unload despawns the entities of the module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SpawnedBy(pub ModuleId);
+pub struct SpawnedBy(ModuleId);
+
+impl SpawnedBy {
+    pub(crate) fn new(id: ModuleId) -> Self {
+        Self(id)
+    }
+
+    /// The module whose script spawned the entity.
+    pub fn module(&self) -> ModuleId {
+        self.0
+    }
+}
 
 /// Parse and lay out the components of `meta.component`. Nothing is registered.
 pub fn parse_components(mod_id: &str, meta: Option<&Value>) -> Result<Vec<ModComponent>, ModError> {
@@ -146,7 +157,7 @@ impl Scripting {
     /// they are unregistered (removing them from every entity). The types leave the registry and
     /// the API index in both cases.
     pub(crate) fn release_module_state(&mut self, id: ModuleId, name: &str, world: &mut World, types: &mut TypeRegistry, keep: bool) {
-        let victims: Vec<Entity> = world.query::<(Entity, &SpawnedBy)>().iter().filter(|(_, s)| s.0 == id).map(|(e, _)| e).collect();
+        let victims: Vec<Entity> = world.query::<(Entity, &SpawnedBy)>().iter().filter(|(_, s)| s.module() == id).map(|(e, _)| e).collect();
         for e in victims {
             let _ = world.despawn(e);
         }

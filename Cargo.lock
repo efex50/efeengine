@@ -476,7 +476,6 @@ dependencies = [
 name = "coin_dash_scripts"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
  "efeengine-core",
 ]
 

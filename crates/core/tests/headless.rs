@@ -4,6 +4,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use efeengine_core::prelude::*;
+use efeengine_core::engine::messages::Message;
+use efeengine_core::input::{ElementState, InputEvent, InputEventKind, Modifiers};
 
 fn engine() -> Engine {
     Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, ..EngineConfig::headless() })

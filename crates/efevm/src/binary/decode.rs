@@ -498,7 +498,7 @@ fn struct_desc(p: &mut Reader) -> Res<StructDesc> {
         let doc = p.string()?;
         fields.push(FieldDesc { name, offset, ty, count, doc });
     }
-    Ok(StructDesc { name, size, align, fields, doc, owner, component })
+    Ok(StructDesc { name, size, align, fields, doc, owner, component, readonly: false })
 }
 
 fn param_list(p: &mut Reader) -> Res<Vec<Param>> {

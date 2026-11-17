@@ -8,7 +8,7 @@ use web_sys::{
 };
 
 use crate::{
-    EngineError, debug_warn,
+    engine::error::EngineError, debug_warn,
     input::{
         ElementState, GamepadAxis, GamepadButton, GamepadId, GamepadState, InputEvent, InputEventKind, Key, KeyCode, MouseButton, TouchPhase, WheelUnit,
         WindowEvent, WindowId,

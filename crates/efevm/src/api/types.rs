@@ -364,6 +364,9 @@ pub struct StructDesc {
     /// `Some(id)` for an engine component (the numeric id scripts pass to `engine.world.*`),
     /// `None` for a plain struct used only in signatures.
     pub component: Option<u32>,
+    /// A read-only component: scripts may read it but `engine.world.set/insert/remove` fail
+    /// (status 5). Written to the `.efapi` only when `true`; not part of the module binary.
+    pub readonly: bool,
 }
 
 impl StructDesc {
@@ -376,7 +379,13 @@ impl StructDesc {
             doc: String::new(),
             owner: String::new(),
             component: None,
+            readonly: false,
         }
+    }
+
+    pub fn readonly(mut self, readonly: bool) -> Self {
+        self.readonly = readonly;
+        self
     }
 
     pub fn field(mut self, f: FieldDesc) -> Self {

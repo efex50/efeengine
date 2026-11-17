@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use efeengine_core::prelude::*;
+use efeengine_core::render::{Gpu, RenderFrame, Renderer, TextureChanges};
 use efeengine_core::wgpu::{self, util::DeviceExt};
 
 /// What the camera uniform buffer holds (matches `struct Camera` in `sprite.wgsl`).
@@ -129,13 +129,13 @@ impl Renderer for MyRenderer {
         // TODO: create the shader module from `include_str!("../shaders/sprite.wgsl")`, the
         // bind group layouts, the sampler, the render pipeline targeting `gpu.surface_format`
         // (alpha blending on), and the camera bind group over `camera_buffer`.
-        efeengine_core::global_info(&format!("[custom_renderer] init: surface {:?} {}x{}", gpu.surface_format, gpu.size.0, gpu.size.1));
+        efeengine_core::prelude::global_info(&format!("[custom_renderer] init: surface {:?} {}x{}", gpu.surface_format, gpu.size.0, gpu.size.1));
     }
 
     fn resize(&mut self, gpu: &Gpu) {
         // TODO: recreate size-dependent resources (depth buffer, offscreen targets).
         // The camera's projection already follows the new size (it comes with the frame).
-        efeengine_core::global_info(&format!("[custom_renderer] resize: {}x{}", gpu.size.0, gpu.size.1));
+        efeengine_core::prelude::global_info(&format!("[custom_renderer] resize: {}x{}", gpu.size.0, gpu.size.1));
     }
 
     fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView, frame: &RenderFrame) {

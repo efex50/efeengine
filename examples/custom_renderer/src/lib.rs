@@ -13,6 +13,7 @@
 mod renderer;
 
 use efeengine_core::prelude::*;
+use efeengine_core::render::{Image, RenderFrame};
 
 /// A checkerboard of `cells` x `cells` squares, each `cell_px` pixels wide.
 fn checkerboard(cells: u32, cell_px: u32, a: [u8; 4], b: [u8; 4]) -> Image {

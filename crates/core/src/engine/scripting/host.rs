@@ -294,7 +294,7 @@ impl ScriptHost {
         let e = self.modules.get_mut(id.0 as usize).and_then(Option::as_mut).and_then(|s| s.spawn_pool.pop_front());
         match e {
             Some(e) => {
-                self.commands.spawn_reserved_with(e, (super::SpawnedBy(id),));
+                self.commands.spawn_reserved_with(e, (super::SpawnedBy::new(id),));
                 Some(e)
             }
             None => {

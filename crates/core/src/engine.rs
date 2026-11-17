@@ -148,6 +148,7 @@ impl Engine {
     ///
     /// ```no_run
     /// use efeengine_core::prelude::*;
+    /// use efeengine_core::engine::error::EngineError;
     /// let engine = Engine::new("title")?;
     /// engine.game_loop();
     /// # Ok::<(), EngineError>(())
@@ -245,17 +246,15 @@ impl Engine {
             #[cfg(not(target_family = "wasm"))]
             api_export,
         };
-        engine.register_component::<Transform>().expect("built-in components register");
-        engine.register_component::<Velocity>().expect("built-in components register");
-        engine.register_component::<MeshHandle>().expect("built-in components register");
-        engine.register_component::<TextureHandle>().expect("built-in components register");
-        engine.register_component::<Camera>().expect("built-in components register");
-        engine.register_component::<Sprite>().expect("built-in components register");
-        engine.register_component::<Visibility>().expect("built-in components register");
-        engine.register_component::<Parent>().expect("built-in components register");
-        engine.register_component::<GlobalTransform>().expect("built-in components register");
-        engine.state.world.track_changes::<Transform>();
-        engine.state.world.track_changes::<GlobalTransform>();
+        engine.register::<Transform>().expect("built-in components register");
+        engine.register::<Velocity>().expect("built-in components register");
+        engine.register::<MeshHandle>().expect("built-in components register");
+        engine.register::<TextureHandle>().expect("built-in components register");
+        engine.register::<Camera>().expect("built-in components register");
+        engine.register::<Sprite>().expect("built-in components register");
+        engine.register::<Visibility>().expect("built-in components register");
+        engine.register::<Parent>().expect("built-in components register");
+        engine.register::<GlobalTransform>().expect("built-in components register");
         Ok(engine)
     }
 
@@ -368,6 +367,26 @@ impl Engine {
     pub fn set_threads(&mut self, threads: Threads) {
         self.config.threads = threads;
         self.exec = Executor::new(resolve_threads(threads, self.config.headless));
+    }
+
+    /// Register component type `T` (a `#[script_component]` or `#[derive(Component)]`
+    /// type): script components are added to the type registry and the API index, tracked ones
+    /// get change tracking. Inside [`Plugin::build`] the plugin is recorded as the owner,
+    /// otherwise the owner is `engine`. Returns the component id (`None` for Rust-only
+    /// components). Fails with `TypeError::Closed` once the game has started.
+    pub fn register<T: types::ComponentInfo>(&mut self) -> Result<Option<u32>, TypeError> {
+        T::register(self)
+    }
+
+    /// The owner recorded for types registered now: the plugin being built, else `engine`.
+    #[doc(hidden)]
+    pub fn current_owner(&self) -> String {
+        self.schedule.current_owner().unwrap_or(types::ENGINE_OWNER).to_string()
+    }
+
+    #[doc(hidden)]
+    pub fn check_registration_open(&self, what: &str) -> Result<(), TypeError> {
+        self.check_api_open(|| format!("component `{what}`"))
     }
 
     /// Register component type `T` (owner `engine`); returns its id. This is the one way to

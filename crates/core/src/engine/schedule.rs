@@ -420,6 +420,11 @@ impl Schedule {
         Self { stages: std::array::from_fn(|_| StageSystems::default()), next_seq: 0, owner: None }
     }
 
+    /// The plugin owner recorded on systems added now (`None` outside `Plugin::build`).
+    pub(crate) fn current_owner(&self) -> Option<&str> {
+        self.owner.as_deref()
+    }
+
     /// Set the plugin owner recorded on systems added from now on; returns the previous one.
     pub(crate) fn swap_owner(&mut self, owner: Option<Arc<str>>) -> Option<Arc<str>> {
         std::mem::replace(&mut self.owner, owner)

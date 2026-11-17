@@ -6,9 +6,11 @@ use std::sync::{Arc, Mutex};
 use efeengine_core::efevm::ValType::F32;
 use efeengine_core::efevm::*;
 use efeengine_core::prelude::*;
+use efeengine_core::scripting::{LogLevel};
+use efeengine_core::ecs::{entity_to_bits};
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Debug, Default, PartialEq)]
 struct Hp {
     v: f32,
     _pad: u32,
@@ -18,7 +20,7 @@ type Log = Arc<Mutex<Vec<(u32, usize, usize)>>>;
 
 fn engine() -> Engine {
     let mut e = Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, ..EngineConfig::headless() }).expect("headless engine");
-    e.register_component::<Hp>().unwrap();
+    e.register::<Hp>().unwrap();
     e.track_changes::<Hp>();
     e
 }
@@ -113,7 +115,7 @@ fn ctx_ticks_and_changed_helper() {
 fn par_writer_then_par_reader_in_a_later_batch() {
     for threads in [Threads::Single, Threads::Fixed(4)] {
         let mut e = Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, threads, ..EngineConfig::headless() }).unwrap();
-        e.register_component::<Hp>().unwrap();
+        e.register::<Hp>().unwrap();
         e.track_changes::<Hp>();
         let ents: Vec<Entity> = (0..10).map(|_| e.world_mut().spawn((Hp::default(), Transform::default()))).collect();
         let mut n = 0u32;

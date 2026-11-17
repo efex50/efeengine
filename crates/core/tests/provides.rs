@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 use efeengine_core::efevm::ValType::{F32, I32, I64};
 use efeengine_core::efevm::*;
 use efeengine_core::prelude::*;
+use efeengine_core::scripting::{LogLevel, ModuleId, Script, ScriptError};
+use efeengine_core::mods::{ModOptions};
 
 type Reports = Arc<Mutex<Vec<i64>>>;
 

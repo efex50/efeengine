@@ -35,6 +35,8 @@ use std::sync::{Arc, Mutex};
 
 use efeengine_core::efevm::{ApiType, HostFn, HostOk};
 use efeengine_core::prelude::*;
+use efeengine_core::mods::{LoadInput};
+use efeengine_core::scripting::{ModuleId, Script};
 
 pub const GAME: &str = "coin_dash_scripts";
 /// Name of the root script; the module (and the `[..]` prefix of its log lines) is named after it.
@@ -54,23 +56,23 @@ const LAYER_PLAYER: i32 = 4;
 // ---- components the scripts read (their layouts are in the API index) ----
 
 /// The player. `invulnerable` is the seconds of immunity left after a hit.
-#[repr(C)]
-#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Default)]
 pub struct Player {
     pub invulnerable: f32,
 }
 
 /// A coin: bobs around `base_y` and spins; `phase` desynchronises the coins.
-#[repr(C)]
-#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Default)]
 pub struct Coin {
     pub base_y: f32,
     pub phase: f32,
 }
 
 /// An enemy moving back and forth along `axis`, within `range` of `origin`.
-#[repr(C)]
-#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, ScriptType)]
+#[script_component]
+#[derive(Default)]
 pub struct Patrol {
     pub origin: Vec2,
     pub axis: Vec2,
@@ -109,9 +111,9 @@ impl Game {
 /// `game_loop` write the index and return before any frame.
 pub fn register_api(engine: &mut Engine) -> Game {
     engine.set_game_name(GAME);
-    engine.register_component::<Player>().expect("register Player");
-    engine.register_component::<Coin>().expect("register Coin");
-    engine.register_component::<Patrol>().expect("register Patrol");
+    engine.register::<Player>().expect("register Player");
+    engine.register::<Coin>().expect("register Coin");
+    engine.register::<Patrol>().expect("register Patrol");
     engine.define_namespace("game", 1, GAME, "Functions of the coin_dash_scripts game.").expect("define namespace game");
     let game = Game {
         score: Arc::default(),

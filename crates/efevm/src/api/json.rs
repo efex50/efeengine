@@ -79,7 +79,8 @@ pub(crate) fn write(ix: &ApiIndex, hash: Option<u64>) -> String {
         o.push_str("    {\n");
         let _ = writeln!(o, "      \"name\": {}, \"owner\": {}, \"doc\": {},", q(&t.name), q(&t.owner), q(&t.doc));
         let comp = t.component.map_or_else(|| "null".to_string(), |c| c.to_string());
-        let _ = writeln!(o, "      \"size\": {}, \"align\": {}, \"component\": {comp},", t.size, t.align);
+        let ro = if t.readonly { ", \"readonly\": true" } else { "" };
+        let _ = writeln!(o, "      \"size\": {}, \"align\": {}, \"component\": {comp}{ro},", t.size, t.align);
         o.push_str("      \"fields\": [");
         for (j, f) in t.fields.iter().enumerate() {
             o.push_str(if j == 0 { "\n" } else { ",\n" });
@@ -630,6 +631,7 @@ pub(crate) fn read(text: &str) -> Result<ApiIndex, ApiError> {
             doc: t.str("doc")?,
             owner: t.str("owner")?,
             component,
+            readonly: matches!(t.get("readonly"), Ok(Value::Bool(true))),
         });
     }
     let mut sigs = Vec::new();

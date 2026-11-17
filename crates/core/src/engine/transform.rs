@@ -136,11 +136,11 @@ pub fn propagate_transforms(cx: &ParCtx<'_>) {
         let p = nodes[i].0;
         match cx.query_one::<&mut Children>(p).get() {
             Ok(c) => {
-                if c.0 != list {
-                    c.0 = list;
+                if c.entities() != list.as_slice() {
+                    c.set(list);
                 }
             }
-            Err(_) => cx.commands().insert(p, Children(list)),
+            Err(_) => cx.commands().insert(p, Children::new(list)),
         }
     }
 }

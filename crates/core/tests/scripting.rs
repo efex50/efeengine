@@ -5,6 +5,11 @@ use std::sync::{Arc, Mutex};
 use efeengine_core::efevm::ValType::{F32, I64};
 use efeengine_core::efevm::*;
 use efeengine_core::prelude::*;
+use efeengine_core::scripting::{ModuleId};
+use efeengine_core::input::{InputEvent, InputEventKind};
+use efeengine_core::scripting::{LogLevel, Script, ScriptError, ScriptEventError};
+use efeengine_core::mods::{ModOptions};
+use efeengine_core::ecs::{entity_to_bits};
 
 fn engine() -> Engine {
     Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, ..EngineConfig::headless() }).expect("headless engine")

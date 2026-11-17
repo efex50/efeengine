@@ -2,6 +2,7 @@
 
 use coin_dash::setup;
 use efeengine_core::prelude::*;
+use efeengine_core::render::{SpriteInstance};
 
 const DT: f64 = 1.0 / 60.0;
 // load order in `setup`: player, enemy, coin sheet, tiles

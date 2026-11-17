@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 use efeengine_core::efevm::{ApiIndex, ApiType, FuncType, FunctionBuilder, Interface, Module, ModuleBuilder, Op, Param, Provide, ValType};
 use efeengine_core::prelude::*;
+use efeengine_core::cache::{CacheConfig, CacheDir};
+use efeengine_core::scripting::{LogLevel, Script, ScriptError};
+use efeengine_core::mods::{ModOptions};
 use efeengine_core::efa::asm::{AsmOptions, FsSource, assemble_program};
 use script_demo::{Modules, Score, setup, spawn_world};
 

@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use efeengine_core::prelude::*;
+use efeengine_core::ecs::{PluginError};
 
 #[derive(Default)]
 struct Log(Vec<&'static str>);
@@ -73,13 +74,13 @@ fn builtin_script_system_runs_before_default_order() {
 #[test]
 fn after_transform_order_sees_propagated_global_transform() {
     let mut e = engine();
-    let parent = e.world_mut().spawn((Transform::from_position(Vec2::new(10.0, 0.0)), GlobalTransform::default()));
-    let child = e.world_mut().spawn((Transform::from_position(Vec2::new(1.0, 0.0)), GlobalTransform::default(), Parent::new(parent)));
+    let parent = e.world_mut().spawn((Transform::from_position(Vec2::new(10.0, 0.0)), GlobalTransform::__identity_for_tests()));
+    let child = e.world_mut().spawn((Transform::from_position(Vec2::new(1.0, 0.0)), GlobalTransform::__identity_for_tests(), Parent::new(parent)));
     let seen = Arc::new(Mutex::new((f32::NAN, f32::NAN)));
     for (slot, ord) in [(0usize, order::TRANSFORM - 1), (1, order::TRANSFORM + 1)] {
         let seen = seen.clone();
         e.add_system(Stage::PostUpdate, move |cx| {
-            let x = cx.world.get::<&GlobalTransform>(child).unwrap().translation.x;
+            let x = cx.world.get::<&GlobalTransform>(child).unwrap().translation().x;
             let mut s = seen.lock().unwrap();
             if slot == 0 { s.0 = x } else { s.1 = x }
         })

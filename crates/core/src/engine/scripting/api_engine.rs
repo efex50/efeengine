@@ -1,7 +1,8 @@
 //! The engine's host functions (owner `engine`, version 1), registered in the one
 //! `HostRegistry<ScriptHost>`. Registering is what makes them callable *and* what puts them in
 //! the API index; there is no other list. Status codes of `engine.world`: 0 ok, 1 stale or
-//! forged entity, 2 component missing, 3 unknown component id, 4 wrong size, -1 other.
+//! forged entity, 2 component missing, 3 unknown component id, 4 wrong size, 5 read-only component
+//! (`set`/`insert`/`remove` on a `#[script_component(readonly)]` type), -1 other.
 
 use efevm::{ApiType as T, Caller, EventRef, GuestSlice, HostFn, HostOk, HostRegistry, RegistryError, Results, Trap};
 use hecs::{Entity, World};
@@ -17,6 +18,7 @@ const STALE: i32 = 1;
 const MISSING: i32 = 2;
 const UNKNOWN_ID: i32 = 3;
 const WRONG_SIZE: i32 = 4;
+const READONLY: i32 = 5;
 
 fn status_of(e: &CompError) -> i32 {
     match e {
@@ -135,7 +137,7 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
     )?;
     r.register(
         HostFn::new(NS, "set")
-            .doc("Overwrite, in place, the existing component `component` of `entity` with the bytes at `src` (the component's size). Buffered: applied after all scripts of the frame ran, in module order (a later module wins over an earlier one); the calling module reads its own write back at once, other modules see the old value until next frame. Status: 0 ok, 1 stale entity, 2 component missing, 3 unknown component id.")
+            .doc("Overwrite, in place, the existing component `component` of `entity` with the bytes at `src` (the component's size). Buffered: applied after all scripts of the frame ran, in module order (a later module wins over an earlier one); the calling module reads its own write back at once, other modules see the old value until next frame. Status: 0 ok, 1 stale entity, 2 component missing, 3 unknown component id, 5 read-only component.")
             .param("entity", T::Entity)
             .param("component", T::I32)
             .param("src", T::Ptr)
@@ -146,6 +148,9 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
                 let h = c.host();
                 let Some(e) = alive(h.world(), bits) else { return status(res, STALE) };
                 let Ok(entry) = h.types().component(id) else { return status(res, UNKNOWN_ID) };
+                if entry.readonly() {
+                    return status(res, READONLY);
+                }
                 if !entry.has(h.world(), e) {
                     return status(res, MISSING);
                 }
@@ -208,7 +213,7 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
     )?;
     r.register(
         HostFn::new(NS, "insert")
-            .doc("Queue adding (or replacing) component `component` on `entity` from the bytes at `src` (the component's size); applied after the stage. Status: 0 ok, 1 stale entity, 3 unknown component id.")
+            .doc("Queue adding (or replacing) component `component` on `entity` from the bytes at `src` (the component's size); applied after the stage. Status: 0 ok, 1 stale entity, 3 unknown component id, 5 read-only component.")
             .param("entity", T::Entity)
             .param("component", T::I32)
             .param("src", T::Ptr)
@@ -219,6 +224,9 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
                 let h = c.host();
                 let Some(e) = alive(h.world(), bits) else { return status(res, STALE) };
                 let Ok(entry) = h.types().component(id) else { return status(res, UNKNOWN_ID) };
+                if entry.readonly() {
+                    return status(res, READONLY);
+                }
                 (e, entry.size())
             };
             let bytes = c.read_bytes(GuestSlice::new(src, size as u64))?;
@@ -228,7 +236,7 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
     )?;
     r.register(
         HostFn::new(NS, "remove")
-            .doc("Queue removing component `component` from `entity`; applied after the stage (a missing component is ignored then). Status: 0 ok, 1 stale entity, 3 unknown component id.")
+            .doc("Queue removing component `component` from `entity`; applied after the stage (a missing component is ignored then). Status: 0 ok, 1 stale entity, 3 unknown component id, 5 read-only component.")
             .param("entity", T::Entity)
             .param("component", T::I32)
             .result("status", T::I32),
@@ -236,8 +244,10 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             let (bits, id) = (a.entity(0)?, a.i32(1)? as u32);
             let h = c.host();
             let Some(e) = alive(h.world(), bits) else { return status(res, STALE) };
-            if h.types().component(id).is_err() {
-                return status(res, UNKNOWN_ID);
+            match h.types().component(id) {
+                Err(_) => return status(res, UNKNOWN_ID),
+                Ok(entry) if entry.readonly() => return status(res, READONLY),
+                Ok(_) => {}
             }
             h.commands.remove_raw(e, id);
             status(res, OK)

@@ -46,6 +46,10 @@ use std::sync::{Arc, Mutex};
 use efeengine_core::efemod::Manifest;
 use efeengine_core::efevm::{ApiType, HostFn, HostOk};
 use efeengine_core::prelude::*;
+use efeengine_core::mods::{AssetHandler, DirSource, Grant, LoadReport, ModBody, ModItem, ModRequest, ModSource};
+use efeengine_core::render::{Image};
+use efeengine_core::scripting::{ModuleId};
+use efeengine_core::ecs::{Resources};
 
 pub const GAME: &str = "coin_dash_mods";
 

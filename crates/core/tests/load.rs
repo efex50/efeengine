@@ -12,6 +12,12 @@ use efeengine_core::efemod::{Manifest, Package};
 use efeengine_core::efevm::{ApiType, HostFn, HostOk};
 use efeengine_core::efevm::api::json::Value;
 use efeengine_core::prelude::*;
+use efeengine_core::cache::{CacheConfig};
+use efeengine_core::mods::{DirSource};
+use efeengine_core::ecs::{Resources};
+use efeengine_core::mods::{AssetHandler, Grant, LoadError, LoadInput, Loaded, ModError, ModRequest};
+use efeengine_core::cache::{CacheDir};
+use efeengine_core::scripting::{ModuleId};
 
 type Reports = Arc<Mutex<Vec<i64>>>;
 

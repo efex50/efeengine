@@ -2,6 +2,7 @@
 //! Run natively with `cargo xtask run input_test native` (or `./build.py run input_test native`) and on the web with
 //! `cargo xtask run input_test web`; watch the terminal / browser console.
 use efeengine_core::prelude::*;
+use efeengine_core::input::{ElementState, GamepadAxis, GamepadButton, GamepadId, InputEventKind};
 
 #[main]
 fn main() {

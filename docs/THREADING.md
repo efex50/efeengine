@@ -68,7 +68,7 @@ function of the registered systems:
 * sort the systems by `(order, registration index)`. Every system has an order number
   (`i32`, default `order::USER` = 0; set with `engine.add_system(..).order(n)`). Equal orders
   keep registration order; the registration index counts over all stages. See
-  `efeengine_core::order` for the named constants (`INPUT`, `EARLY`, `SCRIPTS`, `USER`,
+  `efeengine_core::prelude::order` for the named constants (`INPUT`, `EARLY`, `SCRIPTS`, `USER`,
   `PHYSICS`, `TRANSFORM`, `LATE`);
 * walk the sorted list;
 * an exclusive system closes the current batch and forms a batch of its own;

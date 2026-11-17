@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use coin_dash_scripts::{Coin, Game, Patrol, Player, load_embedded, load_scripts, setup, spawn_actors};
 use efeengine_core::prelude::*;
+use efeengine_core::cache::{CacheConfig, CacheDir};
+use efeengine_core::scripting::{LogLevel, ModuleId, Script};
 
 const DT: f64 = 1.0 / 60.0;
 

@@ -1,43 +1,28 @@
-pub use crate::{
+//! `use efeengine_core::prelude::*;` brings in what a typical game file uses. The domains
+//! have their own front doors at the crate root: [`render`](crate::render),
+//! [`input`](crate::input), [`scripting`](crate::scripting), [`mods`](crate::mods),
+//! [`ecs`](crate::ecs), [`math`](crate::math), [`cache`](crate::cache), [`log`](crate::log) and
+//! [`thread`](crate::thread). Everything else, in full, is under [`engine`](crate::engine).
+
+pub use crate::engine::{
     Engine,
-    EngineStatus,
-    log::*,
-    config::{StartupConfig, set_startup_config, startup_config},
-    messages::*,
-    engine::input::{
-        InputEvent, InputEventKind, WindowEvent, WindowId, WheelUnit, TouchPhase,
-        KeyCode, Key, NamedKey, Modifiers, ElementState, MouseButton,
-        InputState, GamepadState, Gamepad, GamepadId, GamepadButton, GamepadAxis, WHEEL_PIXELS_PER_LINE, WHEEL_LINES_PER_PAGE,
-    },
-    // Modules (the `engine::input::events` module is left out: it would clash with `engine::events`).
-    engine::{window, messages, scripting, render, flags, thread_pool, commands, components, types, error, resources, time, config, schedule, events, input, order, plugin},
-    engine::error::EngineError,
-    engine::config::{EngineConfig, Threads},
-    engine::schedule::{Stage, Ctx, SystemEntry, RunCtx, ScheduleCommands, PendingSystem, ScheduleError},
-    engine::plugin::{Plugin, PluginError},
-    engine::parallel::{Access, ParCtx},
-    engine::commands::{Commands, EngineCommands, ParCommands},
-    engine::components::{Transform, Velocity, MeshHandle, Name, Camera, TextureHandle, Sprite, Visibility, Parent, Children, GlobalTransform},
-    engine::render::{Renderer, Gpu, ClearRenderer, SpriteRenderer, PngError, RenderFrame, CameraView, SpriteInstance, MeshInstance, TextureChanges, Textures, Image, TextureError, RenderWarnings},
-    engine::types::{TypeRegistry, TypeEntry, ScriptType, ScriptField, CompError, TypeError, entity_to_bits, entity_from_bits},
-    engine::scripting::{Scripting, ScriptHost, ScriptStats, Script, ScriptEvent, ScriptEventError, ScriptError, ModOptions, ModuleId, ModPolicy, ModRequest, Grant, DefaultPolicy, PackageInfo, LoadReport, Reloaded, UnloadReport, ModError, CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModBody, ModItem, ModSource, ModuleInfo, LogLevel, LogLine},
-    engine::events::Events,
-    engine::resources::{Resources, Res, ResMut},
-    engine::time::Time,
-    engine::{EngineState, WindowState},
+    config::{EngineConfig, Threads},
+    order,
+    plugin::Plugin,
+    schedule::{Stage, Ctx, SystemEntry, RunCtx},
+    parallel::{Access, ParCtx},
+    commands::Commands,
+    components::{Transform, Velocity, MeshHandle, Name, Camera, TextureHandle, Sprite, Visibility, Parent, Children, GlobalTransform},
+    types::{ScriptType, ComponentInfo},
+    resources::{Res, ResMut},
+    events::Events,
+    time::Time,
+    input::{Key, KeyCode, MouseButton, InputState},
+    render::{SpriteRenderer, Textures},
+    log::{global_info, global_warn, global_alert, global_error, debug_info, debug_warn, debug_alert, debug_error},
 };
-#[cfg(not(target_family = "wasm"))]
-pub use crate::engine::scripting::DirSource;
-pub mod thread{
-    pub use crate::thread_pool::{GLOBAL_POOL,Jobs,init_global_pool,set_global_pool_size,global_pool_size,spawn_global,spawn_job_global};
-    #[cfg(target_arch = "wasm32")]
-    pub use gloo_timers::callback;
-}
-pub use efeengine_macros::{main, ScriptType};
-pub use hecs::{Entity, World, Tick, Mut, Changed, Added, ComponentTicks};
-/// The GPU API the `Renderer` trait is written against (re-exported so versions always match).
-pub use wgpu;
-pub use bytemuck;
+pub use efeengine_macros::{main, Component, script_component, ScriptType};
+pub use hecs::{Entity, World, Mut, Changed, Added};
 pub use glam::{Vec2, Vec3, Vec4, vec2, vec3, vec4};
 #[cfg(target_arch = "wasm32")]
 pub use wasm_bindgen;

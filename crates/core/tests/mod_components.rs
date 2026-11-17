@@ -7,6 +7,10 @@ use std::sync::{Arc, Mutex};
 use efeengine_core::efa::asm::MemSource;
 use efeengine_core::efevm::{ApiType, HostFn, HostOk};
 use efeengine_core::prelude::*;
+use efeengine_core::cache::{CacheConfig, CacheDir};
+use efeengine_core::mods::{Grant, LoadError, LoadInput, Loaded, ModError, ModRequest, Reloaded};
+use efeengine_core::scripting::{LogLevel};
+use efeengine_core::ecs::{TypeRegistry, entity_to_bits};
 
 type Reports = Arc<Mutex<Vec<i64>>>;
 

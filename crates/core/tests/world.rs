@@ -5,6 +5,8 @@ use std::rc::Rc;
 
 use efeengine_core::efevm::Prim;
 use efeengine_core::prelude::*;
+use efeengine_core::ecs::{EngineState};
+use efeengine_core::ecs::{CompError, TypeError, entity_from_bits, entity_to_bits};
 
 fn engine() -> Engine {
     Engine::with_config(EngineConfig::headless()).expect("headless engine")

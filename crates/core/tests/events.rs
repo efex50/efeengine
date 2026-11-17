@@ -11,6 +11,8 @@ use efeengine_core::efemod::{Dependency, Manifest, Package, VersionReq};
 use efeengine_core::efevm::ValType::{F32, I32};
 use efeengine_core::efevm::*;
 use efeengine_core::prelude::*;
+use efeengine_core::mods::{Grant, LoadInput, ModError, ModOptions, ModRequest};
+use efeengine_core::scripting::{LogLevel, ModuleId, ScriptError, ScriptEventError};
 
 /// Test shim: load one `.efmod` through `load_input`.
 trait LoadPackage {
@@ -21,8 +23,8 @@ impl LoadPackage for Engine {
     fn load_package(&mut self, bytes: &[u8]) -> Result<ModuleId, ModError> {
         match self.load_input(LoadInput::Package { label: "test.efmod", bytes }) {
             Ok(l) => Ok(l.id()),
-            Err(efeengine_core::prelude::LoadError::Mod(e)) => Err(e),
-            Err(efeengine_core::prelude::LoadError::Script(e)) => Err(ModError::Script(e)),
+            Err(efeengine_core::mods::LoadError::Mod(e)) => Err(e),
+            Err(efeengine_core::mods::LoadError::Script(e)) => Err(ModError::Script(e)),
             Err(e) => panic!("unexpected load error: {e}"),
         }
     }

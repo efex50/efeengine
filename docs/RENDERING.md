@@ -81,7 +81,7 @@ pub trait Renderer: 'static {
 
 `Engine::set_renderer(r)`. Default `ClearRenderer`: clears to the camera's `clear_color` (black without a camera).
 No `Send` bound: the engine and the renderer stay on the main thread (the web has one thread).
-`wgpu` and `bytemuck` are re-exported from the prelude (`efeengine_core::wgpu`).
+`wgpu` and `bytemuck` are re-exported from the prelude (`efeengine_core::wgpu`, `render::wgpu`).
 
 ## `SpriteRenderer` (built in)
 

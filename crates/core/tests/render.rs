@@ -3,6 +3,7 @@
 
 use efeengine_core::glam::{Mat4, Vec4};
 use efeengine_core::prelude::*;
+use efeengine_core::render::{Image, RenderFrame, RenderWarnings, TextureError};
 
 const DT: f64 = 1.0 / 60.0;
 
@@ -154,21 +155,21 @@ fn parent_propagation_and_children() {
     e.run_frames(2, DT);
     let g = |en| *e.world().get::<&GlobalTransform>(en).unwrap();
     // root: scale 2, rotated 90 deg: its local x axis points along world +y with length 2
-    assert!(close(g(root).translation.x, 10.0));
+    assert!(close(g(root).translation().x, 10.0));
     // kid at local (5,0) -> world (10, 10)
     let k = g(kid);
-    assert!(close(k.translation.x, 10.0) && close(k.translation.y, 10.0), "{k:?}");
+    assert!(close(k.translation().x, 10.0) && close(k.translation().y, 10.0), "{k:?}");
     // grandkid at local (1,0) of kid (scale 2, rotated) -> kid + (0, 2)
     let gk = g(grandkid);
-    assert!(close(gk.translation.x, 10.0) && close(gk.translation.y, 12.0), "{gk:?}");
+    assert!(close(gk.translation().x, 10.0) && close(gk.translation().y, 12.0), "{gk:?}");
     assert!(close(gk.rotation(), std::f32::consts::FRAC_PI_2));
-    assert_eq!(e.world().get::<&Children>(root).unwrap().0, vec![kid]);
-    assert_eq!(e.world().get::<&Children>(kid).unwrap().0, vec![grandkid]);
+    assert_eq!(e.world().get::<&Children>(root).unwrap().entities(), &[kid]);
+    assert_eq!(e.world().get::<&Children>(kid).unwrap().entities(), &[grandkid]);
     assert!(e.world().get::<&Children>(grandkid).is_err());
     // re-parenting updates Children
     e.world_mut().insert_one(grandkid, Parent::new(root)).unwrap();
     e.run_frames(1, DT);
-    assert_eq!(e.world().get::<&Children>(root).unwrap().0, vec![kid, grandkid]);
+    assert_eq!(e.world().get::<&Children>(root).unwrap().entities(), &[kid, grandkid]);
     assert!(e.world().get::<&Children>(kid).is_err(), "emptied Children is removed");
 }
 
@@ -178,17 +179,17 @@ fn stale_parent_makes_a_root() {
     let parent = e.world_mut().spawn((Transform::from_position(Vec2::new(100.0, 0.0)),));
     let kid = e.world_mut().spawn((Transform::from_position(Vec2::new(1.0, 2.0)), Parent::new(parent)));
     e.run_frames(2, DT);
-    assert!(close(e.world().get::<&GlobalTransform>(kid).unwrap().translation.x, 101.0));
+    assert!(close(e.world().get::<&GlobalTransform>(kid).unwrap().translation().x, 101.0));
     e.world_mut().despawn(parent).unwrap();
     e.run_frames(1, DT);
     let g = *e.world().get::<&GlobalTransform>(kid).unwrap();
-    assert_eq!(g.translation, Vec2::new(1.0, 2.0));
+    assert_eq!(g.translation(), Vec2::new(1.0, 2.0));
     // a forged / zero parent is a root too
     let forged = e.world_mut().spawn((Transform::from_position(Vec2::new(4.0, 0.0)), Parent { entity: 0 }));
     let forged2 = e.world_mut().spawn((Transform::from_position(Vec2::new(5.0, 0.0)), Parent { entity: u64::MAX }));
     e.run_frames(1, DT);
-    assert_eq!(e.world().get::<&GlobalTransform>(forged).unwrap().translation.x, 4.0);
-    assert_eq!(e.world().get::<&GlobalTransform>(forged2).unwrap().translation.x, 5.0);
+    assert_eq!(e.world().get::<&GlobalTransform>(forged).unwrap().translation().x, 4.0);
+    assert_eq!(e.world().get::<&GlobalTransform>(forged2).unwrap().translation().x, 5.0);
 }
 
 #[test]
@@ -202,11 +203,11 @@ fn parent_cycles_are_broken_and_warned_once() {
     assert!(!e.resources().get::<RenderWarnings>().unwrap().hierarchy_cycle);
     e.run_frames(3, DT); // must terminate
     assert!(e.resources().get::<RenderWarnings>().unwrap().hierarchy_cycle);
-    let ga = e.world().get::<&GlobalTransform>(a).unwrap().translation.x;
-    let gb = e.world().get::<&GlobalTransform>(b).unwrap().translation.x;
+    let ga = e.world().get::<&GlobalTransform>(a).unwrap().translation().x;
+    let gb = e.world().get::<&GlobalTransform>(b).unwrap().translation().x;
     // a is the lowest id: the walk breaks the cycle at a, so a is a root and b hangs below it
     assert_eq!((ga, gb), (1.0, 11.0));
-    assert_eq!(e.world().get::<&GlobalTransform>(me).unwrap().translation.x, 7.0);
+    assert_eq!(e.world().get::<&GlobalTransform>(me).unwrap().translation().x, 7.0);
     assert!(e.world().get::<&Children>(me).is_err(), "a self-parent has no children");
 }
 
