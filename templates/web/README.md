@@ -4,12 +4,48 @@ Page shell used by `scripts/web.sh` to publish an example as a wasm web app.
 
 ## Files
 
-- `index.html`: full-window `<canvas id="canvas">`, loads `main.js`.
-- `main.js`: initialises the wasm module from `./pkg/{{CRATE}}.js`, calls
-  `__engine_start({ wasmJsPath, threads?, canvasId?, externalApi? })` (relative
-  path, so it works under any sub-path) to start the engine, shows an error box if start-up fails.
+- `index.html`: the page. A full-window `#stage` holds `<canvas id="canvas">` (the id the engine
+  looks up), a fullscreen button, a notice area and the loading / click-to-start / error panels.
+  Dark background, no page scroll, `touch-action: none`, context menu blocked on the canvas.
+- `main.js`: drives start-up (a `CONFIG` object at the top holds the switches):
+  1. environment checks (WebAssembly, WebGPU / WebGL2, cross-origin isolation),
+  2. downloads `pkg/{{CRATE}}_bg.wasm` with a progress bar (Content-Length; indeterminate when
+     it is missing or compressed) and instantiates it through the wasm-bindgen glue,
+  3. optional "Click to start" overlay, then `__engine_start({ wasmJsPath, ... })`,
+  4. error screens, fullscreen, pause on hidden tab.
+- `coi-sw.js`: minimal own-written service worker that adds COOP/COEP (see below). No third-party code.
+- `embed.html`: documented iframe snippet for portals (not needed by the game itself).
 - `favicon.ico`
-- `_headers`: COOP/COEP headers in Netlify / Cloudflare Pages format.
+- `_headers`: COOP/COEP/CORP headers in Netlify / Cloudflare Pages format.
+
+## Switches (top of `main.js`, or `data-*` on `<body>`)
+
+| `CONFIG` key | default | `<body>` attribute | meaning |
+|---|---|---|---|
+| `clickToStart` | `true` | `data-click-to-start="off"` | wait for a click before `__engine_start`; the click focuses the canvas and grants the user activation audio, pointer lock and fullscreen need |
+| `fullscreenButton` | `true` | `data-fullscreen-button="off"` | fullscreen button (always hidden if the browser has no Fullscreen API) |
+| `fullscreenShortcut` | `"Alt+Enter"` | | `""` disables it |
+| `pauseWhenHidden` | `true` | `data-pause-hidden="off"` | send `Message::Stop` / `Message::Start` on `visibilitychange` |
+| `coiServiceWorker` | `false` | `data-coi-sw="on"` | register `coi-sw.js` (see COOP / COEP) |
+
+The engine start-up config (`threads`, `canvasId`, `graphicsBackend`, ...) is `ENGINE_CONFIG`.
+
+## Behaviour notes
+
+- Not cross-origin isolated: the engine still runs, with a thread pool of size 1
+  (`docs/THREADING.md`); the page shows a notice. If the shared-memory wasm cannot be
+  instantiated at all, the error screen says so and points at the headers.
+- No WebGPU: the engine falls back to WebGL2 (`graphicsBackend` `auto`/`webgpu`), shown as a
+  notice. With neither WebGPU nor WebGL2 (or `webgl` requested without WebGL2) an error screen is shown.
+- Errors: wasm fetch / compile failure, `window.onerror`, `unhandledrejection` and Rust panics
+  (`console_error_panic_hook` writes "panicked at ..." to `console.error`, which is surfaced)
+  all replace the page with an error screen. Errors inside pool workers only reach the console.
+- Hidden tab: browsers stop `requestAnimationFrame`, and the engine clamps the first frame delta
+  (`MAX_DELTA` 0.25 s) and releases held keys on blur. Sending Stop/Start through the existing
+  exported `send_message` (no engine change) freezes game time cleanly. Start is only sent for a Stop
+  this page sent.
+- Canvas size: CSS 100% of `#stage`; the engine sets the drawing buffer to
+  `clientWidth/Height * devicePixelRatio` itself. Do not set `width`/`height` attributes.
 
 ## Placeholders
 
@@ -40,13 +76,23 @@ specific wasm-bindgen binary.
 
 ## COOP / COEP
 
-The engine's thread pool needs `SharedArrayBuffer`, so every response must carry
+The engine's thread pool needs `SharedArrayBuffer`, so every response should carry
 
     Cross-Origin-Opener-Policy: same-origin
     Cross-Origin-Embedder-Policy: require-corp
 
-`scripts/serve.py` does this for local use. Netlify and Cloudflare Pages pick up
-`_headers` automatically. GitHub Pages cannot set custom headers; the usual
-workaround is a service worker such as
-[coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker), copied into
-the site and loaded with a `<script>` tag before `main.js` (not vendored here).
+- Local: `scripts/serve.py` (used by `scripts/web.sh serve`) does this.
+- Netlify / Cloudflare Pages: `_headers` is picked up automatically.
+- Hosts without custom headers (GitHub Pages): set `coiServiceWorker: true`. `main.js` registers
+  `coi-sw.js`, which re-serves same-origin responses with the headers, and reloads the page once
+  (needs https or localhost; first visit costs one reload). `coi-sw.js` is our own ~25 line
+  implementation modelled on the same idea as
+  [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker) (MIT); no code is vendored.
+- Without any of this the game runs single-threaded.
+
+## Embedding in an iframe
+
+See `embed.html`: `allow="fullscreen; gamepad; cross-origin-isolated; autoplay"`. For threads the
+parent page must be cross-origin isolated too, and a cross-origin game must send
+`Cross-Origin-Resource-Policy: cross-origin` (change `_headers`). Avoid `sandbox`; if used, give it
+`allow-scripts allow-same-origin allow-pointer-lock`, otherwise workers and SharedArrayBuffer break.

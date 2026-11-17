@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<!--
+  Example portal page that embeds the game in an iframe. Not copied into the game; use it as a
+  snippet. Replace the src. Notes:
+
+  * allow="..." grants the iframe the features the engine uses:
+      fullscreen             the fullscreen button / Alt+Enter
+      gamepad                Gamepad API
+      autoplay               audio after the first click
+      cross-origin-isolated  lets the iframe use SharedArrayBuffer (wasm threads)
+  * Threads need the game page itself to be cross-origin isolated. When the game is embedded, the
+    PARENT page must be cross-origin isolated too (COOP: same-origin and COEP: require-corp or
+    credentialless on the parent), and a cross-origin game origin must send
+    Cross-Origin-Resource-Policy: cross-origin (the shipped _headers uses same-origin, which only
+    suits same-origin embedding; change it for a different origin). Without isolation the game
+    still starts but runs single-threaded.
+  * Avoid the sandbox attribute. If you must use it, include allow-scripts AND allow-same-origin
+    (without allow-same-origin the origin is opaque: workers, SharedArrayBuffer and storage break),
+    plus allow-pointer-lock for mouse capture and allow-popups / allow-forms only if needed.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Portal embed example</title>
+    <style>
+        body { margin: 0; background: #111; }
+        iframe { display: block; width: 100vw; height: 100vh; border: 0; }
+    </style>
+</head>
+<body>
+    <iframe
+        src="https://example.com/mygame/"
+        title="Game"
+        allow="fullscreen; gamepad; cross-origin-isolated; autoplay"
+        allowfullscreen
+        loading="lazy"></iframe>
+
+    <!-- With a sandbox (not recommended):
+    <iframe src="..." allow="fullscreen; gamepad; cross-origin-isolated; autoplay"
+        sandbox="allow-scripts allow-same-origin allow-pointer-lock"></iframe>
+    -->
+</body>
+</html>

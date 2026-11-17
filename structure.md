@@ -18,7 +18,7 @@ efeengine/
 │   ├── web.py              wasm build → wasm-bindgen → assemble dist/<example>/
 │   ├── web.sh              thin wrapper around web.py
 │   └── serve.py            local HTTP server with COOP/COEP headers
-├── templates/web/          page shell copied into every web build (index.html, main.js, _headers)
+├── templates/web/          page shell copied into every web build (index.html, main.js, coi-sw.js, embed.html, _headers)
 ├── crates/
 │   ├── core/               efeengine-core: the engine
 │   │   └── macros/         efeengine-macros: #[main] entry-point macro
