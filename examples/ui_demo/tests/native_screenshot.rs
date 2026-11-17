@@ -22,8 +22,7 @@ fn native_menu_screenshot() {
     let img = t.engine.textures().get(logo).expect("logo image").clone();
     let painters = t.engine.ui_painters();
     let shot = render_offscreen(&t.ui(), &[(logo, img)], (960, 600), 1.0, [0.08, 0.09, 0.11], Some(&painters)).expect("offscreen render");
-    let path = std::path::PathBuf::from("/tmp/claude-1000/-home-efe-projeler-game/a3ee23c9-3c35-432d-a2f0-37718bf4bebe/scratchpad/native-gpuview.png");
-    let path = if path.parent().is_some_and(|d| d.exists()) { path } else { out_path() };
+    let path = out_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
