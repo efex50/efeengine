@@ -675,7 +675,7 @@ gpu_view("minimap").on_pointer(Msg::Map)                     // view layer
   `.on_pointer(fn(PointerEvent) -> Msg)` (`PointerEvent { pos, buttons, wheel }`, `LEFT`/`RIGHT`/`MIDDLE`
   masks) also turns the `pointer` flag on. Events: move inside the view, button press / release
   (a release after leaving the view still arrives), wheel.
-- Size: like `Image`, an `Auto` size is empty and nothing is painted; give the view a size or `Fill`.
+- Size: like `Image`, an `Auto` size is empty and nothing is painted; give the view a size or `Fill`. (Web: an Auto axis is pinned to `0px` so the canvas cannot grow from its own backing size.)
 - A painter name with no registered painter: the view stays transparent and a warning is logged once.
 
 ### 17.2 Contract every backend meets
@@ -683,15 +683,14 @@ gpu_view("minimap").on_pointer(Msg::Map)                     // view layer
 | Point | Rule |
 |---|---|
 | Target | Always the view's own target, sized to the view, origin top-left. No viewport/scissor math in painters. |
-| Format | `ViewTarget.format` is fixed for the run. Painters build pipelines for it (in `resize`). |
+| Format | `ViewTarget.format` is fixed for the run and is **always an sRGB format** (`Rgba8UnormSrgb` / `Bgra8UnormSrgb`) on every backend. Painters build pipelines for it (in `resize`) and **output linear colour**: the hardware encodes on write. Convert sRGB palette values to linear (in the shader or on the CPU); an sRGB byte value `v` is shown exactly as `v`. |
 | Alpha | Contents are **premultiplied alpha**. Transparent pixels show the UI behind the view. |
 | Timing | `paint` runs at most once per frame per shown node, after the game renderer, in that frame. Never for hidden nodes; it may run for a node scrolled out of sight. No order between views is promised. |
 | Size | Physical px; `resize` is called before the first `paint` and on every size or scale change. Zero-size views are not painted. |
 | Limits | The device's limits apply (WebGL2: no compute, no storage buffers); `gpu.limits()` tells the painter. |
 | No wgpu | Headless: never painted, layout only. SDL render mode (no wgpu): never painted, warning once. |
 
-Native (iced) as built: `ViewTarget.format` is the surface format (`Rgba8UnormSrgb` in
-`render_offscreen`); the view's texture is `round(logical size * scale)` physical px. Painters also
+Native (iced) as built: `ViewTarget.format` is always `Rgba8UnormSrgb` (not the window surface's format); the view's texture is `round(logical size * scale)` physical px. Painters also
 run on frames where the rest of the UI is unchanged (they animate), once per frame per view.
 Draw order follows iced's layers: a view is above the quads of its own layer, below text and images of that layer.
 
@@ -701,7 +700,7 @@ Draw order follows iced's layers: a view is above the quads of its own layer, be
 |---|---|
 | Native (iced) | iced's `shader` widget: the painter draws into an offscreen texture the size of the view, which the widget composites (premultiplied) in UI order, clipped. |
 | Web, WebGPU | Each GPU view node is its own `<canvas>` in the DOM tree. The painter renders to that canvas's surface on the shared device (no copies; DOM z-order and clipping). |
-| Web, WebGL2 | The GL context cannot be shared between canvases, so each view canvas gets a 2D context and core's copy path feeds it: the painter draws into an internal `Rgba8Unorm` texture, `present` reads it back (buffer map) and `putImageData`s the un-premultiplied pixels. One frame of latency; costs a GPU->CPU readback plus a CPU un-premultiply per view per frame, so keep GPU views small on WebGL2. |
+| Web, WebGL2 | The GL context cannot be shared between canvases, so each view canvas gets a 2D context and core's copy path feeds it: the painter draws into an internal `Rgba8UnormSrgb` texture, `present` reads it back (buffer map) and `putImageData`s the pixels, un-premultiplied in linear space (decode, divide by alpha, encode; opaque pixels unchanged). One frame of latency; costs a GPU->CPU readback plus a CPU un-premultiply per view per frame, so keep GPU views small on WebGL2. |
 
 Web as built: `WebBackend::render` (the engine's render overlay, which runs on wasm too) paints the views in the DOM backend's `paint_gpu_views`; it never draws into the main target. Per shown view and frame: physical size = round(`clientWidth/clientHeight` * `devicePixelRatio`); zero size (including `display: none` ancestors) is skipped; `ExtraSurface::for_canvas` is created at the first paint; `resize` (surface, then painter) on a size, scale or format change; then `acquire`, own command encoder, `paint`, submit, `present`. Missing painter: one console warning per name, canvas transparent. The surface goes away with the node. Pointer events use `offsetX/offsetY` and the DOM `buttons` mask (equal to `PointerEvent::LEFT/RIGHT/MIDDLE`); wheel deltas are negated like iced's. Verified: WebGL2 path in headless Firefox (shape pixels, transparent corners, click recolors); the WebGPU path is compile-checked only.
 
@@ -719,10 +718,10 @@ surface.acquire(&gpu) -> Option<SurfaceFrame>   // { view, format, size }; None 
 surface.present(&gpu, frame)           // after submitting the commands that drew into frame.view
 ```
 
-- WebGPU: a real surface on the shared device (format: the main surface's if supported, else the first
-  non-sRGB; alpha `PreMultiplied`, else `Inherit`, else the first mode the canvas offers: without
+- WebGPU: a real surface on the shared device (storage format: the main surface's if supported, else the first
+  non-sRGB, configured with `view_formats` = its sRGB variant; frames are handed out as an sRGB view and `format()` reports the sRGB format; alpha `PreMultiplied`, else `Inherit`, else the first mode the canvas offers: without
   premultiplied support transparent pixels may composite opaque).
-- WebGL2: copy path as in 17.3 (format `Rgba8Unorm`). The readback is double-gated: if the previous one
+- WebGL2: copy path as in 17.3 (format `Rgba8UnormSrgb`). The readback is double-gated: if the previous one
   has not completed when a frame is presented, that frame is re-read at the next `acquire`, so the last
   drawn content always arrives. The path is logged once. Details in `crates/core/structure.md`.
 - The iced backend does not need it (textures). `Engine::create_window` will use the same layer later

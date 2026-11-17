@@ -8,8 +8,14 @@ use efeengine_core::render::Gpu;
 use efeengine_core::wgpu;
 use efeengine_ui::{UiPainter, ViewTarget};
 
-/// The shape colors; a click on the view steps through them.
+/// The shape colors as sRGB (what the screen shows); a click on the view steps through them.
+/// View targets are sRGB formats and painters output linear colour (API.md 17.2), so they are
+/// converted before they reach the shader.
 pub const PALETTE: [[f32; 3]; 4] = [[1.0, 0.5, 0.0], [0.2, 0.9, 0.3], [0.9, 0.2, 0.8], [0.3, 0.6, 1.0]];
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
 
 /// Index into [`PALETTE`], shared by the update system (writer) and the painter (reader).
 #[derive(Clone, Default)]
@@ -125,7 +131,7 @@ impl UiPainter for ShapePainter {
     fn paint(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &ViewTarget) {
         let angle = self.angle();
         let Some(g) = &self.gfx else { return };
-        let c = PALETTE[self.color.0.load(Ordering::Relaxed) as usize % PALETTE.len()];
+        let c = PALETTE[self.color.0.load(Ordering::Relaxed) as usize % PALETTE.len()].map(srgb_to_linear);
         let aspect = target.size.0 as f32 / target.size.1.max(1) as f32;
         let data: [f32; 8] = [c[0], c[1], c[2], 1.0, angle, aspect, 0.0, 0.0];
         let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();

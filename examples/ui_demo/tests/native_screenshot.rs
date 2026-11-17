@@ -35,7 +35,7 @@ fn native_menu_screenshot() {
     // The GPU view's triangle (palette[0], orange): its bounding box lies inside the 160x120
     // view, its center pixel has the shape color, and the view's corners are transparent (the
     // panel shows through, so they are not the shape color).
-    let orange = |p: [u8; 4]| p[0] > 240 && (150..230).contains(&p[1]) && p[2] < 30;
+    let orange = |p: [u8; 4]| p[0] >= 252 && (125..=131).contains(&p[1]) && p[2] <= 3;
     let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
     for y in 0..shot.height {
         for x in 0..shot.width {
@@ -58,7 +58,9 @@ fn native_menu_screenshot() {
         }
     }
     let (mx, my) = ((sx / n) as u32, (sy / n) as u32);
-    assert!(orange(shot.pixel(mx, my)), "the view's center is not the shape color");
+    let c = shot.pixel(mx, my);
+    eprintln!("shape center pixel: {c:?}");
+    assert!(orange(c), "the view's center is not the palette orange (255,128,0): {c:?}");
     // View corners (from the centroid: +-79, +-59) show the panel, not the shape.
     for (dx, dy) in [(-76i32, -56i32), (76, -56), (-76, 56), (76, 56)] {
         let p = shot.pixel((mx as i32 + dx) as u32, (my as i32 + dy) as u32);

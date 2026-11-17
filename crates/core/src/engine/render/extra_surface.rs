@@ -5,7 +5,7 @@
 //! - **Direct**: a real `wgpu::Surface` (WebGPU canvas now, a native window later), configured
 //!   on the shared device, acquired and presented normally.
 //! - **Copy** (web, WebGL2 only): the device lives in the main canvas's GL context, which no
-//!   other canvas can share. The frame is an internal `Rgba8Unorm` texture; `present` copies
+//!   other canvas can share. The frame is an internal `Rgba8UnormSrgb` texture; `present` copies
 //!   it to a mapped buffer, and once the map completes the pixels are un-premultiplied and
 //!   put on the canvas's 2D context with `putImageData`. One frame of latency, one CPU pass.
 
@@ -39,13 +39,19 @@ enum Backing {
     Copy(CopyPath),
 }
 
-/// Choose the surface format: the main surface's format when the surface supports it, else the
-/// first non-sRGB (canvases take bgra8unorm / rgba8unorm), else the first.
+/// Choose the surface format (the *storage* format): the main surface's format when the surface
+/// supports it, else the first non-sRGB (canvases take bgra8unorm / rgba8unorm), else the first.
+/// Frames are always handed out through the sRGB variant of it, see [`srgb_variant`].
 pub(crate) fn pick_format(supported: &[TextureFormat], preferred: TextureFormat) -> Option<TextureFormat> {
     if supported.contains(&preferred) {
         return Some(preferred);
     }
     supported.iter().copied().find(|f| !f.is_srgb()).or_else(|| supported.first().copied())
+}
+
+/// The sRGB variant of a format (itself when it is sRGB already or has none).
+pub(crate) fn srgb_variant(f: TextureFormat) -> TextureFormat {
+    f.add_srgb_suffix()
 }
 
 /// Premultiplied if supported, else Inherit (page compositing decides), else the first mode.
@@ -66,6 +72,7 @@ impl ExtraSurface {
         let caps = surface.get_capabilities(gpu.adapter);
         let format = pick_format(&caps.formats, gpu.surface_format)
             .ok_or_else(|| "the surface supports no texture format".to_string())?;
+        let srgb = srgb_variant(format);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -73,12 +80,12 @@ impl ExtraSurface {
             height: 1,
             present_mode: caps.present_modes.first().copied().unwrap_or(wgpu::PresentMode::Fifo),
             alpha_mode: pick_alpha(&caps.alpha_modes),
-            view_formats: vec![],
+            view_formats: if srgb != format { vec![srgb] } else { vec![] },
             desired_maximum_frame_latency: 2,
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         Ok(Self {
-            format,
+            format: srgb,
             size: (0, 0),
             backing: Backing::Direct { surface, config },
             #[cfg(target_arch = "wasm32")]
@@ -171,7 +178,7 @@ impl ExtraSurface {
                 if suboptimal {
                     surface.configure(&gpu.device, config);
                 }
-                let view = t.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let view = t.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(format), ..Default::default() });
                 Some(SurfaceFrame { view, format, size, surface_texture: Some(t) })
             }
             #[cfg(target_arch = "wasm32")]
@@ -201,8 +208,20 @@ pub(crate) fn padded_row(width: u32) -> u32 {
     (width * 4).div_ceil(a) * a
 }
 
+fn srgb_to_linear(b: u8) -> f32 {
+    let c = b as f32 / 255.0;
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+fn linear_to_srgb(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let v = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    (v * 255.0 + 0.5) as u8
+}
+
 /// Copy `rows` of `width` px out of a padded buffer into `out` (tightly packed), converting
-/// premultiplied RGBA to straight RGBA (what `ImageData` expects).
+/// RGBA with colour premultiplied in linear space and stored sRGB-encoded (an `Rgba8UnormSrgb`
+/// target) to straight sRGB RGBA (what `ImageData` expects): decode, divide by alpha, encode.
 pub(crate) fn unpremultiply_rows(src: &[u8], width: u32, height: u32, out: &mut [u8]) {
     let stride = padded_row(width) as usize;
     let row = width as usize * 4;
@@ -216,8 +235,9 @@ pub(crate) fn unpremultiply_rows(src: &[u8], width: u32, height: u32, out: &mut 
             } else if a == 0 {
                 dp.copy_from_slice(&[0, 0, 0, 0]);
             } else {
+                let af = a as f32 / 255.0;
                 for i in 0..3 {
-                    dp[i] = ((sp[i] as u32 * 255 + a / 2) / a).min(255) as u8;
+                    dp[i] = linear_to_srgb(srgb_to_linear(sp[i]) / af);
                 }
                 dp[3] = a as u8;
             }
@@ -254,7 +274,7 @@ mod copy_path {
     }
 
     impl CopyPath {
-        pub(super) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+        pub(super) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
         pub(super) fn new(canvas: &web_sys::HtmlCanvasElement) -> Result<Self, String> {
             let ctx = canvas.get_context("2d")
@@ -429,8 +449,21 @@ mod tests {
         src[256..264].copy_from_slice(&[0, 0, 0, 0, 16, 32, 64, 64]);
         let mut out = vec![0u8; 16];
         unpremultiply_rows(&src, w, 2, &mut out);
-        assert_eq!(&out[..8], &[255, 0, 0, 128, 0, 255, 0, 255]);
-        assert_eq!(&out[8..], &[0, 0, 0, 0, 64, 128, 255, 64]);
+        // Opaque and transparent pixels are unchanged / zeroed.
+        assert_eq!(&out[4..8], &[0, 255, 0, 255]);
+        assert_eq!(&out[8..12], &[0, 0, 0, 0]);
+        // Partial alpha: decode, divide by alpha, encode (in sRGB space, not a plain divide).
+        let expect = |c: u8, a: u8| linear_to_srgb(srgb_to_linear(c) / (a as f32 / 255.0));
+        assert_eq!(out[..4], [expect(128, 128), 0, 0, 128]);
+        assert_eq!(out[12..16], [expect(16, 64), expect(32, 64), expect(64, 64), 64]);
+        assert!(out[0] > 128 && out[0] < 255);
+    }
+
+    #[test]
+    fn srgb_roundtrip_is_exact() {
+        for b in 0..=255u8 {
+            assert_eq!(linear_to_srgb(srgb_to_linear(b)), b);
+        }
     }
 
     #[test]
@@ -443,5 +476,7 @@ mod tests {
         assert_eq!(pick_alpha(&[Opaque, PreMultiplied]), PreMultiplied);
         assert_eq!(pick_alpha(&[Opaque, Inherit]), Inherit);
         assert_eq!(pick_alpha(&[Opaque]), Opaque);
+        assert_eq!(srgb_variant(Bgra8Unorm), Bgra8UnormSrgb);
+        assert_eq!(srgb_variant(Rgba8Unorm), Rgba8UnormSrgb);
     }
 }

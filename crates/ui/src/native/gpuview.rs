@@ -36,6 +36,9 @@ struct Request {
     bounds: Rectangle,
 }
 
+/// The format of every view texture: painters output linear colour, the hardware encodes.
+const VIEW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
 struct ViewTex {
     // Keeps the texture alive; the view is what painters and the compositor use.
     _texture: wgpu::Texture,
@@ -80,7 +83,8 @@ impl ViewPainter {
             return;
         }
         let scale = gpu.scale_factor.max(0.01);
-        let format = gpu.surface_format;
+        // View targets are always sRGB (API.md 17.2), whatever the window surface is.
+        let format = VIEW_FORMAT;
         let reqs = sh.requests.clone();
         let mut live: HashSet<WidgetId> = HashSet::new();
         let mut encoder: Option<wgpu::CommandEncoder> = None;
@@ -244,7 +248,19 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 }
 @group(0) @binding(0) var t: texture_2d<f32>;
 @group(0) @binding(1) var s: sampler;
+// Sampling the sRGB view texture gives linear premultiplied colour: right for an sRGB
+// target (the hardware encodes on write).
 @fragment fn fs(i: VOut) -> @location(0) vec4<f32> { return textureSample(t, s, i.uv); }
+// Target without sRGB encoding: encode here (premultiplied: un-premultiply, encode, redo).
+fn enc(c: f32) -> f32 {
+    return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);
+}
+@fragment fn fs_encode(i: VOut) -> @location(0) vec4<f32> {
+    let v = textureSample(t, s, i.uv);
+    if (v.a <= 0.0) { return v; }
+    let c = v.rgb / v.a;
+    return vec4<f32>(vec3<f32>(enc(c.r), enc(c.g), enc(c.b)) * v.a, v.a);
+}
 "#;
 
 impl Pipeline for Compositor {
@@ -297,7 +313,7 @@ impl Pipeline for Compositor {
             vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
-                entry_point: Some("fs"),
+                entry_point: Some(if format.is_srgb() { "fs" } else { "fs_encode" }),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState { format, blend: Some(premultiplied), write_mask: wgpu::ColorWrites::ALL })],
             }),

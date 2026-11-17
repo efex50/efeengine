@@ -78,6 +78,9 @@ pub fn node_decls(tree: &UiTree, id: WidgetId) -> Vec<Decl> {
     let Some(node) = tree.get(id) else { return Vec::new() };
     let style = tree.resolve(id, WidgetState::default()).unwrap_or_default();
     let mut decls = css::declarations(&style, parent_direction(tree, id));
+    if matches!(node.kind(), NodeKind::GpuView { .. }) {
+        decls = merge_decls(decls, gpu_view_auto_decls(&style));
+    }
     if let Some(layer) = node.layer() {
         decls = merge_decls(decls, layer_decls(layer));
         decls = merge_decls(decls, vec![("pointer-events", "none".to_string())]);
@@ -86,6 +89,21 @@ pub fn node_decls(tree: &UiTree, id: WidgetId) -> Vec<Decl> {
         decls = merge_decls(decls, vec![("pointer-events", pe.to_string())]);
     }
     decls
+}
+
+/// A GPU view with an `Auto` (or unset) width / height is empty and never painted (API.md 17.1,
+/// as on native). A `<canvas>` would otherwise take its backing size as client size and, with a
+/// `devicePixelRatio` other than 1, grow every frame. So that axis is pinned to `0px`.
+pub fn gpu_view_auto_decls(style: &Style) -> Vec<Decl> {
+    let auto = |s: Option<crate::style::Size>| matches!(s, None | Some(crate::style::Size::Auto));
+    let mut d = Vec::new();
+    if auto(style.width) {
+        d.push(("width", "0px".to_string()));
+    }
+    if auto(style.height) {
+        d.push(("height", "0px".to_string()));
+    }
+    d
 }
 
 /// [`css::layer_declarations`] for a layer root (a modal layer's root is placed by its anchor
@@ -136,6 +154,19 @@ mod tests {
         assert_eq!(rm, vec!["c"]);
         let (set, rm) = style_diff(&new, &new);
         assert!(set.is_empty() && rm.is_empty());
+    }
+
+    #[test]
+    fn auto_sized_gpu_view_is_pinned_empty() {
+        let mut ui = UiTree::new();
+        let layer = ui.layer("main", Layer::fill(0));
+        let auto = ui.gpu_view(layer, "p").id();
+        let sized = ui.gpu_view(layer, "p").width(crate::Size::Px(160.0)).height(crate::Size::Fill).id();
+        let get = |id, k: &str| node_decls(&ui, id).into_iter().find(|(p, _)| *p == k).map(|(_, v)| v);
+        assert_eq!(get(auto, "width").as_deref(), Some("0px"));
+        assert_eq!(get(auto, "height").as_deref(), Some("0px"));
+        assert_eq!(get(sized, "width").as_deref(), Some("160px"));
+        assert_ne!(get(sized, "height").as_deref(), Some("0px"));
     }
 
     #[test]
