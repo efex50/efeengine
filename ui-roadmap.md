@@ -188,8 +188,8 @@ Started by the Phase 0 spike (`crates/ui/src/native/`); what is ticked works, th
 - [ ] Core `SurfaceSet` (main surface moved onto it, no behaviour change); extra surfaces on the web incl. WebGL2.
 - [x] `GpuView` node, `UiPainter`, `add_ui_painter` (`EngineUiExt`), view-layer `gpu_view`, pointer signals, headless sizing.
 - [x] iced backend: `shader` widget mapping (offscreen texture, premultiplied).
-- [ ] Web backend: canvas per view on WebGPU; WebGL2 path.
-- [ ] ui_demo: a spinning-shape GPU view; native and web screenshots compared. (Native done: rotating triangle, click recolors, native screenshot test; web comparison open.)
+- [x] Web backend: canvas per view on WebGPU (compile-checked only); WebGL2 path (tested in headless Firefox: pixels, click, no errors).
+- [ ] ui_demo: a spinning-shape GPU view; native and web screenshots compared. (Native done: rotating triangle, click recolors, native screenshot test; web: pixel and click test in headless Firefox passes, side-by-side comparison with native still open.)
 
 **Exit:** the same painter draws the same picture in the same place on native, WebGPU and WebGL2.
 

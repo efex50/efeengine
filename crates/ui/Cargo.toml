@@ -50,5 +50,6 @@ features = [
     "KeyboardEvent",
     "PointerEvent",
     "MouseEvent",
+    "WheelEvent",
     "console",
 ]

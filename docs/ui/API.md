@@ -703,6 +703,8 @@ Draw order follows iced's layers: a view is above the quads of its own layer, be
 | Web, WebGPU | Each GPU view node is its own `<canvas>` in the DOM tree. The painter renders to that canvas's surface on the shared device (no copies; DOM z-order and clipping). |
 | Web, WebGL2 | The GL context cannot be shared between canvases, so each view canvas gets a 2D context and core's copy path feeds it: the painter draws into an internal `Rgba8Unorm` texture, `present` reads it back (buffer map) and `putImageData`s the un-premultiplied pixels. One frame of latency; costs a GPU->CPU readback plus a CPU un-premultiply per view per frame, so keep GPU views small on WebGL2. |
 
+Web as built: `WebBackend::render` (the engine's render overlay, which runs on wasm too) paints the views in the DOM backend's `paint_gpu_views`; it never draws into the main target. Per shown view and frame: physical size = round(`clientWidth/clientHeight` * `devicePixelRatio`); zero size (including `display: none` ancestors) is skipped; `ExtraSurface::for_canvas` is created at the first paint; `resize` (surface, then painter) on a size, scale or format change; then `acquire`, own command encoder, `paint`, submit, `present`. Missing painter: one console warning per name, canvas transparent. The surface goes away with the node. Pointer events use `offsetX/offsetY` and the DOM `buttons` mask (equal to `PointerEvent::LEFT/RIGHT/MIDDLE`); wheel deltas are negated like iced's. Verified: WebGL2 path in headless Firefox (shape pixels, transparent corners, click recolors); the WebGPU path is compile-checked only.
+
 ### 17.4 Core: extra surfaces
 
 Core exposes `efeengine_core::render::ExtraSurface` (not a `SurfaceSet`: the caller owns the surfaces):

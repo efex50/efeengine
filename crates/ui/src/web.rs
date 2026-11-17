@@ -12,11 +12,12 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use wasm_bindgen::{JsCast, closure::Closure};
 use web_sys::{
     CanvasRenderingContext2d, Document, Element, Event, EventTarget, FontFace, HtmlCanvasElement, HtmlElement,
-    HtmlInputElement, ImageData, KeyboardEvent, PointerEvent, Text,
+    HtmlInputElement, ImageData, KeyboardEvent, MouseEvent, PointerEvent, Text, WheelEvent,
 };
 
 use crate::backend::{UiBackend, UiBackendCx};
@@ -25,11 +26,13 @@ use crate::css;
 use crate::dom_plan::{self, Decl};
 use crate::id::{Owner, WidgetId};
 use crate::journal::UiChange;
+use crate::painter::{UiPainters, ViewTarget};
 use crate::node::{ImageFit, KindTag, NodeKind};
 use crate::signal::{UiSignal, UiSignalKind, UiValue};
 use crate::style::FontId;
 use crate::theme::Theme;
 use crate::tree::UiTree;
+use efeengine_core::render::{ExtraSurface, Gpu};
 
 const ID_ATTR: &str = "data-efui-id";
 /// Marks the layer element; core's key handling ignores events from inside it.
@@ -62,6 +65,17 @@ struct Entry {
     dir: crate::style::Direction,
     /// Modal layer root: the full-window backdrop element and its declarations.
     backdrop: Option<(HtmlElement, Vec<Decl>)>,
+    /// `GpuView`: painter name and the extra surface of its canvas (API.md section 17.3).
+    gpu: Option<GpuViewState>,
+}
+
+/// What the web backend keeps for one `GpuView` node.
+struct GpuViewState {
+    painter: Arc<str>,
+    /// Created lazily at render time (needs `&Gpu`); `Err` once creation failed (logged once).
+    surface: Option<Result<ExtraSurface, ()>>,
+    /// `(physical size, scale bits, format)` the painter's `resize` last got.
+    seen: Option<((u32, u32), u32, efeengine_core::wgpu::TextureFormat)>,
 }
 
 struct Listener {
@@ -84,6 +98,9 @@ struct Inner {
     fonts: HashMap<FontId, FontFace>,
     shared: Rc<RefCell<Shared>>,
     listeners: Vec<Listener>,
+    painters: Option<UiPainters>,
+    /// Painter names already warned about as missing.
+    warned: HashSet<Arc<str>>,
 }
 
 impl WebBackend {
@@ -158,6 +175,8 @@ impl UiBackend for WebBackend {
             fonts: HashMap::new(),
             shared,
             listeners: Vec::new(),
+            painters: None,
+            warned: HashSet::new(),
         };
         inner.attach_listeners();
         self.inner = Some(inner);
@@ -172,6 +191,21 @@ impl UiBackend for WebBackend {
     fn drain_signals(&mut self, out: &mut Vec<UiSignal>) {
         if let Some(inner) = &self.inner {
             out.append(&mut inner.shared.borrow_mut().signals);
+        }
+    }
+
+    fn set_painters(&mut self, painters: &UiPainters) {
+        if let Some(inner) = &mut self.inner {
+            inner.painters = Some(painters.clone());
+        }
+    }
+
+    /// Runs inside the engine's render overlay pass, after the game renderer: paints every
+    /// shown GPU view into its own canvas. Never draws into `_target` (the DOM canvases sit
+    /// above the main canvas).
+    fn render(&mut self, gpu: &Gpu, _target: &efeengine_core::wgpu::TextureView) {
+        if let Some(inner) = &mut self.inner {
+            inner.paint_gpu_views(gpu);
         }
     }
 
@@ -288,6 +322,31 @@ impl Inner {
                 Some(vec![signal(id, UiSignalKind::Focus(focus))])
             });
         }
+        // GPU views: pointer input in view-relative logical px (offsetX / offsetY). A press
+        // captures the pointer, so the release (and drags) arrive even after leaving the view.
+        // `buttons` is the DOM bitmask (1 left, 2 right, 4 middle), the same as `PointerEvent::LEFT` etc..
+        for kind in ["pointerdown", "pointerup", "pointermove"] {
+            self.listen(kind, move |sh, root, e| {
+                let (id, el) = widget_at(sh, root, e.target(), |k| k == GpuView)?;
+                let p = e.dyn_ref::<PointerEvent>()?;
+                if kind == "pointerdown" {
+                    let _ = el.set_pointer_capture(p.pointer_id());
+                }
+                let m: &MouseEvent = p.as_ref();
+                let pos = (m.offset_x() as f32, m.offset_y() as f32);
+                Some(vec![signal(id, UiSignalKind::Pointer { pos, buttons: m.buttons() as u8 & 7, wheel: (0.0, 0.0) })])
+            });
+        }
+        self.listen("wheel", |sh, root, e| {
+            let (id, _) = widget_at(sh, root, e.target(), |k| k == GpuView)?;
+            let w = e.dyn_ref::<WheelEvent>()?;
+            e.prevent_default();
+            let m: &MouseEvent = w.as_ref();
+            // DOM deltaY grows downwards; the signal follows iced (positive = up).
+            let wheel = (-w.delta_x() as f32, -w.delta_y() as f32);
+            let pos = (m.offset_x() as f32, m.offset_y() as f32);
+            Some(vec![signal(id, UiSignalKind::Pointer { pos, buttons: m.buttons() as u8 & 7, wheel })])
+        });
         // Hover: pointerover / pointerout bubble; every hover-enabled widget element above the
         // target that the pointer did not already come from (or go to) gets one signal.
         for (kind, enter) in [("pointerover", true), ("pointerout", false)] {
@@ -427,6 +486,58 @@ impl Inner {
         }
     }
 
+    /// Paints every shown GPU view into its own canvas (API.md section 17.2 / 17.3).
+    fn paint_gpu_views(&mut self, gpu: &Gpu) {
+        let Some(painters) = self.painters.clone() else { return };
+        let Some(window) = web_sys::window() else { return };
+        let dpr = (window.device_pixel_ratio() as f32).max(0.01);
+        for (id, e) in self.entries.iter_mut() {
+            let (Some(g), Ok(canvas)) = (&mut e.gpu, e.el.clone().dyn_into::<HtmlCanvasElement>()) else { continue };
+            // A hidden node (or one under a hidden ancestor) is `display: none`: no client box.
+            let size = (
+                (e.el.client_width().max(0) as f32 * dpr).round() as u32,
+                (e.el.client_height().max(0) as f32 * dpr).round() as u32,
+            );
+            if size.0 == 0 || size.1 == 0 {
+                continue;
+            }
+            if !painters.contains(&g.painter) {
+                if self.warned.insert(g.painter.clone()) {
+                    warn(&format!("GPU view uses painter \"{}\" but none is registered (add_ui_painter); the view stays transparent", g.painter));
+                }
+                continue;
+            }
+            if g.surface.is_none() {
+                g.surface = Some(match ExtraSurface::for_canvas(gpu, canvas) {
+                    Ok(s) => Ok(s),
+                    Err(err) => {
+                        warn(&format!("could not create the surface of a GPU view: {err}"));
+                        Err(())
+                    }
+                });
+            }
+            let Some(Ok(surface)) = g.surface.as_mut() else { continue };
+            let format = surface.format();
+            let key = (size, dpr.to_bits(), format);
+            if g.seen.is_none_or(|(s, d, _)| (s, d) != (size, dpr.to_bits())) {
+                surface.resize(gpu, size);
+            }
+            let Some(frame) = surface.acquire(gpu) else { continue };
+            let target = ViewTarget { view: &frame.view, format, size, scale: dpr, widget: *id };
+            let changed = g.seen != Some(key);
+            let mut encoder = gpu.device.create_command_encoder(&efeengine_core::wgpu::CommandEncoderDescriptor::default());
+            let _ = painters.with(&g.painter, |p| {
+                if changed {
+                    p.resize(gpu, &target);
+                }
+                p.paint(gpu, &mut encoder, &target);
+            });
+            g.seen = Some(key);
+            let _ = gpu.queue.submit([encoder.finish()]);
+            surface.present(gpu, frame);
+        }
+    }
+
     /// Creates the `FontFace` for a registered font, adds it to `document.fonts` and sets
     /// `--efui-font-{id}` on the layer element, which css.rs's `font-family` reads. A font id
     /// loaded again replaces the old face.
@@ -472,6 +583,7 @@ impl Inner {
             decls: Vec::new(),
             dir: crate::style::Direction::Column,
             backdrop: None,
+            gpu: None,
         };
         match node.kind() {
             NodeKind::Button { .. } => {
@@ -571,7 +683,7 @@ impl Inner {
     }
 
     fn apply_kind(&mut self, tree: &UiTree, id: WidgetId, cx: &UiBackendCx) {
-        let (Some(e), Some(kind)) = (self.entries.get(&id), tree.kind(id)) else { return };
+        let (Some(e), Some(kind)) = (self.entries.get_mut(&id), tree.kind(id)) else { return };
         match kind {
             NodeKind::Text { text } => {
                 if e.el.text_content().as_deref() != Some(text) {
@@ -633,8 +745,15 @@ impl Inner {
                     draw_image(&e.el, img.size(), img.rgba8());
                 }
             }
-            // TODO(web gpu views): the canvas stays empty until the web backend paints painters into it.
-            NodeKind::Container | NodeKind::Scroll | NodeKind::GpuView { .. } => {}
+            NodeKind::GpuView { painter, pointer } => {
+                match &mut e.gpu {
+                    Some(g) => g.painter = painter.clone(),
+                    None => e.gpu = Some(GpuViewState { painter: painter.clone(), surface: None, seen: None }),
+                }
+                // No page gestures (scroll, zoom) on a view that wants the pointer.
+                let _ = e.el.style().set_property("touch-action", if *pointer { "none" } else { "auto" });
+            }
+            NodeKind::Container | NodeKind::Scroll => {}
         }
     }
 
