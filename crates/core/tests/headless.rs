@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use efeengine_core::prelude::*;
 use efeengine_core::engine::messages::Message;
+use efeengine_core::engine::Lifecycle;
 use efeengine_core::input::{ElementState, InputEvent, InputEventKind, Modifiers};
 
 fn engine() -> Engine {
@@ -256,4 +257,55 @@ fn set_frame_rate_message_and_command_do_not_panic() {
     e.add_system(Stage::Update, |cx| cx.commands.set_frame_rate(f32::NAN));
     e.run_frames(2, 0.016);
     assert!(e.is_running());
+}
+
+fn stage_log(e: &mut Engine) -> Rc<RefCell<Vec<&'static str>>> {
+    let log = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    log_systems(e, &log);
+    log
+}
+
+#[test]
+fn stop_pauses_stages_and_time_and_start_resumes() {
+    let mut e = engine();
+    assert_eq!(e.lifecycle(), Lifecycle::Created);
+    let log = stage_log(&mut e);
+    e.run_frames(3, 0.016);
+    assert_eq!(e.lifecycle(), Lifecycle::Running);
+    assert_eq!(*log.borrow(), ["startup", "update", "update", "update"]);
+
+    // The frame that drains Stop already advanced time, but runs no stage.
+    e.sender().send(Message::Stop).unwrap();
+    e.run_frames(1, 0.016);
+    let (frame, elapsed) = (e.time().frame(), e.time().elapsed());
+    e.run_frames(50, 0.1);
+    assert!(e.is_paused());
+    assert!(e.is_running());
+    assert_eq!(*log.borrow(), ["startup", "update", "update", "update"]);
+    assert_eq!(e.time().frame(), frame);
+    assert_eq!(e.time().elapsed(), elapsed);
+
+    // Resume after a long pause: the first frame does not see the paused time as a delta.
+    e.sender().send(Message::Start).unwrap();
+    e.run_frames(2, 0.016);
+    assert_eq!(e.lifecycle(), Lifecycle::Running);
+    assert_eq!(log.borrow().len(), 6);
+    assert!(e.time().elapsed() - elapsed < 0.1, "elapsed jumped: {}", e.time().elapsed() - elapsed);
+}
+
+#[test]
+fn kill_while_paused_shuts_down_once() {
+    let mut e = engine();
+    let log = stage_log(&mut e);
+    e.run_frames(2, 0.016);
+    e.sender().send(Message::Stop).unwrap();
+    e.run_frames(3, 0.016);
+    e.sender().send(Message::Kill).unwrap();
+    e.run_frames(3, 0.016);
+    assert!(!e.is_running());
+    assert_eq!(e.lifecycle(), Lifecycle::Terminated);
+    assert_eq!(*log.borrow(), ["startup", "update", "update", "shutdown"]);
+    e.sender().send(Message::Start).unwrap();
+    e.run_frames(3, 0.016);
+    assert_eq!(*log.borrow(), ["startup", "update", "update", "shutdown"]);
 }

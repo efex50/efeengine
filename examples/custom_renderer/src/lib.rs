@@ -58,13 +58,13 @@ fn spawn_scene(engine: &mut Engine) {
     world.spawn((
         Transform::from_position(Vec2::new(80.0, 0.0)),
         Parent::new(parent),
-        Sprite { size: Vec2::new(48.0, 24.0), layer: 1, ..Sprite::new(grad) },
+        Sprite { layer: 1, ..Sprite::new(grad) }.with_size(Vec2::new(48.0, 24.0)),
     ));
     // A tinted sprite drifting to the right, drawn above the others.
     world.spawn((
         Transform::from_position(Vec2::new(-60.0, -80.0)),
         Velocity { linear: Vec2::new(40.0, 0.0), angular: 0.0 },
-        Sprite { size: Vec2::new(40.0, 40.0), color: [1.0, 0.8, 0.8, 1.0], layer: 2, ..Sprite::new(white) },
+        Sprite { color: [1.0, 0.8, 0.8, 1.0], layer: 2, ..Sprite::new(white) }.with_size(Vec2::new(40.0, 40.0)),
     ));
 }
 

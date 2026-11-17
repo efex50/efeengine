@@ -50,14 +50,24 @@ fn init_log_crate_logger() {
     let _ = console_log::init_with_level(::log::Level::Warn);
 }
 
-#[derive(Debug,PartialEq, Eq)]
-pub enum EngineStatus{
-    Uninitialized,
-    Initializing,
-    Ready,
-    Stopped,
+/// Where the engine is in its life. One value, no contradictory flag combinations.
+///
+/// `Created` -> `Running` (first frame; `Startup` runs there) <-> `Paused` (`Message::Stop` /
+/// `Message::Start`) -> `ShuttingDown` (`Message::Kill`, `commands.quit()`, close request) ->
+/// `Terminated` (`Shutdown` ran, once; every later `frame()` is a no-op).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle{
+    /// Built, no frame ran yet.
+    Created,
+    /// Frames run their schedule and advance game time.
     Running,
-    Kill,
+    /// Window events and messages are still handled, but no stage runs, nothing renders and
+    /// game time stands still.
+    Paused,
+    /// A shutdown was requested; `Shutdown` runs when the current frame is aborted.
+    ShuttingDown,
+    /// `Shutdown` has run. Terminal.
+    Terminated,
 }
 
 
@@ -111,7 +121,7 @@ pub struct Engine{
     renderer: Box<dyn Renderer>,
     gpu: Option<GpuContext>,
     pub windows:GameWindowManager,
-    status:EngineStatus,
+    lifecycle: Lifecycle,
     pub logger:Box<dyn Logger>,
     pub state:EngineState,
     /// Input events of the current tick; reused every tick.
@@ -124,10 +134,6 @@ pub struct Engine{
     /// Runs the parallel batches of a stage.
     exec: Executor,
     commands: Commands,
-    /// `Startup` has run.
-    started: bool,
-    /// `Shutdown` has run.
-    shut_down: bool,
     /// Frame-rate cap of the native loop; `None` = uncapped.
     max_fps: Option<f32>,
     /// This engine's own message queue.
@@ -225,7 +231,7 @@ impl Engine {
             renderer: Box::new(ClearRenderer),
             gpu: None,
             windows: w,
-            status:EngineStatus::Uninitialized,
+            lifecycle: Lifecycle::Created,
             logger,
             state,
             event_buf: Vec::new(),
@@ -236,8 +242,6 @@ impl Engine {
             plugins: Vec::new(),
             exec,
             commands: Commands::default(),
-            started: false,
-            shut_down: false,
             msg_tx,
             msg_rx,
             clock: 0.0,
@@ -942,9 +946,26 @@ impl Engine {
         self.windows.inject(ev);
     }
 
-    /// `false` once the engine was killed.
+    /// `false` once a shutdown was requested (kill, quit, close request). A paused engine
+    /// is still running in this sense.
     pub fn is_running(&self) -> bool {
-        self.status != EngineStatus::Kill
+        !matches!(self.lifecycle, Lifecycle::ShuttingDown | Lifecycle::Terminated)
+    }
+
+    /// `true` while paused by `Message::Stop`.
+    pub fn is_paused(&self) -> bool {
+        self.lifecycle == Lifecycle::Paused
+    }
+
+    pub fn lifecycle(&self) -> Lifecycle {
+        self.lifecycle
+    }
+
+    /// Ask for a shutdown (no effect once terminated).
+    fn request_shutdown(&mut self) {
+        if self.lifecycle != Lifecycle::Terminated {
+            self.lifecycle = Lifecycle::ShuttingDown;
+        }
     }
 
     fn set_frame_rate(&mut self, f: f32) {
@@ -953,16 +974,16 @@ impl Engine {
 
     /// Run `Shutdown` (and apply its commands) unless it already ran.
     fn shutdown_once(&mut self) {
-        if !self.shut_down {
-            self.shut_down = true;
+        if self.lifecycle == Lifecycle::ShuttingDown {
             self.run_stage(Stage::Shutdown);
+            self.lifecycle = Lifecycle::Terminated;
         }
     }
 
     /// If the engine was killed, run `Shutdown` once and return `true`: the caller must
     /// abort the rest of the frame.
     fn abort_if_killed(&mut self) -> bool {
-        if self.status == EngineStatus::Kill {
+        if matches!(self.lifecycle, Lifecycle::ShuttingDown | Lifecycle::Terminated) {
             self.shutdown_once();
             true
         } else {
@@ -970,10 +991,11 @@ impl Engine {
         }
     }
 
-    /// End the engine's life (loop exit through Kill, Stop or a failed frame request):
-    /// mark it killed and run `Shutdown` once.
+    /// End the engine's life (loop exit through a failed frame request): request shutdown and
+    /// run `Shutdown` once.
+    #[cfg(target_family = "wasm")]
     fn finish(&mut self) {
-        self.status = EngineStatus::Kill;
+        self.request_shutdown();
         self.shutdown_once();
     }
 
@@ -989,13 +1011,17 @@ impl Engine {
                 self.logger.info(msg);
             },
             Message::Stop =>{
-                self.status = EngineStatus::Stopped;
+                if self.lifecycle == Lifecycle::Running {
+                    self.lifecycle = Lifecycle::Paused;
+                }
             },
             Message::Start =>{
-                self.status = EngineStatus::Running;
+                if self.lifecycle == Lifecycle::Paused {
+                    self.lifecycle = Lifecycle::Running;
+                }
             },
             Message::Kill => {
-                self.status = EngineStatus::Kill;
+                self.request_shutdown();
             }
             Message::SetFrameRate(f) => {
                 self.set_frame_rate(*f);
@@ -1042,7 +1068,7 @@ impl Engine {
         let cmds: Vec<EngineCommand> = self.commands.drain().collect();
         for c in cmds {
             match c {
-                EngineCommand::Quit => self.status = EngineStatus::Kill,
+                EngineCommand::Quit => self.request_shutdown(),
                 EngineCommand::SetTitle(t) => self.windows.set_title(t),
                 EngineCommand::SetFrameRate(f) => self.set_frame_rate(f),
                 EngineCommand::SetCursorVisible(v) => self.windows.set_cursor_visible(v),
@@ -1119,7 +1145,7 @@ impl Engine {
         }
         let mut drawn = false;
         let size = (gpu.config.width, gpu.config.height);
-        if size.0 > 0 && size.1 > 0 {
+        if !gpu.is_suspended() && size.0 > 0 && size.1 > 0 {
             match gpu.surface.get_current_texture() {
                 Ok(output) => {
                     let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1165,7 +1191,7 @@ impl Engine {
             }
             WindowEvent::CloseRequested => {
                 self.logger.info("close requested");
-                self.status = EngineStatus::Kill;
+                self.request_shutdown();
             }
         }
     }
@@ -1177,15 +1203,27 @@ impl Engine {
     /// Kill (from `CloseRequested`, `Message::Kill` or `commands.quit()`) aborts the rest of
     /// the frame (remaining stages and render are skipped), then `Shutdown` runs once;
     /// `Startup` is skipped if the engine is killed before it. After that this is a no-op.
+    ///
+    /// While paused (`Message::Stop`) a frame only polls window events and handles messages
+    /// (so `Start`, `Kill` and close requests still work): no stage runs, nothing renders,
+    /// and game time does not advance (the clock is only tracked, so resuming does not see
+    /// the paused time as one big delta).
     pub fn frame(&mut self, now_secs: f64){
-        if !self.started {
+        let first = self.lifecycle == Lifecycle::Created;
+        if first {
             // The first frame closes API registration (`game_loop` closed it already).
             self.close_api();
+            self.lifecycle = Lifecycle::Running;
         }
-        if self.status == EngineStatus::Kill && self.shut_down {
+        if self.lifecycle == Lifecycle::Terminated {
             return;
         }
-        let steps = self.state.time.advance(now_secs);
+        let steps = if self.lifecycle == Lifecycle::Paused {
+            self.state.time.track(now_secs);
+            0
+        } else {
+            self.state.time.advance(now_secs)
+        };
         self.events.update_all();
         // Poll first so input/resize events from this frame are handled this frame.
         self.state.input.begin_frame();
@@ -1209,12 +1247,14 @@ impl Engine {
             return;
         }
 
-        if !self.started {
-            self.started = true;
+        if first {
             self.run_stage(Stage::Startup);
             if self.abort_if_killed() {
                 return;
             }
+        }
+        if self.lifecycle == Lifecycle::Paused {
+            return;
         }
         self.run_stage(Stage::PreUpdate);
         if self.abort_if_killed() {
@@ -1302,8 +1342,8 @@ impl Engine {
         });
     }
 
-    /// The rAF loop. `Message::Stop` currently ends the loop on both platforms (Shutdown runs
-    /// once); `Start` after `Stop` does not resume, same as native.
+    /// The rAF loop. It keeps scheduling frames while paused (`Message::Stop`) and ends when
+    /// the engine is killed or a frame request fails (Shutdown runs once).
     #[cfg(target_family = "wasm")]
     fn wasm_run_frames(self){
         use std::rc::Rc;
@@ -1336,7 +1376,7 @@ impl Engine {
                     Some(e) => {
                         e.clock = timestamp_ms / 1000.0;
                         e.frame(timestamp_ms / 1000.0);
-                        !matches!(e.status, EngineStatus::Kill | EngineStatus::Stopped)
+                        e.is_running()
                     }
                     None => false,
                 }
@@ -1346,7 +1386,7 @@ impl Engine {
                 None => false,
             };
             if !scheduled {
-                // Kill, Stop or a failed request: shut down and drop the engine.
+                // Kill or a failed request: shut down and drop the engine.
                 terminate(engine);
                 // The closure slot owns this very closure (through `f` it captured: an Rc
                 // cycle) and we are running inside it, so it must not be dropped here.
@@ -1380,12 +1420,12 @@ impl Engine {
             let frame_start = std::time::Instant::now();
             self.tick();
             // Leave the loop so `game_loop` returns and the engine is dropped normally.
-            // Kill already ran Shutdown inside `frame`; Stop runs it here (once).
-            if self.status == EngineStatus::Stopped {
-                self.finish();
-                break 'main;
+            // Kill already ran Shutdown inside `frame`. A paused engine keeps looping.
+            if !self.is_running() { break 'main; }
+            if self.is_paused() && frame_budget(self.max_fps).is_none() {
+                // Nothing renders while paused: do not spin.
+                std::thread::sleep(std::time::Duration::from_millis(16));
             }
-            if self.status == EngineStatus::Kill { break 'main; }
             // Frame limiter. vsync pacing comes with the renderer in Phase 4.
             if let Some(target) = frame_budget(self.max_fps) {
                 if let Some(rest) = target.checked_sub(frame_start.elapsed()) {

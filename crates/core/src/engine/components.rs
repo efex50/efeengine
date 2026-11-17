@@ -132,7 +132,7 @@ pub struct Sprite {
     pub texture: TextureHandle,
     /// RGBA tint multiplied with the texture.
     pub color: [f32; 4],
-    /// Size in world units; zero on an axis (both, normally) means the texture's pixel size.
+    /// Size in world units. Used literally (zero = nothing visible) when `auto_size` is 0.
     pub size: Vec2,
     /// Texture coordinates of the quad's top-left corner (0,0 = top-left of the image).
     pub uv_min: Vec2,
@@ -142,15 +142,25 @@ pub struct Sprite {
     pub layer: i32,
     /// Bit 0 mirrors horizontally, bit 1 vertically.
     pub flip: u32,
+    /// Non-zero: the size is the texture's pixel size and `size` is ignored. Zero: `size` is
+    /// used as it is, so a `size` of 0 draws a zero-size (invisible) quad.
+    pub auto_size: u32,
 }
 
 impl Sprite {
     pub const FLIP_X: u32 = 1;
     pub const FLIP_Y: u32 = 2;
 
-    /// A white, full-texture sprite with `texture`.
+    /// A white, full-texture sprite with `texture`, drawn at the texture's pixel size.
     pub fn new(texture: TextureHandle) -> Self {
         Self { texture, ..Self::default() }
+    }
+
+    /// Use `size` (world units) instead of the texture's pixel size.
+    pub fn with_size(mut self, size: Vec2) -> Self {
+        self.size = size;
+        self.auto_size = 0;
+        self
     }
 }
 
@@ -164,6 +174,7 @@ impl Default for Sprite {
             uv_max: Vec2::ONE,
             layer: 0,
             flip: 0,
+            auto_size: 1,
         }
     }
 }

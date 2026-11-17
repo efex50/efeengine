@@ -47,8 +47,8 @@ pub struct SpriteInstance {
     /// Quad -> world, column-major. The entity's world transform (translation, rotation,
     /// scale); the quad itself is the unit square centred on the origin, scaled by `size`.
     pub world: [[f32; 4]; 4],
-    /// Size in world units; never zero (a zero `Sprite::size` is resolved to the texture's
-    /// pixel size, or 1x1 for no texture).
+    /// Size in world units: `Sprite::size`, or the texture's pixel size (1x1 for no texture)
+    /// when `Sprite::auto_size` is set. May be zero for a sprite sized 0 on purpose.
     pub size: [f32; 2],
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],

@@ -7,8 +7,9 @@ use web_sys::WorkerOptions;
 use crate::{debug_info, global_info, thread::Jobs, thread_pool::{KillGate, ThreadPoolTrait}};
 
 /// Web Worker pool. Same design as the native one: one shared flume channel,
-/// shrink = `Kill` jobs. Nothing here ever blocks the main thread: exited workers
-/// are only `terminate()`d (by dropping them) on the next resize call.
+/// shrink = `Kill` jobs. Nothing here ever blocks the main thread: a worker that leaves its
+/// loop closes its own JS global scope (so it does not linger), and its handle is dropped
+/// (`terminate()` as a backstop) the next time the pool prunes.
 ///
 /// If the wasm JS path is not known when the pool is created (`url` is `None`), the
 /// pool has no workers. `worker_amount` is then 0, and jobs sent to it stay queued
@@ -109,12 +110,18 @@ impl ThreadPoolTrait for ThreadPool{
     }
 
     fn worker_amount(&self) -> usize {
+        // Cheap prune: only when the lock is free (never blocks the main thread).
+        if let Ok(mut w) = self.workers.try_lock() {
+            Self::prune(&mut w);
+        }
         self.target.load(Ordering::SeqCst)
     }
 
     fn new_dedicated_worker(&self) -> super::WorkerHandle {
         let (tx,rx) = flume::unbounded::<Jobs>();
         let mut ex = crate::thread_pool::lock_nb(&self.dedicated_workers);
+        // Dedicated workers whose handle dropped have left their loop and closed themselves.
+        Self::prune(&mut ex);
         match gen_url(WorkerType::Standart) {
             Some(url) => {
                 // the new workers has id +31000
@@ -277,6 +284,17 @@ pub fn worker_loop(ptr: usize){
         }
     }
     init_data.done.store(true, Ordering::SeqCst);
+    close_self();
+}
+
+/// Close this worker's own global scope: the JS Worker ends right after its loop does, not on
+/// the next prune. The `Drop` of `Worker` (terminate) stays as a backstop.
+fn close_self() {
+    use wasm_bindgen::JsCast;
+    let global = js_sys::global();
+    if let Some(scope) = global.dyn_ref::<web_sys::DedicatedWorkerGlobalScope>() {
+        scope.close();
+    }
 }
 #[wasm_bindgen]
 pub fn worker_loop_once(ptr: usize){
@@ -292,5 +310,5 @@ pub fn worker_loop_once(ptr: usize){
             Jobs::Kill=>(),
         }
     }
-    
+    close_self();
 }

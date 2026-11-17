@@ -30,6 +30,7 @@ pub fn spawn_sprite(tex: i32, x: f32, y: f32, size: f32, layer: i32, frame: i32,
     call c.vec2_store(sbuf, Sprite.uv_max, u1, 1.0)
     i32.store layer, sbuf, Sprite.layer
     i32.store 0, sbuf, Sprite.flip
+    i32.store 0, sbuf, Sprite.auto_size   ; use `size` as it is
 
     call engine.world.spawn() -> ent
     call engine.world.insert(ent, Transform.id, tbuf) -> status

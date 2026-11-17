@@ -104,6 +104,15 @@ impl Time {
         }
     }
 
+    /// Remember `now_secs` as the previous frame time without advancing anything (frame
+    /// count, delta, elapsed and accumulator stay). Used while the engine is paused, so the
+    /// first frame after resuming sees a normal delta, not the whole paused time.
+    pub fn track(&mut self, now_secs: f64) {
+        if now_secs.is_finite() {
+            self.last_now = Some(now_secs);
+        }
+    }
+
     /// Start a new frame at time `now_secs` (any monotonic origin). First call: delta 0.
     ///
     /// A `now` earlier than the previous one (clock reset) counts as delta 0. Clamps the delta,

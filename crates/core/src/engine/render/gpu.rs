@@ -17,6 +17,26 @@ pub(crate) struct GpuContext {
     pub queue: Queue,
     pub surface: Surface<'static>,
     pub config: SurfaceConfiguration,
+    /// The window has a zero side (minimized): no texture is acquired and nothing is
+    /// reconfigured until a non-zero size arrives.
+    suspended: bool,
+}
+
+/// What a resize event asks of the surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResizePlan {
+    /// The new suspended state.
+    pub suspended: bool,
+    /// Configure the surface with the new size.
+    pub reconfigure: bool,
+}
+
+/// Pure resize logic: a zero side suspends rendering (the old size is kept, nothing is
+/// reconfigured); the next non-zero size resumes and always reconfigures, even at the old
+/// size, because the surface may have been invalidated while minimized.
+pub(crate) fn plan_resize(size: (u32, u32)) -> ResizePlan {
+    let zero = size.0 == 0 || size.1 == 0;
+    ResizePlan { suspended: zero, reconfigure: !zero }
 }
 
 impl GpuContext {
@@ -76,7 +96,7 @@ impl GpuContext {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        Ok(Self { instance, adapter, device, queue, surface, config })
+        Ok(Self { instance, adapter, device, queue, surface, config, suspended: false })
     }
 
     /// The borrowed view handed to the renderer.
@@ -89,10 +109,12 @@ impl GpuContext {
         }
     }
 
-    /// Reconfigure the surface for `size` (ignored while either side is 0, e.g. minimized).
-    /// Returns whether it was reconfigured.
+    /// Reconfigure the surface for `size`. A zero side (minimized) suspends the context
+    /// instead; the next non-zero size resumes it. Returns whether it was reconfigured.
     pub fn resize(&mut self, size: (u32, u32)) -> bool {
-        if size.0 == 0 || size.1 == 0 {
+        let plan = plan_resize(size);
+        self.suspended = plan.suspended;
+        if !plan.reconfigure {
             return false;
         }
         self.config.width = size.0;
@@ -101,8 +123,16 @@ impl GpuContext {
         true
     }
 
-    /// Reconfigure with the current size (after Lost / Outdated).
+    /// `true` while the window has a zero size: nothing may be acquired or reconfigured.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended
+    }
+
+    /// Reconfigure with the current size (after Lost / Outdated). No-op while suspended.
     pub fn reconfigure(&mut self) {
+        if self.suspended {
+            return;
+        }
         self.surface.configure(&self.device, &self.config);
     }
 }
@@ -163,3 +193,16 @@ fn create_surface(instance: &Instance, window: &GameWindowManager) -> Result<Sur
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_side_suspends_and_non_zero_resumes_with_reconfigure() {
+        assert_eq!(plan_resize((0, 0)), ResizePlan { suspended: true, reconfigure: false });
+        assert_eq!(plan_resize((0, 600)), ResizePlan { suspended: true, reconfigure: false });
+        assert_eq!(plan_resize((800, 0)), ResizePlan { suspended: true, reconfigure: false });
+        assert_eq!(plan_resize((800, 600)), ResizePlan { suspended: false, reconfigure: true });
+    }
+}

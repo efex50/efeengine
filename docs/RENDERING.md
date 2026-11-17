@@ -23,7 +23,7 @@ are script-visible (registered, in the API index); `Children` is Rust-only. A mi
 it is not inherited by children.
 
 `RenderFrame`: `camera: Option<CameraView>`, `ignored_cameras`, `sprites: Vec<SpriteInstance>` (sorted by
-`layer`, then entity id; sprite size 0 is resolved to the texture's pixel size, 1x1 without a texture),
+`layer`, then entity id; `auto_size != 0` resolves the size to the texture's pixel size, 1x1 without a texture; with `auto_size == 0` `size` is used as is, so 0 means zero-size),
 `meshes: Vec<MeshInstance>`, `textures: TextureChanges`, `frame`, `time`.
 
 ## One camera

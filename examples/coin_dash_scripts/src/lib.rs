@@ -211,7 +211,7 @@ fn spawn_ground(world: &mut World, tiles: TextureHandle) {
             let pos = Vec2::new((x as f32 + 0.5) * TILE, (y as f32 + 0.5) * TILE) - HALF;
             world.spawn((
                 Transform::from_position(pos),
-                Sprite { size: Vec2::splat(TILE), uv_min, uv_max, layer: LAYER_GROUND, ..Sprite::new(tiles) },
+                Sprite { uv_min, uv_max, layer: LAYER_GROUND, ..Sprite::new(tiles) }.with_size(Vec2::splat(TILE)),
             ));
         }
     }
@@ -263,14 +263,14 @@ pub fn spawn_actors(engine: &mut Engine, game: &Game, module: Option<ModuleId>) 
         Player { invulnerable: 1.0 }, // a second of immunity at the start, as after a hit
         Transform::default(),
         Velocity::default(),
-        Sprite { size: Vec2::splat(TILE), layer: LAYER_PLAYER, ..Sprite::new(player_tex) },
+        Sprite { layer: LAYER_PLAYER, ..Sprite::new(player_tex) }.with_size(Vec2::splat(TILE)),
     ));
     // the shadow: a child sprite that follows without any code
     let (uv_min, uv_max) = frame_uv(4, 5);
     world.spawn((
         Transform::from_position(Vec2::new(0.0, -6.0)),
         Parent::new(player),
-        Sprite { size: Vec2::splat(TILE), uv_min, uv_max, layer: LAYER_SHADOW, ..Sprite::new(tiles) },
+        Sprite { uv_min, uv_max, layer: LAYER_SHADOW, ..Sprite::new(tiles) }.with_size(Vec2::splat(TILE)),
     ));
     if let Some(m) = module {
         world.insert_one(player, Script::new(m, "player_update")).expect("player alive");
@@ -286,7 +286,7 @@ pub fn spawn_actors(engine: &mut Engine, game: &Game, module: Option<ModuleId>) 
             Transform::from_position(origin),
             Velocity::default(),
             Patrol { origin, axis, range, speed, dir: 1.0 },
-            Sprite { size: Vec2::splat(TILE), layer: LAYER_ENEMY, ..Sprite::new(enemy_tex) },
+            Sprite { layer: LAYER_ENEMY, ..Sprite::new(enemy_tex) }.with_size(Vec2::splat(TILE)),
         ));
         if let Some(m) = module {
             world.insert_one(e, Script::new(m, "patrol_update")).expect("enemy alive");

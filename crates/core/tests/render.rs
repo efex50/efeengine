@@ -114,14 +114,14 @@ fn sprites_are_gathered_sorted_and_filtered() {
     let tex = e.textures_mut().add(Image::solid(16, 8, [255; 4]));
     let high = e.world_mut().spawn((Transform::default(), Sprite { layer: 5, ..Sprite::new(tex) }));
     let low_a = e.world_mut().spawn((Transform::default(), Sprite { layer: -1, ..Sprite::default() }));
-    let low_b = e.world_mut().spawn((Transform::default(), Sprite { layer: -1, size: Vec2::new(3.0, 4.0), ..Sprite::default() }));
+    let low_b = e.world_mut().spawn((Transform::default(), Sprite { layer: -1, ..Sprite::default() }.with_size(Vec2::new(3.0, 4.0))));
     let mid = e.world_mut().spawn((Transform::from_position(Vec2::new(7.0, 9.0)), Sprite { layer: 2, ..Sprite::new(tex) }, Visibility::VISIBLE));
     let hidden = e.world_mut().spawn((Transform::default(), Sprite::default(), Visibility::HIDDEN));
     let f = frame_of(&mut e);
     let order: Vec<_> = f.sprites.iter().map(|s| s.entity).collect();
     assert_eq!(order, [low_a, low_b, mid, high], "by layer, ties by entity id");
     assert!(!order.contains(&hidden));
-    // size 0 -> the texture's pixels, or 1x1 without a texture
+    // auto size -> the texture's pixels, or 1x1 without a texture
     assert_eq!(f.sprites[0].size, [1.0, 1.0]);
     assert_eq!(f.sprites[1].size, [3.0, 4.0]);
     assert_eq!(f.sprites[2].size, [16.0, 8.0]);
@@ -129,6 +129,18 @@ fn sprites_are_gathered_sorted_and_filtered() {
     // world matrix, column-major: translation in the last column
     assert_eq!(f.sprites[2].world[3], [7.0, 9.0, 0.0, 1.0]);
     assert_eq!((f.sprites[0].uv_min, f.sprites[0].uv_max), ([0.0, 0.0], [1.0, 1.0]));
+}
+
+#[test]
+fn sprite_size_zero_is_literal_unless_auto_size() {
+    let mut e = engine();
+    let tex = e.textures_mut().add(Image::solid(16, 8, [255; 4]));
+    let zero = e.world_mut().spawn((Transform::default(), Sprite { layer: 0, ..Sprite::new(tex) }.with_size(Vec2::ZERO)));
+    let auto = e.world_mut().spawn((Transform::default(), Sprite { layer: 1, size: Vec2::ZERO, ..Sprite::new(tex) }));
+    let f = frame_of(&mut e);
+    let size_of_entity = |en| f.sprites.iter().find(|s| s.entity == en).unwrap().size;
+    assert_eq!(size_of_entity(zero), [0.0, 0.0]);
+    assert_eq!(size_of_entity(auto), [16.0, 8.0]);
 }
 
 #[test]
@@ -289,7 +301,7 @@ fn rendering_components_are_registered_and_indexed() {
     check("Parent", 8);
     check("GlobalTransform", 24);
     assert_eq!(size_of::<Camera>(), 44);
-    assert_eq!(size_of::<Sprite>(), 52);
+    assert_eq!(size_of::<Sprite>(), 56);
     let cam = idx.struct_type("Camera").unwrap();
     let names: Vec<_> = cam.fields.iter().map(|f| (f.name.as_str(), f.offset)).collect();
     assert_eq!(names, [("kind", 0), ("zoom", 4), ("near", 8), ("far", 12), ("fov_y", 16), ("clear_color", 20), ("active", 36), ("target", 40)]);

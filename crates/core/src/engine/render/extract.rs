@@ -126,16 +126,11 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
         if v.is_some_and(|v| v.visible == 0) {
             continue;
         }
-        let mut size = s.size;
-        if size.x == 0.0 || size.y == 0.0 {
-            let px = tex_size(s.texture).map_or(Vec2::ONE, |(w, h)| Vec2::new(w as f32, h as f32));
-            if size.x == 0.0 {
-                size.x = px.x;
-            }
-            if size.y == 0.0 {
-                size.y = px.y;
-            }
-        }
+        let size = if s.auto_size != 0 {
+            tex_size(s.texture).map_or(Vec2::ONE, |(w, h)| Vec2::new(w as f32, h as f32))
+        } else {
+            s.size
+        };
         frame.sprites.push(SpriteInstance {
             entity: e,
             world: lift(world_affine(g, t)),

@@ -322,6 +322,25 @@ mod tests {
     }
 
     #[test]
+    fn dropped_dedicated_workers_are_pruned() {
+        let pool = ThreadPool::new(1);
+        let handles: Vec<_> = (0..4).map(|_| pool.new_dedicated_worker()).collect();
+        assert_eq!(pool.dedicated_count(), 4);
+        // a handle that is still alive keeps its worker
+        let keep = handles.into_iter().next().unwrap();
+        assert!(wait_until(|| pool.dedicated_count() == 1));
+        let (tx, rx) = oneshot::channel::<u32>();
+        let _ = keep.spawn(move || { let _ = tx.send(7); });
+        assert_eq!(rx.recv().unwrap(), 7);
+        drop(keep);
+        assert!(wait_until(|| pool.dedicated_count() == 0));
+        // creating new ones prunes the finished ones too
+        let a = pool.new_dedicated_worker();
+        drop(a);
+        assert!(wait_until(|| { pool.change_worker_amount(1); pool.dedicated_count() == 0 }));
+    }
+
+    #[test]
     fn jobs_complete_across_resizes() {
         let pool = ThreadPool::new(2);
         let count = Arc::new(AtomicUsize::new(0));

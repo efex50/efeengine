@@ -44,6 +44,29 @@ impl ThreadPool {
         }
     }
 
+    /// Same for dedicated workers: join the ones that exited (their handle dropped, or a
+    /// `Kill` was sent) so their `JoinHandle`s do not pile up.
+    fn prune_dedicated(extra: &mut Vec<(Worker, flume::Sender<Jobs>)>) {
+        let mut i = 0;
+        while i < extra.len() {
+            if extra[i].0.done.load(Ordering::SeqCst) {
+                let (mut w, _) = extra.swap_remove(i);
+                if let Some(t) = w.thread.take() {
+                    let _ = t.join();
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dedicated_count(&self) -> usize {
+        let mut d = self.dedicated_workers.lock().unwrap();
+        Self::prune_dedicated(&mut d);
+        d.len()
+    }
+
     #[cfg(test)]
     pub(crate) fn live_workers(&self) -> usize {
         let mut w = self.workers.lock().unwrap();
@@ -83,6 +106,7 @@ impl ThreadPoolTrait for ThreadPool {
 
     fn change_worker_amount(&self,new_size:usize) {
         let new_size = new_size.max(1);
+        Self::prune_dedicated(&mut self.dedicated_workers.lock().unwrap());
         let mut workers = self.workers.lock().unwrap();
         Self::prune(&mut workers);
         let cur = self.target.load(Ordering::SeqCst);
@@ -113,7 +137,9 @@ impl ThreadPoolTrait for ThreadPool {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         // No kill gate: a `Kill` sent to a dedicated worker always stops it.
         let w = Worker::new(id, rx, None);
-        self.dedicated_workers.lock().unwrap().push((w, tx.clone()));
+        let mut extra = self.dedicated_workers.lock().unwrap();
+        Self::prune_dedicated(&mut extra);
+        extra.push((w, tx.clone()));
         WorkerHandle { sender: tx }
     }
 }

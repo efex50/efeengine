@@ -67,7 +67,7 @@ one script-visible thing that is not in the API index.
    - The web `worker_loop` has no `catch_unwind` (`thread_pool/web.rs:267`), so a panicking job kills the worker **(verified)**.
    - With zero web workers, `join` on the global pool blocks forever; on a dedicated worker with no URL it panics instead. Both should be errors **(verified)**.
    - The global logger is a `static` (`log.rs:8`), so its Shutdown-on-drop never runs and queued lines may be lost at exit; flush it explicitly at engine shutdown. Dropping any clone of `LoggerSender` would also shut it down **(verified)**.
-   - `Stop` ends the loop and `Start` does not resume it (unverified).
+   - `Stop` now pauses (stages, rendering and game time stop; messages and window events still handled) and `Start` resumes it.
 
 ## For termrender (report only; that repository was not changed)
 
@@ -192,7 +192,7 @@ frame: time.advance -> `events.update_all()` -> input.begin_frame -> poll window
 - Messages: sent any time, handled at the start of next frame's drain (<= 1 frame latency), made readable the same frame via `extend_readable` (events.rs:69), after the swap. Not double-buffered: Message events live one frame only.
 - `Events<T>`: send during frame N readable during all of N+1; note sends during a stage are not visible to later stages of the same frame, and a reader that skips a frame misses nothing but reads only once per swap.
 - Commands: structural changes visible to the next stage (spawn reserves entity immediately). Kill (Message/commands.quit()/CloseRequested) is checked after poll, drain, each stage and fixed step; skips remaining stages and render, runs Shutdown once (engine.rs:462).
-- Back-pressure: none. All queues unbounded; the drain takes everything queued at that moment (`flume::Drain`, messages.rs:28, snapshot semantics). Script events are the only capped queue (4096/frame, silent drop). `Stop` ends the loop on both platforms; `Start` after Stop does not resume (docs sec. 11).
+- Back-pressure: none. All queues unbounded; the drain takes everything queued at that moment (`flume::Drain`, messages.rs:28, snapshot semantics). Script events are the only capped queue (4096/frame, silent drop). `Stop` pauses on both platforms and `Start` resumes.
 - Channels full/closed: unbounded so never full; sends use `let _ =`; statics keep receivers alive so sends cannot fail (messages.rs:23). Closed pool channels are ignored (`let _ = send`).
 
 ## 5. Typing and dispatch
@@ -228,5 +228,5 @@ Weaknesses/gaps:
 - Events: no readers/cursors, no same-frame delivery for system-to-system events, no ordering between types, events dropped if not read within a frame; no `Drain`/clear API for consumers; stage-level event latency forces one-frame delay even for FixedUpdate multi-step (all steps see the same readable set).
 - Message handling happens before Startup but only via a single global receiver; multiple non-headless engines race for it.
 - Web: worker panic handling, zero-worker pools silently hang `join`, `join` blocks main thread (experimental warning); logger on 1-core web still uses a worker (ROADMAP "Logging" soon).
-- ts_rs types unused; Stop cannot resume (documented deviation).
+- ts_rs types unused. Stop pauses and Start resumes.
 - Script events: string-named, bytes payload, cloned per frame, dropped silently at 4096.

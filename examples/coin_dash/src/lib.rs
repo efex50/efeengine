@@ -108,7 +108,7 @@ fn frame_uv(frame: usize, frames: usize) -> (Vec2, Vec2) {
 
 fn tile_sprite(tiles: TextureHandle, frame: usize) -> Sprite {
     let (uv_min, uv_max) = frame_uv(frame, 5);
-    Sprite { size: Vec2::splat(TILE), uv_min, uv_max, layer: LAYER_GROUND, ..Sprite::new(tiles) }
+    Sprite { uv_min, uv_max, layer: LAYER_GROUND, ..Sprite::new(tiles) }.with_size(Vec2::splat(TILE))
 }
 
 /// The ground: a MAP_W x MAP_H grid of tile sprites (grass, a few flowers, a stone cross).
@@ -132,7 +132,7 @@ fn spawn_ground(world: &mut World, tiles: TextureHandle) {
 fn coin_bundle(coins: TextureHandle, pos: Vec2, phase: f32) -> (Transform, Sprite, Coin) {
     (
         Transform::from_position(pos),
-        Sprite { size: Vec2::splat(TILE), layer: LAYER_COIN, ..Sprite::new(coins) },
+        Sprite { layer: LAYER_COIN, ..Sprite::new(coins) }.with_size(Vec2::splat(TILE)),
         Coin { base_y: pos.y, phase },
     )
 }
@@ -157,7 +157,7 @@ fn spawn_player(world: &mut World, assets: Assets) -> Entity {
         Player,
         Transform::from_position(START),
         Velocity::default(),
-        Sprite { size: Vec2::splat(TILE), layer: LAYER_PLAYER, ..Sprite::new(assets.player) },
+        Sprite { layer: LAYER_PLAYER, ..Sprite::new(assets.player) }.with_size(Vec2::splat(TILE)),
     ));
     // The shadow: a child sprite (tile 4 of the atlas), offset below the feet. It moves with
     // the player because its Transform is relative to the parent's.
@@ -165,7 +165,7 @@ fn spawn_player(world: &mut World, assets: Assets) -> Entity {
     world.spawn((
         Transform::from_position(Vec2::new(0.0, -6.0)),
         Parent::new(player),
-        Sprite { size: Vec2::splat(TILE), uv_min, uv_max, layer: LAYER_SHADOW, ..Sprite::new(assets.tiles) },
+        Sprite { uv_min, uv_max, layer: LAYER_SHADOW, ..Sprite::new(assets.tiles) }.with_size(Vec2::splat(TILE)),
     ));
     player
 }
@@ -182,7 +182,7 @@ fn spawn_enemies(world: &mut World, enemy: TextureHandle) {
             Transform::from_position(origin),
             Velocity::default(),
             Patrol { origin, axis, range, speed, dir: 1.0 },
-            Sprite { size: Vec2::splat(TILE), layer: LAYER_ENEMY, ..Sprite::new(enemy) },
+            Sprite { layer: LAYER_ENEMY, ..Sprite::new(enemy) }.with_size(Vec2::splat(TILE)),
         ));
     }
 }
