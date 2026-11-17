@@ -14,9 +14,14 @@
            stage in CSS pixels; the engine reads clientWidth/clientHeight * devicePixelRatio and sets the
            drawing buffer size itself, so do not set width/height attributes on the canvas. */
         #stage { position: fixed; inset: 0; background: #1a1a2e; }
-        canvas { width: 100%; height: 100%; display: block; outline: none; touch-action: none;
+        #canvas { width: 100%; height: 100%; display: block; outline: none; touch-action: none;
             user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
             -webkit-tap-highlight-color: transparent; }
+
+        /* The UI layer (efeengine-ui web backend builds its widgets here). It covers the stage and lets
+           pointer events through to the canvas; widgets and modal backdrops take them back. The
+           engine ignores key events that come from inside it. */
+        #ui { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
 
         /* Full-window panels on top of the canvas: loading, click to start, errors. */
         .panel { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
@@ -53,6 +58,7 @@
          data-fullscreen-button="off", data-pause-hidden="off". -->
     <div id="stage">
         <canvas id="canvas" tabindex="0"></canvas>
+        <div id="ui"></div>
         <button id="fs" type="button" title="Fullscreen" aria-label="Toggle fullscreen" hidden>&#x26F6;</button>
         <div id="notice" hidden></div>
 

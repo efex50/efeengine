@@ -130,12 +130,12 @@ in headless tests.
 
 ### Phase 2: web backend
 
-- [ ] `UiTree` → DOM under a `#ui` layer above the canvas (`templates/web` gets the layer and the
+- [x] `UiTree` → DOM under a `#ui` layer above the canvas (`templates/web` gets the layer and the
   predefined CSS).
-- [ ] DOM events → `UiSignal`; patch only changed nodes.
-- [ ] Focus rules: a focused text input keeps keyboard input from the game; the focus-loss input
+- [x] DOM events → `UiSignal`; patch only changed nodes.
+- [x] Focus rules: a focused text input keeps keyboard input from the game; the focus-loss input
   reset in `web_backend.rs` must not fire when focus moves from the canvas into the UI.
-- [ ] Theme classes in a stylesheet the game can override.
+- [x] Theme classes in a stylesheet the game can override.
 
 **Exit:** the Phase 1 settings menu works in the browser.
 

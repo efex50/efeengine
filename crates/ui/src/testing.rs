@@ -22,9 +22,9 @@ pub struct UiTest {
 }
 
 impl UiTest {
-    /// A headless engine (60 Hz fixed step) with `UiPlugin::new()`, then `setup`.
+    /// A headless engine (60 Hz fixed step) with `UiPlugin::headless()`, then `setup`.
     pub fn new(setup: impl FnOnce(&mut Engine)) -> Self {
-        Self::with_plugin(UiPlugin::new(), setup)
+        Self::with_plugin(UiPlugin::headless(), setup)
     }
 
     /// Like [`new`](Self::new) with your own plugin value (for example one with a theme).

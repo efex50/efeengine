@@ -1,0 +1,22 @@
+[package]
+name = "ui_demo"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "ui_demo"
+path = "src/main.rs"
+
+
+[package.metadata.vcpkg]
+git = "https://github.com/microsoft/vcpkg"
+rev = "4c1db68"
+dependencies = ["sdl3"]
+
+
+[dependencies]
+efeengine-core = { path = "../../crates/core" }
+efeengine-ui = { path = "../../crates/ui" }

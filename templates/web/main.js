@@ -23,6 +23,7 @@ const ENGINE_CONFIG = {
     wasmJsPath: "./pkg/{{CRATE}}.js",
     // threads: 4,          // optional; omitted = automatic
     // canvasId: "canvas",  // optional; default "canvas"
+    // uiLayerId: "ui",     // optional; element the UI backend builds widgets in; default "ui"
     // externalApi: false,  // reserved
     // graphicsBackend: "auto", // "auto" | "webgpu" | "webgl"; auto = WebGL on desktop Linux
 }

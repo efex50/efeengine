@@ -676,8 +676,11 @@ name = "efeengine-ui"
 version = "0.1.0"
 dependencies = [
  "efeengine-core",
+ "js-sys",
  "smallvec",
  "thiserror",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -2268,6 +2271,14 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "termcolor",
+]
+
+[[package]]
+name = "ui_demo"
+version = "0.1.0"
+dependencies = [
+ "efeengine-core",
+ "efeengine-ui",
 ]
 
 [[package]]

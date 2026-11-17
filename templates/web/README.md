@@ -7,6 +7,7 @@ Page shell used by `scripts/web.sh` to publish an example as a wasm web app.
 - `index.html`: the page. A full-window `#stage` holds `<canvas id="canvas">` (the id the engine
   looks up), a fullscreen button, a notice area and the loading / click-to-start / error panels.
   Dark background, no page scroll, `touch-action: none`, context menu blocked on the canvas.
+  `<div id="ui">` follows the canvas: the layer `efeengine-ui` builds its widgets in (see below).
 - `main.js`: drives start-up (a `CONFIG` object at the top holds the switches):
   1. environment checks (WebAssembly, WebGPU / WebGL2, cross-origin isolation),
   2. downloads `pkg/{{CRATE}}_bg.wasm` with a progress bar (Content-Length; indeterminate when
@@ -28,7 +29,20 @@ Page shell used by `scripts/web.sh` to publish an example as a wasm web app.
 | `pauseWhenHidden` | `true` | `data-pause-hidden="off"` | send `Message::Stop` / `Message::Start` on `visibilitychange` |
 | `coiServiceWorker` | `false` | `data-coi-sw="on"` | register `coi-sw.js` (see COOP / COEP) |
 
-The engine start-up config (`threads`, `canvasId`, `graphicsBackend`, ...) is `ENGINE_CONFIG`.
+The engine start-up config (`threads`, `canvasId`, `uiLayerId`, `graphicsBackend`, ...) is `ENGINE_CONFIG`.
+
+## UI layer (`#ui`)
+
+`<div id="ui">` (CSS in `index.html`: `position: absolute; inset: 0; pointer-events: none`) sits
+above the canvas and below the loading / error panels. The `efeengine-ui` web backend puts one
+element per widget in it, adds `<style id="efui-base">` and `<style id="efui-theme">` to `<head>`
+and marks the element `data-efui-layer` (the engine ignores key events from inside it). The id
+comes from `uiLayerId` in `ENGINE_CONFIG` (default `"ui"`); when the page has no such element the
+backend creates it inside the canvas's parent. Games without UI can drop the element. To restyle
+the widgets from the page, use `!important` (node styles are inline) and note that the engine's
+`<style>` elements are appended to `<head>` at start-up, after your `<link>`s; see
+`docs/ui/API.md` section 12. The canvas rule is `#canvas`, so image widgets (canvases of
+their own) are not stretched.
 
 ## Behaviour notes
 

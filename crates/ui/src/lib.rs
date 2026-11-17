@@ -7,6 +7,8 @@
 pub mod backend;
 pub mod bindings;
 pub mod capture;
+pub mod css;
+pub mod dom_plan;
 pub mod headless;
 pub mod id;
 pub mod journal;
@@ -18,6 +20,8 @@ pub mod testing;
 pub mod theme;
 pub mod tree;
 pub mod view;
+#[cfg(target_arch = "wasm32")]
+pub mod web;
 
 pub use backend::{Filter, UiBackend, UiBackendCx};
 pub use bindings::{Bind, BindCx, BindTarget, BindUpdate, BoundValue, TextSrc, UiBindings};
@@ -31,5 +35,7 @@ pub use signal::{UiCtxExt, UiSignal, UiSignalKind, UiValue, filter_signals};
 pub use style::{Align, Border, Color, Direction, Edges, FontId, Justify, Size, Style, TextAlign};
 pub use testing::UiTest;
 pub use theme::{StateStyles, Theme, WidgetState};
+#[cfg(target_arch = "wasm32")]
+pub use web::WebBackend;
 pub use view::{El, RunCondition, UiView, UiViews, ViewCx};
 pub use tree::{FontData, NodeRef, StyleMut, TreeError, UiTree};

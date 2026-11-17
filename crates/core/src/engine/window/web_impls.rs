@@ -62,10 +62,17 @@ pub(super) fn should_prevent_default(e: &KeyboardEvent) -> bool {
     game_key && !shortcut && !is_editable_target(e)
 }
 
+/// Key and text events that belong to the page, not the game: typing in a page input, and
+/// anything that happens inside the UI layer element (`efeengine-ui`'s web backend marks it with
+/// `data-efui-layer`), so a focused UI button keeps Space and Enter for itself and a UI text
+/// input keeps its typing. Used by the keyboard and composition listeners on `window`.
 pub(super) fn is_editable_target(e: &Event) -> bool {
     let Some(target) = e.target() else { return false };
     if let Some(el) = target.dyn_ref::<Element>() {
         if matches!(el.tag_name().to_ascii_lowercase().as_str(), "input" | "textarea" | "select") {
+            return true;
+        }
+        if el.closest("[data-efui-layer]").ok().flatten().is_some() {
             return true;
         }
     }

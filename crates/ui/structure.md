@@ -1,6 +1,6 @@
 # efeengine-ui
 
-The common UI API of the engine (design: `docs/ui/API.md`, sections 1 to 15; plan: `ui-roadmap.md`, Phase 1 retained layer). A retained `UiTree` resource with a change journal, a style subset and themes, signals, bindings, the `UiBackend` trait, a headless backend and the `UiTest` helper. No backend is real yet (web, iced and fallback come later); no UI toolkit type appears in the API. The Elm-style view layer (section 16) is the `view` module, built on top of the public tree API.
+The common UI API of the engine (design: `docs/ui/API.md`, sections 1 to 15; plan: `ui-roadmap.md`, Phase 1 retained layer). A retained `UiTree` resource with a change journal, a style subset and themes, signals, bindings, the `UiBackend` trait, a headless backend and the `UiTest` helper. The web backend (DOM) is real (Phase 2); iced and fallback come later; no UI toolkit type appears in the API. The Elm-style view layer (section 16) is the `view` module, built on top of the public tree API.
 
 ## At a glance
 | | |
@@ -9,7 +9,7 @@ The common UI API of the engine (design: `docs/ui/API.md`, sections 1 to 15; pla
 | Kind | library (rlib) |
 | Depends on (workspace) | `efeengine-core` (Engine, Plugin, Ctx, Resources, Events, `InputEvent`, `TextureHandle`) |
 | External deps | `smallvec` (node classes), `thiserror` (`TreeError`) |
-| Used by | nothing yet |
+| Used by | `examples/ui_demo` |
 | Targets | native and `wasm32-unknown-unknown` (both check clean) |
 | Tests | `tests/tree.rs` (14), `tests/theme.rs` (5), `tests/plugin.rs` (22), `tests/settings.rs` (2), `tests/view.rs` (22); all headless, no window or GPU |
 
@@ -31,6 +31,9 @@ crates/ui
 │   ├── bindings.rs   Bind<T>, BindCx, UiBindings resource, BindUpdate, TextSrc
 │   ├── capture.rs    UiCapture (alias of core's `InputCapture`)
 │   ├── backend.rs    UiBackend trait, Filter, UiBackendCx
+│   ├── css.rs        pure CSS generation (class names, declarations, base and theme state stylesheets), target independent
+│   ├── dom_plan.rs   pure parts of the web backend (element tag, class list, inline declarations, style diff), native unit tests
+│   ├── web.rs        WebBackend (wasm32 only): DOM elements, delegated listeners, capture
 │   ├── headless.rs   HeadlessBackend (journal recorder and consistency checker) and HeadlessHandle
 │   ├── plugin.rs     UiPlugin (resources and four main-thread systems)
 │   ├── view/         the Elm-style view layer: mod.rs (docs: key scheme, frame order), el.rs (El, IntoChildren, constructors, `column!` / `row!`), reconcile.rs (tree diff), plugin.rs (UiView, UiViews, ViewCx, RunCondition, `changed`)
@@ -78,8 +81,12 @@ crates/ui
 ### Fonts
 `UiTree::load_font(name, bytes)` registers a `FontId` and journals `Font(id)`; `font`, `font_by_name`, `fonts`. No font file is bundled yet (the native default font and `THIRD_PARTY_NOTICES.md` entry come with the native backend).
 
+### Web backend (`web.rs`, `dom_plan.rs`, `css.rs`; API.md sections 5, 6, 10, 12)
+`UiPlugin::new()` uses `WebBackend` on wasm32 (`UiPlugin::headless()` always headless). Layer element: startup config `uiLayerId` (default `ui`, created in the canvas's parent if missing; marked `data-efui-layer`). One element per node (`data-efui-id` = `WidgetId::to_bits`), inline style = resolved normal style diffed against the last written declarations, `<style id="efui-base">` and `<style id="efui-theme">` (hover, active, focus, disabled with `!important`) in `<head>`. Journal applied against the final tree: `Created` builds the element, parents named by `Created` / `Moved` get their DOM children ordered like `tree.children`. Delegated listeners on the layer element (kept in the backend, removed on drop) produce the signals; capture from pointerover / pointerout plus `:hover` and from `document.activeElement`. Modal layers get a transparent backdrop element. `UiBackendCx.images` carries RGBA for `Image` nodes (drawn once into a canvas). Core side: `web_impls::is_editable_target` also ignores key / composition events from inside `[data-efui-layer]`.
+
 ## Not done yet
+- Web: fonts (`UiChange::Font` is ignored), textures replaced after the widget was built do not refresh, no IME work beyond the browser's own, no browser test automation (checked by hand with `examples/ui_demo`).
 - Script host functions (API.md section 9, Phase 4); `Owner::Mod` and per-owner queries exist.
-- Real backends and `render(gpu, target)`.
-- Image-from-`Textures` handling, IME, focus navigation.
+- Native backends (iced, fallback) and `render(gpu, target)`.
+- Native IME and focus navigation.
 - View layer: moves across parents recreate the node; reorder uses one `move_to` per out-of-place child (no longest-increasing-subsequence minimization); no `hover_signals` on `El`.

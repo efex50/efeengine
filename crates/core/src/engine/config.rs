@@ -14,6 +14,9 @@ pub struct StartupConfig {
     pub threads: Option<usize>,
     /// Id of the `<canvas>` to render to (web); `None` means "canvas".
     pub canvas_id: Option<String>,
+    /// Id of the element the UI backend (`efeengine-ui`, web) builds its widgets in; `None`
+    /// means "ui". Created inside the canvas's parent when the page has no such element.
+    pub ui_layer_id: Option<String>,
     /// Reserved for a future external/extension API. Only stored for now.
     pub external_api: bool,
     /// Which browser graphics API to use (web only).

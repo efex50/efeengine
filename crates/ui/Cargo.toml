@@ -8,3 +8,31 @@ license = "MIT"
 efeengine-core = { path = "../core" }
 smallvec = "1.16.5"
 thiserror = "2.0.21"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# versions match crates/core
+wasm-bindgen = "0.2.130"
+js-sys = "0.3.107"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3.107"
+features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlCanvasElement",
+    "HtmlHeadElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "CssStyleDeclaration",
+    "Node",
+    "Text",
+    "Event",
+    "EventTarget",
+    "KeyboardEvent",
+    "PointerEvent",
+    "MouseEvent",
+    "console",
+]

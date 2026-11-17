@@ -1,6 +1,6 @@
 # efeengine-ui: the common UI API
 
-> **Status:** Implemented in `crates/ui`: sections 1 to 8, 10, 12 (capture, same-frame events), 13 to 16; not yet: scripts and mods (9), real backends (11 fonts bundled, 13 render)\
+> **Status:** Implemented in `crates/ui`: sections 1 to 8, 10, 12 (capture, same-frame events), 13 to 16; not yet: scripts and mods (9), native backends (11 fonts bundled, 13 render); the web backend is done except fonts (Phase 2)\
 > **Date:** 2026-11-17\
 > **Roadmap:** [`ui-roadmap.md`](../../ui-roadmap.md)\
 > **Backends:** web (HTML + CSS), native iced, native fallback ([`FALLBACK_NATIVE.md`](FALLBACK_NATIVE.md)), headless (tests)
@@ -160,9 +160,13 @@ pub struct Style {
 - `Fill` means "take the remaining space", `Portion(n)` shares it n:m between siblings (CSS
   `flex-grow`, iced `FillPortion`, taffy `flex_grow`).
 - Every field is `Option`: `None` means "inherit from the classes, then the theme default".
-- **Web:** a node's inline `Style` is written to its element's `style` (one CSS property per set
-  field, mapped by the table below); kinds, classes and state styles come from the generated theme
-  stylesheet (section 6). A style change writes only the changed properties of that element.
+- **Web:** every element's inline `style` holds the node's fully RESOLVED normal style
+  (`tree.resolve(id, WidgetState::default())`: base, kind, classes in order, inline; one CSS
+  property per set field, mapped by the table below; `Fill` / `Portion` depend on the parent's
+  resolved direction, so a direction change restyles the children). A style or class change writes
+  only the changed properties of that element (the backend keeps the last declarations per node);
+  a theme change rewrites every node. Hover, pressed, focus and disabled come from the generated
+  state stylesheet (section 6).
 - Left out on purpose in v1: margins (use gap and padding), wrapping, absolute positioning inside
   layers, per-corner radius, shadows, transforms, animations. Each can be added when all three
   backends support it.
@@ -196,9 +200,31 @@ pub struct StateStyles { pub normal: Style, pub hovered: Style, pub pressed: Sty
   defines it, so `disabled` always wins over a class's hovered or pressed style.
 - The engine ships a default theme (dark, readable at 1x and 2x). `UiTree::set_theme` replaces it;
   the change is one journal entry and backends restyle everything.
-- **Web:** the theme becomes one generated stylesheet: `.efui-k-button`, `.efui-c-panel`,
-  `:hover`, `:active`, `:focus-visible`, `[disabled]`. The template ships the base reset CSS. A game
-  may add its own CSS file on the web as an escape hatch; it is documented as web-only.
+- **Web:** two stylesheets in `<head>`: `<style id="efui-base">` (static reset; every element has
+  class `efui`, plus its kind class `efui-k-<kind>` and one `efui-c-<name>` per theme class) and
+  `<style id="efui-theme">` (generated from the theme: the hover, active, focus-visible and
+  disabled (`[data-efui-disabled]`) rules of kinds and classes, all `!important`). It is replaced on
+  `UiChange::Theme`. Normal styles are NOT in the stylesheet: they are inline (section 5), so the
+  class order of a node is respected exactly as in `resolve`. Consequences:
+  - A game's own CSS that changes a normal style must use `!important` to beat the inline style;
+    one that changes a state style must out-rank an `!important` state rule (a later `!important`
+    rule of equal or higher specificity). The engine's `<style>` elements are appended to
+    `<head>` at start-up, after the page's own `<link>`s.
+  - State rules follow the theme's kind-then-class order of the generated sheet (classes sorted by
+    name), not the node's class order, when two classes define the same state property.
+  - Disabled is also in the inline style (`resolve` adds it for an effectively disabled node), so
+    re-enabling rewrites the node and its descendants.
+  - Element mapping: Container, Scroll `div`; Text `span`; Button `<button type=button>` (the label
+    text, or the node's children); Checkbox `<label><input type=checkbox><span>`; Slider
+    `<input type=range>` (`step` 0 is `any`); TextInput `<input type=text|password>`; Image
+    `<canvas>` drawn from the texture's RGBA (`object-fit` from `ImageFit`). Invisible nodes get
+    `hidden`; effectively disabled ones `data-efui-disabled` and the native `disabled` attribute.
+  - Layers: a layer root is a `div.efui.efui-layer` inside the `#ui` element, positioned by
+    `css::layer_declarations` (z-index = `Layer::z`), with `pointer-events: none`. A modal layer
+    also gets a transparent full-window `div.efui-backdrop` under its root (same z-index) that takes
+    all pointer events, so the content may sit anywhere by its anchor. Inside layers a node takes
+    pointer events (`auto`), except a Container or Text without background and border, which lets
+    the pointer through to the game (a transparent layout box does not block clicks).
 - **iced:** the theme becomes style functions per kind and class (`button::Style` for each state).
 - **Fallback:** resolved per node at sync time and cached until the node, its classes or the theme
   change.
@@ -302,10 +328,21 @@ pub type UiCapture = efeengine_core::input::InputCapture;   // { pointer: bool, 
   devices. Raw input stays available for systems that want it.
 - **Native** backends see raw `InputEvent`s before the game systems (a core hook, section 12) and
   answer captured or not per event.
-- **Web:** DOM events on UI elements do not reach the canvas. The backend sets `pointer` from
-  `pointerenter`/`pointerleave` on widgets and `keyboard` from focus. Moving focus from the canvas
-  into the UI must not trigger the engine's focus-loss input reset (`web_backend.rs`): the web
-  backend tells the window backend which elements belong to the UI.
+- **Web:** DOM events on UI elements do not reach the canvas (the `#ui` element is a sibling).
+  One delegated listener per event type sits on the `#ui` element and finds the widget through the
+  `data-efui-id` attribute (`WidgetId::to_bits`): `click` on a button gives `Click`, checkbox
+  `change` and range / text `input` give `Changed`, Enter in a text input gives `Submit`,
+  `focusin` / `focusout` give `Focus`, `pointerover` / `pointerout` give `Hover` for nodes with
+  `hover_signals`. `capture().pointer` is "the pointer is over something inside `#ui`" (tracked
+  from `pointerover` / `pointerout`, confirmed with `:hover`, cleared when a touch ends);
+  `capture().keyboard` is "`document.activeElement` is an input or button inside `#ui`".
+  A mouse click on a button or checkbox blurs it again so the game keeps its keys (a keyboard
+  activation keeps the focus for keyboard navigation).
+  `web_backend.rs` listens for keys on `window`: its key, text and composition handling now ignores
+  events whose target is an editable element or sits inside an element with `data-efui-layer` (the
+  `#ui` element), so UI typing and Space / Enter on a focused UI button never reach the game. The
+  window `blur` / `focus` reset only reacts to the window (element focus changes do not fire it),
+  so moving focus from the canvas into the UI needs no special case.
 
 ## 11. Text, fonts and images
 
@@ -316,8 +353,9 @@ pub type UiCapture = efeengine_core::input::InputCapture;   // { pointer: bool, 
 - **Text input on native** needs IME composition events. The engine's `InputEventKind` has
   `Text(String)` but no composition event yet: add `TextEditing { text, cursor, len }` from SDL3, and
   a `set_text_input_area(rect)` on the window trait so IME popups appear next to the field.
-- **Images** reference engine `TextureHandle`s. Web: the backend turns the decoded RGBA into an
-  `ImageBitmap` / object URL once per texture version. iced: `image::Handle::from_rgba`. Fallback:
+- **Images** reference engine `TextureHandle`s. Web: the backend draws the decoded RGBA into a
+  `<canvas>` (`putImageData`) when the node is created or its kind changes; a texture replaced
+  later in `Textures` does not refresh the widget yet. iced: `image::Handle::from_rgba`. Fallback:
   its own GPU texture table fed by the same `TextureChanges` the game renderer gets.
 - **World-space UI** (labels and bars over entities) is out of v1: on the web HTML always draws above
   the canvas, so these would be positioned from the camera each frame or drawn by the game renderer.
@@ -334,8 +372,9 @@ pub type UiCapture = efeengine_core::input::InputCapture;   // { pointer: bool, 
    renderer). It lives in the engine next to the renderer, not in resources, and is driven from the
    frame: `sync` after `PostUpdate`, `render` in the overlay pass, input in the pre-filter.
 4. **IME and text input area** on the window trait (section 11).
-5. **Web:** a `uiLayerId` in the startup config (default `"ui"`), and the template's `#ui` element
-   above the canvas inside `#stage` (so fullscreen includes it).
+5. **Web (done):** a `uiLayerId` in the startup config (default `"ui"`; the backend creates the
+   element in the canvas's parent when missing), and the template's `#ui` element above the canvas
+   inside `#stage` (so fullscreen includes it); key handling in `web_backend.rs` as in section 10.
 
 ## 13. Backend trait
 
@@ -364,7 +403,9 @@ pub enum UiChange {
   by a `Created` or `Moved` entry like `tree.children(parent)`. The headless backend checks the index.
 - The journal names what changed, the backend reads the new state from the tree. A frame with no
   changes costs nothing in `sync`.
-- `UiPlugin` picks the backend: web on wasm, iced on native by default, the fallback with the
+- `UiBackendCx.images` carries the engine RGBA images of the textures that `Image` nodes created
+  or changed in this `sync` use (filled by the plugin from `Textures`).
+- `UiPlugin::new()` picks the backend: web on wasm32 (`UiPlugin::headless()` forces headless; `UiTest` uses it), iced on native by default, the fallback with the
   `ui-fallback` feature, headless when there is no window (tests, servers).
 
 ## 14. Testing (headless backend)

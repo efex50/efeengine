@@ -1,6 +1,10 @@
 //! The backend trait (API.md section 13).
 
+use std::sync::Arc;
+
 use efeengine_core::input::InputEvent;
+use efeengine_core::prelude::TextureHandle;
+use efeengine_core::render::Image;
 
 use crate::capture::UiCapture;
 use crate::journal::UiChange;
@@ -19,17 +23,21 @@ pub enum Filter {
 
 impl UiBackendCx {
     pub fn new(logical_size: (f32, f32), scale_factor: f32) -> Self {
-        Self { logical_size, scale_factor }
+        Self { logical_size, scale_factor, images: Vec::new() }
     }
 }
 
-/// Resources a backend gets while it runs (GPU and DOM handles join it with the overlay pass).
-#[derive(Clone, Copy, Debug)]
+/// Resources a backend gets while it runs (GPU handles join it with the overlay pass).
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct UiBackendCx {
     /// Window size in logical pixels.
     pub logical_size: (f32, f32),
     pub scale_factor: f32,
+    /// The engine images (RGBA8) of the textures that `Image` nodes touched by this `sync`
+    /// (created, or `Kind` changed) use. Filled by the plugin right before `sync`, empty
+    /// otherwise. A texture that is replaced in `Textures` later does not refresh the widget.
+    pub images: Vec<(TextureHandle, Arc<Image>)>,
 }
 
 /// Turns the tree into real widgets and reports what the user did. Backends are main-thread

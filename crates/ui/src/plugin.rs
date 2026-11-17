@@ -21,6 +21,8 @@ use efeengine_core::prelude::*;
 use crate::backend::{Filter, UiBackend, UiBackendCx};
 use crate::bindings::{BindCx, UiBindings};
 use crate::headless::HeadlessBackend;
+use crate::journal::UiChange;
+use crate::node::NodeKind;
 use crate::signal::{UiSignal, filter_signals};
 use crate::theme::Theme;
 use crate::tree::UiTree;
@@ -31,6 +33,8 @@ use crate::tree::UiTree;
 pub struct UiPlugin {
     backend: RefCell<Option<Box<dyn UiBackend>>>,
     theme: Option<Theme>,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    headless: bool,
 }
 
 impl Default for UiPlugin {
@@ -40,13 +44,19 @@ impl Default for UiPlugin {
 }
 
 impl UiPlugin {
-    /// With the headless backend.
+    /// With the web backend on wasm32, else the headless one (tests use `UiTest`, which always
+    /// runs headless).
     pub fn new() -> Self {
-        Self { backend: RefCell::new(None), theme: None }
+        Self { backend: RefCell::new(None), theme: None, headless: false }
+    }
+
+    /// Always the headless backend (and its `HeadlessHandle` resource), also on wasm32.
+    pub fn headless() -> Self {
+        Self { headless: true, ..Self::new() }
     }
 
     pub fn with_backend(backend: impl UiBackend) -> Self {
-        Self { backend: RefCell::new(Some(Box::new(backend))), theme: None }
+        Self { backend: RefCell::new(Some(Box::new(backend))), theme: None, headless: false }
     }
 
     /// Replaces the built-in dark theme.
@@ -64,6 +74,8 @@ impl Plugin for UiPlugin {
     fn build(&self, engine: &mut Engine) {
         let mut backend: Box<dyn UiBackend> = match self.backend.borrow_mut().take() {
             Some(b) => b,
+            #[cfg(target_arch = "wasm32")]
+            None if !self.headless => Box::new(crate::web::WebBackend::new()),
             None => {
                 let (b, handle) = HeadlessBackend::new();
                 engine.insert_resource(handle);
@@ -79,7 +91,7 @@ impl Plugin for UiPlugin {
         engine.insert_resource(UiBindings::new());
         engine.add_event::<UiSignal>();
 
-        let mut bcx = UiBackendCx { logical_size: (0.0, 0.0), scale_factor: 1.0 };
+        let mut bcx = UiBackendCx::new((0.0, 0.0), 1.0);
         backend.init(&mut bcx);
         let backend = Rc::new(RefCell::new(backend));
         let bcx = Rc::new(RefCell::new(bcx));
@@ -203,7 +215,20 @@ impl Plugin for UiPlugin {
                         return;
                     }
                     let Some(tree) = cx.resources.get::<UiTree>() else { return };
-                    backend.borrow_mut().sync(&tree, &changes, tree.theme(), &mut bcx.borrow_mut());
+                    let mut bc = bcx.borrow_mut();
+                    bc.images.clear();
+                    if let Some(textures) = cx.resources.get::<Textures>() {
+                        for ch in &changes {
+                            let (UiChange::Created(id) | UiChange::Kind(id)) = ch else { continue };
+                            if let Some(NodeKind::Image { texture, .. }) = tree.kind(*id)
+                                && let Some(img) = textures.get(*texture)
+                            {
+                                bc.images.push((*texture, img.clone()));
+                            }
+                        }
+                    }
+                    backend.borrow_mut().sync(&tree, &changes, tree.theme(), &mut bc);
+                    bc.images.clear();
                 })
                 .order(order::LATE + 20)
                 .name("ui_sync");
