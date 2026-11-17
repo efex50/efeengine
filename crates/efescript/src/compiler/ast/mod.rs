@@ -1,4 +1,3 @@
-pub mod calculations;
 pub mod lexer;
 
 pub struct Ast {

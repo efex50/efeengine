@@ -1,109 +1,89 @@
-use clap::{Parser, ValueEnum, CommandFactory};
-use std::io::{self, Read, IsTerminal};
-use calc::{tree::Tree, util::as_i128};
+use calc::{eval, parse, parse_value, simplify, Value, Vars};
+use clap::{Parser, ValueEnum};
+use std::io::{self, IsTerminal, Read};
 
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version, about = "Evaluate, simplify or print arithmetic expressions", long_about = None)]
 struct Args {
+    /// Expression (otherwise read from piped stdin)
     #[arg(short, long)]
     string: Option<String>,
 
+    /// Variable `name=value` (repeatable; value may be int, float, bool or a constant expression)
     #[arg(short, long)]
     var: Vec<String>,
 
+    /// Fold constants and print the (possibly partial) result as infix
     #[arg(long, default_value_t = false)]
     simplify: bool,
 
-    #[arg(long, default_value_t = false)]
-    space: bool,
-
+    /// Print the parsed expression instead of evaluating it (repeatable)
     #[arg(long, value_enum)]
     print: Vec<PrintType>,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum, Debug)]
 enum PrintType {
     Infix,
-    Prefix,
-    Postfix,
     Debug,
 }
 
 fn main() {
     let args = Args::parse();
-    let input_str = match args.string {
+    let src = match args.string {
         Some(s) => s,
+        None if !io::stdin().is_terminal() => {
+            let mut buf = String::new();
+            if let Err(e) = io::stdin().read_to_string(&mut buf) {
+                eprintln!("error: cannot read stdin: {e}");
+                std::process::exit(1);
+            }
+            buf.trim().to_string()
+        }
         None => {
-            if !io::stdin().is_terminal() {
-                let mut buffer = String::new();
-                if let Err(e) = io::stdin().read_to_string(&mut buffer) {
-                    eprintln!("Hata: Stdin okunamadı: {}", e);
-                    std::process::exit(1);
-                }
-                buffer.trim().to_string()
-            } else {
-                let mut cmd = Args::command();
-                cmd.error(
-                    clap::error::ErrorKind::MissingRequiredArgument,
-                    "Bir ifade girilmedi! Lütfen '-s \"ifade\"' kullanın veya pipe (|) ile veri gönderin."
-                ).exit();
+            eprintln!("error: no expression given; use -s \"expr\" or pipe one in");
+            std::process::exit(2);
+        }
+    };
+
+    let mut vars = Vars::new();
+    for v in &args.var {
+        let Some((key, val)) = v.split_once('=') else {
+            eprintln!("error: invalid variable `{v}`, expected name=value");
+            std::process::exit(2);
+        };
+        match parse_value(val) {
+            Ok(value) => {
+                vars.set(key.trim(), value);
+            }
+            Err(e) => {
+                eprintln!("variable `{key}`: {}", e.render(val));
+                std::process::exit(2);
             }
         }
-    };
+    }
 
-    let mut tree = {
-        if args.space{
-            Tree::new(' ')
-        }else {   
-            Tree::new(',')
-        }
-    };
-
-    if let Err(_) = tree.parse_auto(input_str) {
-        eprintln!("Hata: İfade ayrıştırılamadı! Sözdizimini kontrol edin.");
+    let fail = |e: calc::CalcError| -> ! {
+        eprintln!("{}", e.render(&src));
         std::process::exit(1);
-    }
+    };
 
-    for v in args.var {
-        if let Some((key, val_str)) = v.split_once('=') {
-            if let Ok(num) = as_i128(val_str) {
-                tree.set_var(key.to_string(), num);
-            } else if let Ok(flt) = val_str.parse::<f64>() {
-                tree.set_var(key.to_string(), flt);
-            } else {
-                eprintln!("Uyarı: '{}' sayı değil, '{}' değişkeni atlanıyor.", val_str, key);
-            }
-        } else {
-            eprintln!("Uyarı: Geçersiz format '{}'. 'x=5' formatını kullanın.", v);
-        }
-    }
-
+    let mut expr = parse(&src).unwrap_or_else(|e| fail(e));
     if args.simplify {
-        tree.simplify();
+        expr = simplify(&expr, &vars).unwrap_or_else(|e| fail(e));
     }
 
-    if args.print.is_empty() {
-        if let Some(res) = tree.is_number() {
-            println!("{}", res.as_str()); 
-        } else {
-            println!("{}", tree.infixprint().unwrap_or_default());
-        }
-    } else {
-        for print_type in &args.print {
-            match print_type {
-                PrintType::Infix => println!("{}", tree.infixprint().unwrap_or("Hata".into())),
-                PrintType::Prefix => println!("{}", tree.prefixprint().unwrap_or("Hata".into())),
-                PrintType::Postfix => println!("{}", tree.postfixprint().unwrap_or("Hata".into())),
-                PrintType::Debug => println!("{:#?}", tree),
+    if !args.print.is_empty() {
+        for p in &args.print {
+            match p {
+                PrintType::Infix => println!("{expr}"),
+                PrintType::Debug => println!("{expr:#?}"),
             }
         }
-        std::process::exit(1);
-        
-    }
-
-    if args.simplify && !args.print.is_empty() {
-        if let Some(n) = tree.is_number() {
-            println!("=> Hesaplanan Değer: {}", n.as_str());
-        }
+    } else if args.simplify {
+        println!("{expr}");
+    } else {
+        let v: Value = eval(&expr, &vars).unwrap_or_else(|e| fail(e));
+        println!("{v}");
     }
 }

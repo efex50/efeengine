@@ -1,6 +1,6 @@
 # calc
 
-`calc` is an arithmetic expression library: it tokenizes a string, parses it (infix, prefix or postfix notation) into a binary tree of `TreeType` nodes, prints the tree back in any of those notations, and can substitute variables and fold constants. Its README describes it as a library and client for efescript, but no workspace crate depends on it. It ships an optional `cli` binary that wraps the library.
+`calc` is an expression front end: a char-based lexer producing spanned tokens, a Pratt parser that accepts tokens from any `TokenSource`, an infix printer, an evaluator with checked `i128` arithmetic, a constant folder, and fixed-width narrowing helpers for a VM. It is meant for a future language and for constant expressions in the `.efa` assembler. It ships a `cli` binary. No workspace crate depends on it yet.
 
 ## At a glance
 | | |
@@ -8,82 +8,60 @@
 | Path | `crates/calc` |
 | Kind | library (+ binary `cli` behind the `cli` feature) |
 | Depends on (workspace) | none |
-| Used by | no workspace crate (checked: no `Cargo.toml` in `crates/` or `examples/` depends on `calc`). README says "client for efescript", but `crates/efescript/Cargo.toml` has no such dependency. |
-| Key external deps | `clap` 4.5 with `derive` (optional; only for the CLI argument parser) |
-| Targets | Native. Only `std` is used by the library, so it should build for other targets; not checked. The CLI reads stdin via `IsTerminal`. |
-| Features | `default = ["cli"]`; `cli = ["dep:clap"]`. The `cli` bin has `required-features = ["cli"]`. |
+| Used by | nothing yet |
+| Key external deps | `clap` 4.5 (optional, CLI only) |
+| Features | `default = ["cli"]`; `cli = ["dep:clap"]` |
 
 ## Layout
 ```text
 crates/calc/
-├── Cargo.toml          # package `calc` 1.1.0, edition 2024; optional clap; bin `cli`
-├── README.md           # one line: "calc - a mathematical expression evaluater - parser - simplifier library and client for efescript"
+├── Cargo.toml
+├── README.md
+├── tests/calc.rs       # integration tests (24)
 └── src/
-    ├── lib.rs          # `pub mod tree; pub mod types; pub mod util;` + placeholder `add()` and its test
-    ├── types.rs        # TreeTokens (lexer tokens), Number (i128 | f64) with arithmetic, Symbols, TreeType (tree nodes), FixType
-    ├── util.rs         # as_i128 (radix-prefixed integer parsing), check_fix_type (notation detection), split_str (tokenizer splitter)
-    ├── tree.rs         # Tree: variables, parse_auto / parse_str, prefix/infix/postfix parsers, printers, simplify, is_number
-    └── bin/
-        └── cli.rs      # `cli` binary: clap flags -s/-v/--simplify/--space/--print
-```
-
-## Main concepts
-- **`Number`** (`types.rs:23-27`): `Number(i128)` for integers and `Float(f64)` for floats. `Add`, `Sub`, `Mul`, `Div` are implemented; any mixed int/float operation yields `Float`. Integer division truncates. `as_str()` formats the value for output.
-- **`TreeTokens`** (`types.rs:4-20`): lexer output: `Variable(String)`, `Number(Number)`, `Plus`, `Sub`, `Mul`, `Div`, `BracO`, `BracC`.
-- **`TreeType`** (`types.rs:159-170`): tree nodes. Leaves are `Variable(String)` and `Number(Number)`; branches are `Plus`, `Sub`, `Mul`, `Div` (each `Box<TreeType>, Box<TreeType>`) and `Brac(Box<TreeType>)`.
-- **`Symbols`** (`types.rs:132-154`): the operator subset used by the parser, with `TryFrom<TreeTokens>`.
-- **`FixType`** (`types.rs:172-177`): `Infix`, `Prefix`, `Postfix`; selects the parser and the printer behaviour.
-- **Tokenizing**: `util::split_str` splits on operator and bracket symbols and discards the separator characters (`,` and space for parsing). `Tree::tokenize` (`tree.rs:251`) maps each piece to a token: operators and brackets by text; otherwise `as_i128` (accepts `0b`, `0o`, `0x` prefixes), then `f64`, else `Variable`. Unknown text silently becomes a variable.
-- **Notation detection**: `util::check_fix_type` (`util.rs:71`) looks at the first and last tokens to guess the notation; `Tree::parse_auto` uses it. It returns `Err` for an empty string.
-- **Parsing**: `parse_infix` (`tree.rs:192`) is a Pratt parser: `+`/`-` bind with powers (1,2), `*`/`/` with (3,4), parentheses recurse. `parse_prefix` (`tree.rs:98`) and `parse_postfix` (`tree.rs:140`) are recursive descent over the token list. Results are stored in `Tree.inner: Option<Box<TreeType>>`.
-- **Printing**: `prefixprint`, `infixprint`, `postfixprint` (`tree.rs:276-302`) call `print_inner`, which adds parentheses in infix mode where precedence requires them. The `separator` given to `Tree::new` is used only in prefix/postfix output.
-- **Variables**: `Tree.variables: HashMap<String, Number>`; `set_var` / `unset_var` manage them. Variables are not substituted in the printed output; they are only used by `simplify` and `is_number`.
-- **Simplify**: `Tree::simplify` (`tree.rs:406`) folds sub-trees whose leaves are all numbers or known variables into one `Number`, and applies local rewrites (`simplify_plus`, `simplify_sub`, `simplify_mul`) that merge constants across nested operations. Partial results are kept as a tree.
-- **Evaluating**: `Tree::is_number` (`tree.rs:415`) returns the value when the root is a number or a known variable.
-- **CLI** (`src/bin/cli.rs`):
-  - `-s, --string <EXPR>`: the expression; otherwise read from piped stdin (if neither, the CLI exits with a Turkish usage error).
-  - `-v, --var key=value` (repeatable): sets a variable; integers are tried first, then floats.
-  - `--simplify`: calls `simplify` before output.
-  - `--space`: uses a space as the printing separator instead of `,`.
-  - `--print {infix,prefix,postfix,debug}` (repeatable): prints in the chosen notation or the `Debug` tree, then exits with status 1 (see gaps).
-  - Without `--print`: prints the value if the tree is a number, otherwise the infix form.
-
-```rust
-use calc::tree::Tree;
-
-let mut t = Tree::new(',');             // separator used when printing prefix/postfix
-t.parse_auto("(x + 2) * 3").unwrap();   // infix, detected automatically
-t.set_var("x", 4i128);
-t.simplify();                           // folds to 18
-assert_eq!(t.is_number().map(|n| n.as_str()), Some("18".to_string()));
-println!("{}", t.infixprint().unwrap());
+    ├── lib.rs          # re-exports + parse_value()
+    ├── error.rs        # Span, CalcError, CalcErrorKind (Display + std::error::Error, render(src))
+    ├── lexer.rs        # Token, TokenKind, TokenSource, TokenIter, Lexer, lex()
+    ├── ast.rs          # Expr, ExprKind, UnOp, BinOp (+ precedence), Display (infix printer)
+    ├── parser.rs       # Parser (Pratt), parse(), parse_tokens()
+    ├── eval.rs         # Value, IntWidth, Env, NoEnv, Vars, eval(), simplify()
+    └── bin/cli.rs      # cli binary
 ```
 
 ## Public API
-- `calc::tree::Tree` - parsed expression plus variables.
-  - `Tree::new(separator: impl Into<char>) -> Tree`
-  - `set_var(name, value) -> Option<Number>` / `unset_var(name) -> Option<Number>`
-  - `parse_auto(str) -> Result<(), ()>` - detect notation and parse.
-  - `parse_str(&mut self, String, FixType) -> Result<(), ()>` - parse with an explicit notation (`parse_str` is `pub`).
-  - `prefixprint()`, `infixprint()`, `postfixprint()` -> `Result<String, ()>`
-  - `simplify()`, `is_number() -> Option<Number>`
-  - `pub inner: Option<Box<TreeType>>`, `pub variables: HashMap<String, Number>`
-- `calc::types`: `Number` (with `From<i128>`, `From<f64>`, `as_str`), `TreeType`, `TreeTokens`, `Symbols`, `FixType`.
-- `calc::util::as_i128(impl Into<String>) -> Result<i128, ()>` - integer parsing with `0b`/`0o`/`0x` prefixes.
-- `calc::util::check_fix_type` is `pub(crate)`; `split_str` is `pub(crate)`.
-- `calc` lib also exports a placeholder `add(u64, u64) -> u64` (`lib.rs:6-8`), unrelated to the calculator.
-- Binary `cli` (feature `cli`).
+Errors
+- `Span { start, end }` (byte offsets; `Span::new`, `to`), `CalcError { kind, span }` (`new`, `with_span`, `render(&str) -> String`).
+- `CalcErrorKind`: `UnexpectedToken(String)`, `UnexpectedEnd`, `UnclosedBracket` (span = the opening bracket), `InvalidNumber(String)`, `UnknownVariable(String)`, `UnknownFunction(String)`, `DivisionByZero`, `Overflow`, `TypeMismatch(String)`, `TooDeep` (nesting over 200).
 
-## Status and known gaps
-- `Symbols::Brac => todo!()` in `maketree` (`tree.rs:94`). The branch is not reached by the current parsers (they never pass `Brac` to `maketree`), but it would panic if it were.
-- Division by zero panics: `Number` integer division `a/b` (`types.rs:110`) is Rust integer division, so `1/0` panics. Float division by zero yields `inf` (`types.rs:101`).
-- `parse_str` with `FixType::Postfix` computes `tokens.len() - 1` (`tree.rs:77`); an empty token list underflows and panics. `parse_postfix` indexes `tokens[*index]` without a bounds check (`tree.rs:141`).
-- Trailing tokens are ignored: `parse_infix_main` (`tree.rs:187-190`) never checks that all tokens were consumed, so `parse_auto("1 2")` succeeds with `1` (verified).
-- Unknown words become variables without error (`tree.rs:267-268`), so typos are not reported at parse time.
-- `parse_prefix` accepts a leading `)` as a no-op (`tree.rs:107-109`) and `BracO` handling is partial.
-- `simplify` only folds constants and partially merges constants across nested `+`, `-`, `*`; it does not do full algebra (`/` is folded only when both sides are numbers, `tree.rs:484-491`).
-- CLI: after `--print`, the program calls `std::process::exit(1)` (`cli.rs:100`), so the "=> Hesaplanan Değer" line (`cli.rs:104-108`) is unreachable and the exit status is always 1 in that mode.
-- CLI error messages are in Turkish; the source is in English with Turkish strings in `cli.rs`.
-- Dead code: `util::_check_fix_type` (`util.rs:28-68`) is unused; `calc::add` placeholder in `lib.rs`.
-- README is one line and has no usage documentation.
-- Tests: 3 unit tests pass (`cargo test -p calc`); they cover the tokenizer and placeholder only, not parsing or simplification.
+Lexing
+- `lex(&str) -> Result<Vec<Token>, CalcError>`; `Token { kind: TokenKind, span }`; `Token::new(kind, start, end)`.
+- `TokenKind`: `Int(i128) Float(f64) Ident(String) Plus Minus Star Slash Percent Shl Shr Amp Pipe Caret Tilde Bang EqEq NotEq Lt Le Gt Ge AndAnd OrOr LParen RParen Comma Dot`.
+- `trait TokenSource { fn next_token(&mut self) -> Result<Option<Token>, CalcError>; }`, implemented by `Lexer<'a>` and `TokenIter<I: Iterator<Item = Token>>`.
+- Literals: `0x`/`0b`/`0o` (either case), `_` separators, decimal, `1.5`, `1e3`/`1.5E-2`; `12abc` and out-of-range numbers are `InvalidNumber` covering the whole literal. `.` is its own token (`1.x` is Int, Dot, Ident). A negative literal is unary minus applied to a positive one.
+
+Parsing
+- `parse(&str) -> Result<Expr, CalcError>` (rejects trailing tokens), `parse_tokens(&[Token])`.
+- `Parser::new(&mut dyn TokenSource)` with `parse_expr()`, `peek()`, `finish()`: parse one expression and stop at the first token that cannot continue it (for example a `,` between assembler operands).
+- Precedence, tightest first: postfix (`.field`, `name(args)`), unary `- ! ~`, `* / %`, `+ -`, `<< >>`, `&`, `^`, `|`, comparisons, `&&`, `||`. All binary operators are left associative (`a < b < c` parses as `(a < b) < c` and then fails type checking). Calls are only allowed on a plain name.
+- `true`/`false` parse as `ExprKind::Bool`.
+
+AST
+- `Expr { kind: ExprKind, span }`; `PartialEq` compares structure and ignores spans. `ExprKind`: `Int Float Bool Var Unary Binary Field Call Paren`. `Expr::dotted_path()` gives `"a.b.c"` for a name followed by fields.
+- `impl Display for Expr` is the infix printer; `parse(&e.to_string()) == e` holds. Parentheses already in the tree (`Paren`) are kept; a hand-built tree gets the parentheses its precedence needs. Simplified trees may contain negative literals, which print as `-5` and reparse as `Unary(Neg, Int(5))`.
+
+Evaluation
+- `Value::{Int(i128), Float(f64), Bool(bool)}` (`From` for i128/i64/i32/u64/f64/bool, `Display`, `to_expr`, `type_name`).
+- `trait Env { fn var(&self, &str) -> Option<Value>; fn call(&self, &str, &[Value]) -> Option<Result<Value, CalcError>>; }`. `a.b.c` is looked up as one name via `var("a.b.c")`. Errors returned from `call` get the call node's span. `NoEnv`, and `Vars` (HashMap: `new`, `set`, `unset`, pub `map`).
+- `eval(&Expr, &dyn Env) -> Result<Value, CalcError>`: checked `+ - * / %` and negation (`Overflow`), `/` and `%` by zero (`DivisionByZero`, also for floats), shift amount outside 0..128 (`Overflow`), int/float promotion to float, `% << >> & | ^ ~` ints only, comparisons give `Bool` (`==`/`!=` also on two bools), `&& || !` need bools (`&&`/`||` short-circuit), anything else `TypeMismatch`.
+- `simplify(&Expr, &dyn Env) -> Result<Expr, CalcError>`: folds constant subtrees, substitutes known variables, calls `Env::call` when all arguments are constant (so functions must be pure), keeps unknown names. Identities: `x+0`, `0+x`, `x-0`, `x*1`, `1*x`, `x/1`, `x*0`, `0*x` (with an integer literal), `false && _`, `true || _`. There is no reassociation: `x + 1 + 2` stays as is, `x + (1 + 2)` becomes `x + 3`.
+- `IntWidth::{I8,I16,I32,I64,U8,U16,U32,U64}` (`bits`, `signed`, `range`, `from_name`); `Value::to_int_of(width) -> Result<i128, CalcError>` (`Overflow` out of range, `TypeMismatch` for float/bool; spans are `Span::default()`, add one with `with_span`); `Value::to_f32` (`Overflow` if a finite value becomes infinite) and `to_f64`.
+- `parse_value(&str) -> Result<Value, CalcError>`: parse and evaluate with no variables.
+
+## CLI (`src/bin/cli.rs`)
+`-s/--string EXPR` (or piped stdin), `-v/--var name=value` (repeatable, value parsed with `parse_value`), `--simplify` (print the folded expression), `--print infix|debug` (print the parsed expression, repeatable). Default: evaluate and print the value. Errors print a caret diagram to stderr and exit 1.
+
+## Dropped from the old API
+`Tree`, `TreeType`, `TreeTokens`, `Number`, `Symbols`, `FixType`, prefix/postfix parsing and printing, notation auto-detection, `util::split_str`, `util::as_i128`, and the placeholder `add()`. Prefix/postfix were removed because the new grammar (unary operators, comparisons, calls) has no unambiguous prefix or postfix form worth maintaining.
+
+## Tests
+`cargo test -p calc`: 24 integration tests in `tests/calc.rs` plus one doc test.
