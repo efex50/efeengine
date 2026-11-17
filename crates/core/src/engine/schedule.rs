@@ -176,6 +176,20 @@ impl<'a> Ctx<'a> {
         self.events.send(ev);
     }
 
+    /// Send an event that is readable **now**: by every system that runs later in this frame
+    /// (and by the same system if it reads after sending). It stays readable until the next
+    /// frame's event update drops it, like any readable event; it is never delivered twice.
+    /// Use it for events produced by an input-like system early in the frame (for example UI
+    /// signals); normal game events should use [`send`](Self::send).
+    pub fn send_now<T: Send + Sync + 'static>(&mut self, ev: T) {
+        self.events.get_mut::<T>().extend_readable(std::iter::once(ev));
+    }
+
+    /// [`send_now`](Self::send_now) for several events, in order.
+    pub fn send_batch_now<T: Send + Sync + 'static>(&mut self, evs: impl IntoIterator<Item = T>) {
+        self.events.get_mut::<T>().extend_readable(evs);
+    }
+
     /// Send the registered script event `event` (`namespace.name`) with `payload` (exactly the
     /// size of its payload struct; empty for an event without payload). It is refused, and not
     /// queued, if the event is not registered or the size is wrong

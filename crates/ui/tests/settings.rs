@@ -34,7 +34,8 @@ fn setup_menu(engine: &mut Engine) {
         ui.text_input(col, "").placeholder("Player name").max_len(8).key("menu/name");
     }
     engine.add_system(Stage::Update, |cx| {
-        for s in cx.ui_signals() {
+        let signals: Vec<UiSignal> = cx.ui_signals().cloned().collect();
+        for s in signals {
             let st = cx.resources.get_mut::<Settings>().unwrap();
             match s.key_kind() {
                 ("menu/play", UiSignalKind::Click) => {

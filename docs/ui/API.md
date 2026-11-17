@@ -1,6 +1,6 @@
 # efeengine-ui: the common UI API
 
-> **Status:** Design, not implemented\
+> **Status:** Implemented in `crates/ui`: sections 1 to 8, 10, 12 (capture, same-frame events), 13 to 16; not yet: scripts and mods (9), real backends (11 fonts bundled, 13 render)\
 > **Date:** 2026-11-17\
 > **Roadmap:** [`ui-roadmap.md`](../../ui-roadmap.md)\
 > **Backends:** web (HTML + CSS), native iced, native fallback ([`FALLBACK_NATIVE.md`](FALLBACK_NATIVE.md)), headless (tests)
@@ -220,18 +220,22 @@ pub enum UiValue { Bool(bool), F32(f32), Text(String) }
 ```
 
 - Delivered in the **same frame** as the input: the UI plugin's input system runs at
-  `order::INPUT + 10` in `PreUpdate` and fills the `UiSignals` resource (a readable-only
-  `Events<UiSignal>`; core's `Ctx::send` is only readable next frame). Read it with `cx.ui_signals()`
-  (trait `UiCtxExt`, returns a copy).
+  `order::INPUT + 10` in `PreUpdate` and puts the signals into the readable buffer of
+  `Events<UiSignal>` with `Ctx::send_batch_now` (core; plain `Ctx::send` is only readable next
+  frame). Later systems of the frame read them with `cx.events::<UiSignal>()`, or the shorthand
+  `cx.ui_signals()` (trait `UiCtxExt`, an iterator over the same events). The iterator borrows
+  `cx`, so `.cloned().collect()` it first when the loop body needs `cx` mutably. They are dropped at
+  the next frame's event update like every readable event.
 - Disabled and invisible widgets send nothing.
 - Signals are data. The tree stores no callbacks (rule from the roadmap); helpers make matching short:
 
 ```rust
 fn menu(cx: &mut Ctx) {
-    for s in cx.ui_signals() {
+    let signals: Vec<UiSignal> = cx.ui_signals().cloned().collect();
+    for s in &signals {
         match s.key_kind() {
             ("menu/play", UiSignalKind::Click) => cx.send(StartGame),
-            ("menu/volume", UiSignalKind::Changed(UiValue::F32(v))) => cx.res_mut::<Audio>().volume = *v,
+            ("menu/volume", UiSignalKind::Changed(UiValue::F32(v))) => cx.resources.get_mut::<Audio>().unwrap().volume = *v,
             _ => {}
         }
     }
@@ -282,10 +286,14 @@ event ui.signal { widget: u64, kind: u32, value: f32, text: str }   ; delivered 
 ## 10. Input capture
 
 ```rust
-pub struct UiCapture { pub pointer: bool, pub keyboard: bool }
+pub type UiCapture = efeengine_core::input::InputCapture;   // { pointer: bool, keyboard: bool }
 ```
 
-- Updated each frame by the backend: `pointer` when the pointer is over a widget or a modal layer
+- Written every frame by the UI plugin into core's `InputState::set_capture` (at
+  `order::INPUT + 10`; there is no separate UI resource, so there is one source of truth). It is
+  the backend's `capture()` OR a visible modal layer OR "the backend answered `Filter::Captured`
+  for a pointer / key event this frame". Pointer events (mouse, wheel, touch) count into
+  `pointer`, key and text events into `keyboard`. The backend's own `capture()` means: `pointer` when the pointer is over a widget or a modal layer
   is visible, `keyboard` when a text input has focus (or a modal layer is visible).
 - `InputState` gains filtered helpers (`cx.game_input()`) that return "not pressed" for captured
   devices. Raw input stays available for systems that want it.
@@ -381,95 +389,140 @@ know it exists.
 ### 16.1 Shape
 
 ```rust
+use efeengine_ui::view::*;
+use efeengine_ui::{column, row, Layer};   // import the macros explicitly: `column!` also exists in std
+
 #[derive(Clone, Debug)]
 enum MenuMsg { Play, Volume(f32), Name(String), Fullscreen(bool) }
 
 fn menu_view(s: &MenuState) -> El<MenuMsg> {
     column![
         text("Coin Dash").class("title"),
-        button("Play").on_click(MenuMsg::Play),
-        slider(0.0..=1.0, s.volume).step(0.05).on_change(MenuMsg::Volume),
-        checkbox("Fullscreen", s.fullscreen).on_toggle(MenuMsg::Fullscreen),
-        text_input(&s.name).placeholder("Player name").max_len(16).on_input(MenuMsg::Name),
+        button("Play").key("play").on_click(MenuMsg::Play),
+        slider(0.0..=1.0, s.volume).step(0.05).key("volume").on_change(MenuMsg::Volume),
+        checkbox("Fullscreen", s.fullscreen).key("fullscreen").on_toggle(MenuMsg::Fullscreen),
+        text_input(&s.name).placeholder("Player name").max_len(16).key("name").on_input(MenuMsg::Name),
         text(format!("Best: {}", s.best)),
     ]
     .class("panel")
     .gap(12.0)
 }
 
-// One view = one layer, built from one state resource.
-engine.add_plugin(UiView::new("menu", menu_view).layer(Layer::centered(10)));
+// One view = one layer, built from one state resource (UiPlugin must be added first).
+engine.add_plugin(UiView::new("menu", menu_view).layer(Layer::centered(10)))?;
 
 // update = a normal system reading the typed messages.
 engine.add_system(Stage::Update, |cx: &mut Ctx| {
-    for m in cx.events::<MenuMsg>() {
-        let s = cx.res_mut::<MenuState>();
+    let msgs: Vec<MenuMsg> = cx.events::<MenuMsg>().iter().cloned().collect();
+    for m in msgs {
+        let s = cx.resources.get_mut::<MenuState>().unwrap();
         match m {
             MenuMsg::Play => s.start = true,
-            MenuMsg::Volume(v) => s.volume = *v,
-            MenuMsg::Name(n) => s.name = n.clone(),
-            MenuMsg::Fullscreen(f) => s.fullscreen = *f,
+            MenuMsg::Volume(v) => s.volume = v,
+            MenuMsg::Name(n) => s.name = n,
+            MenuMsg::Fullscreen(f) => s.fullscreen = f,
         }
     }
 });
 ```
 
-- `El<Msg>` is a lightweight description: node kind, classes, inline style, key, children, and the
-  message constructors (`on_click(Msg)`, `on_change(fn(f32) -> Msg)`, `on_input(fn(String) -> Msg)`,
-  `on_submit`, `on_toggle`, `on_focus`). It is the same node set and `Style` as sections 4 and 5.
+This example is a test (`crates/ui/tests/view.rs`, module `api_example`).
+
+- `El<Msg>` is a lightweight description: node kind data, classes, inline style (every `Style`
+  setter chained: `.gap(12.0)`, `.width(..)`, ...), key, `visible` / `enabled`, children, and the
+  message handlers `on_click(Msg)`, `on_change(f)` (slider), `on_toggle(f)` (checkbox),
+  `on_input(f)` and `on_submit(f)` (text input), `on_focus(f)`. The `f` handlers are closures
+  `impl Fn(X) -> Msg + Send + Sync + 'static`, so they may capture (`move |v| Msg::Pick(id, v)`).
+  Kind data: `text_input(..).placeholder/.max_len/.password`, `slider(..).step`.
+- Constructors (module `efeengine_ui::view`): `text`, `button(label)`, `button_with(children)`,
+  `checkbox(label, checked)`, `slider(range, value)`, `text_input(value)`, `image(texture, fit)`,
+  `container()`, `row()`, `column()`, `scroll()`, `slot(key)`. Children: `.child(x)` /
+  `.children(x)` where `x` is an `El` or anything iterable of `El` (`Vec`, `Option`, `map(..)`);
+  the macros `column![..]` / `row![..]` take a mix of both: `column![title, items.iter().map(row_view), footer]`.
 - `Msg: Clone + Send + Sync + 'static`. Messages are delivered as `Events<Msg>`, registered by
-  `UiView` (no `add_event` needed).
-- The state is any resource (`UiView::new` takes `fn(&S) -> El<Msg>` for resource `S`). For views
-  over several resources or queries, `UiView::with(|cx: &ViewCx| -> El<Msg>)` gets read access to
-  resources and the world.
+  `UiView` (no `add_event` needed). A typed message that has no handler is simply never sent.
+  `El::map(f)` converts the message type (Elm's `Html.map`) for embedding a component view.
+- The state is any resource (`UiView::new` takes `Fn(&S) -> El<Msg>` for resource `S`; while `S`
+  is missing the view does nothing). For views over several resources or queries,
+  `UiView::with(|cx: &ViewCx| -> El<Msg>)` gets `cx.resources`, `cx.world`, `cx.time` and `cx.res::<T>()`.
+- Builder: `.layer(Layer)` (default `Layer::fill(0)`), `.when(RunCondition)`, `.enabled(bool)`.
+  The plugin is named `efeengine-ui/view/<name>` (so a view name can be used once), depends on
+  `efeengine-ui`, the layer key is `<name>`, and every node of the view is owned by
+  `Owner::Plugin("efeengine-ui/view/<name>")`.
 - No bindings are needed: the view reads the state directly. Bindings (section 8) remain for the
   retained API.
+- Type inference: a view without any handler has no `Msg` to infer; write `UiView::<()>::new(..)`
+  or annotate the function's return type `El<()>`.
 
 ### 16.2 Reconciler
 
-Each frame the view runs (see 16.3), the reconciler compares the new `El` tree with the previous
-one, node by node, and turns the differences into retained-tree operations:
+Each time the view runs (see 16.3), the reconciler compares the new `El` tree with the
+retained tree itself (not with the previous `El`, so edits made behind the view's back are
+overwritten and a value the plugin wrote back from a signal counts as current), node by node, and
+turns the differences into retained-tree operations:
 
 | Difference | Tree operation |
 |---|---|
-| Same position (or same key), same kind | update only changed properties (text, value, classes, style, enabled, visible) |
-| Different kind | remove the old node, create the new one |
+| Same position (or same key), same kind | update only changed properties (kind data such as text, value, placeholder; classes, style, enabled, visible) |
+| Different kind | remove the old node (with its subtree), create the new one |
 | New child / missing child | create / remove |
-| Keyed child moved | `move_to` (the node keeps its id, so focus, cursor, scroll offset survive) |
+| Keyed child moved inside its parent | `move_to` (the node keeps its id, so focus, cursor, scroll offset survive) |
+| Keyed child now under another parent | remove + create (a new id) |
 
-- **Identity:** children are matched by `.key(..)` if they have one, otherwise by position. Lists
-  whose items can be inserted, removed or reordered must use keys (inventory rows, chat lines).
-  Keys only need to be unique among siblings in the view layer; the reconciler turns them into
-  tree-wide keys under the view's layer (`menu/<path>`), so scripts and tests can still find nodes.
-- **Cost:** proportional to the size of the view, plus tree operations only for what changed. A
-  menu of a few hundred nodes is cheap to rebuild every frame. The journal stays empty when nothing
-  changed, so backends do no work.
-- **Messages:** the reconciler keeps a table widget id → message constructor, replaced on every
-  run. A `UiSignal` for a widget in the table becomes a `Msg` (`Click` → the `on_click` message,
-  `Changed(F32(v))` → `on_change(v)`, ...) and is sent as `Events<Msg>` in the same frame
-  (`order::INPUT + 10`, like signals). Widgets without a handler send nothing.
-- **Value widgets:** as in section 7, the backend shows the edit immediately and the message is sent.
-  The view returns the value from the state on its next run: if `update` stored it, nothing changes;
-  if `update` clamped or rejected it, the reconciler writes the corrected value.
+- **Identity:** children are matched by `.key(..)` if they have one, otherwise by position (an
+  unkeyed element only matches an unkeyed node at the same index). Lists whose items can be
+  inserted, removed or reordered must use keys (inventory rows, chat lines). Reordering needs at
+  most one `move_to` per out-of-place child.
+- **Key scheme:** a keyed element becomes the tree key `<view>/<k1>/<k2>/...`: the keys of its keyed
+  ancestors inside the view (outermost first) then its own, joined with `/`; unkeyed elements
+  contribute nothing. `column![button("Play").key("play")]` in the view `menu` is `menu/play`,
+  at any depth; a row `.key("item-7")` holding a button `.key("buy")` gives `menu/item-7/buy`. The
+  layer root has the key `<view>`. Two keyed elements that would get the same full key make the
+  view panic before anything is applied (keys must be unique among the keyed elements with the same
+  nearest keyed ancestor).
+- **Cost:** proportional to the size of the view (plus the tree children it visits), tree
+  operations only for what changed. A menu of a few hundred nodes is cheap to rebuild every frame.
+  A run with no differences writes no journal entry (tested), so backends do no work.
+- **Messages:** the plugin keeps a table widget id -> handlers, replaced on every run. At
+  `order::INPUT + 11` in `PreUpdate` (right after the `UiSignal`s become readable at `INPUT + 10`)
+  every `UiSignal` for a widget in the table becomes a `Msg` (`Click` -> the `on_click` message,
+  `Changed(F32(v))` -> `on_change(v)`, `Changed(Bool)` -> `on_toggle`, `Changed(Text)` -> `on_input`,
+  `Submit` -> `on_submit`, `Focus` -> `on_focus`; `Hover` has none) sent with `Ctx::send_batch_now`,
+  so `Update` systems read them in the same frame. Widgets without a handler send nothing. A frame
+  that delivered a message of the view runs the view even under `.when(..)`.
+- **Value widgets:** as in section 7, the backend shows the edit immediately, the plugin writes it
+  into the tree and the message is sent. The view returns the value from the state on its next run
+  (the same frame, in `PostUpdate`): if `update` stored it, it equals the tree value and nothing is
+  written; if `update` clamped or rejected it, the reconciler writes the corrected value. This is a
+  controlled input: a text input or slider without a handler snaps back to the view's value.
+  A text value longer than `max_len` is cut when the `El` is built.
+- **Slots:** `slot(key)` is an empty container (key required, no children allowed) whose content
+  the reconciler never touches; its own properties (classes, style, ...) still follow the `El`.
+  Children are managed through the retained API (for example a mod panel inside the game's pause
+  menu) and survive reruns; removing the slot removes them with it.
 
 ### 16.3 When the view runs
 
-- Default: every frame, in `PostUpdate` at `order::LATE + 10` (after game systems changed the
-  state, before render extract).
-- `UiView::new(..).when(changed::<MenuState>())` runs it only when the resource changed. This needs
-  change ticks on resources (the efecs fork has them for components only): the UI work adds a
-  `changed` tick to resources written through `res_mut` / `Access` write.
-- `UiView::new(..).enabled(false)` / `set_enabled` hides the layer and stops running the view
-  (pause menus that exist only while paused).
-- A view that panics is a bug in game code like any system panic; the reconciler applies nothing
-  from a half-built tree.
+- Default: every frame, in `PostUpdate` at `order::LATE + 11` (after game systems changed the
+  state, after the plugin's bindings at `LATE + 10` so the order does not depend on registration
+  order, before the plugin's sync at `LATE + 20`).
+- `UiView::new(..).when(changed::<MenuState>())` runs it only when the resource changed since the
+  view last ran (core's resource change ticks: `ResMut` derefs, `Resources::get_mut` / `insert`).
+  `.when` may be repeated, or conditions combined with `changed::<A>().or(changed::<B>())`
+  (`RunCondition::custom(|cx| ..)` for anything else); the view runs when any holds. It also runs
+  on its first frame, after being enabled, and after delivering a message.
+- `UiView::new(..).enabled(false)` / `UiViews::set_enabled(name, bool)` (the `UiViews` resource,
+  inserted by the first view: `cx.resources.get_mut::<UiViews>().unwrap().set_enabled("pause", true)`)
+  hides the layer (`Visible` change) and stops running the view and delivering its messages. A
+  view disabled from the start creates nothing. Enabling shows the layer and rebuilds at once.
+- A view that panics is a bug in game code like any system panic; the description is built
+  completely before the first tree operation, so nothing from a half-built tree is applied.
 
 ### 16.4 Mixing layers
 
 - A view owns its layer and every node in it: retained-API changes to those nodes are overwritten on
-  the next run. To combine both, put the retained or script-owned UI in another layer, or give the
-  view a `slot(key)` element: an empty container the reconciler never touches, whose children are
-  managed through the retained API (for example a mod panel inside the game's pause menu).
+  the next run (also stray children added under view nodes). To combine both, put the retained or
+  script-owned UI in another layer, or use a `slot(key)` element.
 - Tests use the same headless backend: `t.click("menu/play")` finds the node by its reconciled key
   and the test then reads `Events<MenuMsg>` or the state.
 

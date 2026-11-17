@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use efeengine_core::engine::events::Events;
 use efeengine_core::prelude::{Ctx, ParCtx};
 
 use crate::id::{Owner, WidgetId};
@@ -93,59 +92,22 @@ impl UiSignal {
     }
 }
 
-/// Signals readable this frame. The UI plugin refills it at `order::INPUT + 10` in `PreUpdate`,
-/// so every later system of the same frame sees the signals of this frame's input (core's
-/// `Events<T>` is only readable a frame after `send`).
-#[derive(Default, Debug)]
-pub struct UiSignals {
-    events: Events<UiSignal>,
-}
-
-impl UiSignals {
-    pub fn iter(&self) -> std::slice::Iter<'_, UiSignal> {
-        self.events.iter()
-    }
-
-    pub fn len(&self) -> usize {
-        self.events.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
-    }
-
-    /// Replaces the readable signals with `signals`.
-    pub fn set(&mut self, signals: Vec<UiSignal>) {
-        self.events.clear();
-        self.events.extend_readable(signals);
-    }
-}
-
-impl<'a> IntoIterator for &'a UiSignals {
-    type Item = &'a UiSignal;
-    type IntoIter = std::slice::Iter<'a, UiSignal>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.events.iter()
-    }
-}
-
-/// `cx.ui_signals()` for systems. Returns a copy so the handler can use `cx` mutably while it
-/// loops (signals are few).
+/// `cx.ui_signals()` for systems: the [`UiSignal`]s of this frame (the same as
+/// `cx.events::<UiSignal>().iter()`). The iterator borrows `cx`; `collect()` it first if the
+/// loop body needs `cx` mutably.
 pub trait UiCtxExt {
-    fn ui_signals(&self) -> Vec<UiSignal>;
+    fn ui_signals(&self) -> std::slice::Iter<'_, UiSignal>;
 }
 
 impl UiCtxExt for Ctx<'_> {
-    fn ui_signals(&self) -> Vec<UiSignal> {
-        self.resources.get::<UiSignals>().map(|s| s.iter().cloned().collect()).unwrap_or_default()
+    fn ui_signals(&self) -> std::slice::Iter<'_, UiSignal> {
+        self.events::<UiSignal>().iter()
     }
 }
 
-/// Needs `Access::res::<UiSignals>()`.
 impl UiCtxExt for ParCtx<'_> {
-    fn ui_signals(&self) -> Vec<UiSignal> {
-        self.res::<UiSignals>().iter().cloned().collect()
+    fn ui_signals(&self) -> std::slice::Iter<'_, UiSignal> {
+        self.events::<UiSignal>().iter()
     }
 }
 

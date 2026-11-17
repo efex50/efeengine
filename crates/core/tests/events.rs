@@ -658,3 +658,45 @@ mod reload {
         e.api_index().validate().unwrap();
     }
 }
+
+mod send_now {
+    use std::sync::{Arc, Mutex};
+
+    use efeengine_core::prelude::*;
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct Ping(u32);
+
+    #[test]
+    fn readable_same_frame_by_later_systems_and_dropped_next_frame() {
+        let mut e = Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, ..EngineConfig::headless() }).unwrap();
+        let seen: Arc<Mutex<Vec<(&'static str, Vec<u32>)>>> = Default::default();
+        let mut n = 0;
+        e.add_system(Stage::PreUpdate, move |cx| {
+            n += 1;
+            if n == 1 {
+                cx.send_now(Ping(1));
+                cx.send_batch_now([Ping(2), Ping(3)]);
+                cx.send(Ping(9)); // normal send: next frame only
+            }
+        })
+        .order(order::INPUT);
+        let s = seen.clone();
+        e.add_system(Stage::Update, move |cx| {
+            s.lock().unwrap().push(("update", cx.events::<Ping>().iter().map(|p| p.0).collect()));
+        });
+        let s = seen.clone();
+        e.add_system(Stage::PreUpdate, move |cx| {
+            s.lock().unwrap().push(("early", cx.events::<Ping>().iter().map(|p| p.0).collect()));
+        })
+        .order(order::INPUT - 1);
+        e.run_frames(2, 1.0 / 60.0);
+        let v = seen.lock().unwrap().clone();
+        // Frame 1: the earlier system sees nothing, the Update system sees the now-events in order.
+        assert_eq!(v[0], ("early", vec![]));
+        assert_eq!(v[1], ("update", vec![1, 2, 3]));
+        // Frame 2: the now-events are gone, the normal send is readable.
+        assert_eq!(v[2], ("early", vec![9]));
+        assert_eq!(v[3], ("update", vec![9]));
+    }
+}

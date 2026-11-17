@@ -12,10 +12,17 @@ ui.button(col, "Play").key("menu/play");
 ui.slider(col, 0.0..=1.0, 0.8).key("menu/volume");
 
 engine.add_system(Stage::Update, |cx| {
-    for s in cx.ui_signals() {                  // trait UiCtxExt
+    for s in cx.ui_signals() {                  // trait UiCtxExt: Events<UiSignal>, same frame
         if let ("menu/play", UiSignalKind::Click) = s.key_kind() { /* start */ }
     }
 });
+
+// or the view layer: a function from state to elements, typed messages
+use efeengine_ui::{column, view::*};
+fn menu(s: &State) -> El<Msg> {
+    column![button("Play").key("play").on_click(Msg::Play), slider(0.0..=1.0, s.volume).key("vol").on_change(Msg::Volume)]
+}
+engine.add_plugin(UiView::new("menu", menu).layer(Layer::centered(10)))?;   // t.click("menu/play")
 
 // tests
 let mut t = UiTest::new(|e| { /* setup */ });

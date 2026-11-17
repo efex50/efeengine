@@ -14,7 +14,7 @@ fn root(t: &mut UiTest) -> WidgetId {
 fn recorder(t: &mut UiTest) -> Rc<RefCell<Vec<UiSignal>>> {
     let log = Rc::new(RefCell::new(Vec::new()));
     let l = log.clone();
-    t.engine.add_system(Stage::Update, move |cx| l.borrow_mut().extend(cx.ui_signals()));
+    t.engine.add_system(Stage::Update, move |cx| l.borrow_mut().extend(cx.ui_signals().cloned()));
     log
 }
 
@@ -92,7 +92,7 @@ fn game_changes_after_writeback_are_normal_changes() {
     t.backend().clear();
     // a game system overrides the value the user just set
     t.engine.add_system(Stage::Update, |cx| {
-        let sigs = cx.ui_signals();
+        let sigs: Vec<_> = cx.ui_signals().cloned().collect();
         let ui = cx.resources.get_mut::<UiTree>().unwrap();
         for s in sigs {
             if let UiSignalKind::Changed(UiValue::F32(_)) = s.kind {
@@ -320,7 +320,6 @@ fn bindings_are_send_and_sync() {
     check::<UiBindings>();
     check::<Bind<String>>();
     check::<UiTree>();
-    check::<UiSignals>();
     check::<HeadlessHandle>();
 }
 
@@ -459,5 +458,71 @@ fn custom_backend_receives_calls() {
     assert_eq!(l.syncs, vec![2]); // empty frames are not synced
     assert_eq!(l.drains, 3);
     drop(l);
-    assert!(e.resources().get::<UiCapture>().unwrap().pointer);
+    assert!(e.input().capture().pointer);
+}
+
+// ----- capture wiring and binding ticks -------------------------------------------------------
+
+#[test]
+fn captured_events_and_ui_capture_filter_game_input() {
+    use efeengine_core::input::{ElementState, InputEvent, InputEventKind, KeyCode, MouseButton};
+
+    // A backend that consumes mouse events and nothing else.
+    struct Eats;
+    impl UiBackend for Eats {
+        fn init(&mut self, _: &mut UiBackendCx) {}
+        fn input(&mut self, ev: &InputEvent, _: &UiTree) -> Filter {
+            if matches!(ev.kind, InputEventKind::MouseButton { .. }) { Filter::Captured } else { Filter::Pass }
+        }
+        fn sync(&mut self, _: &UiTree, _: &[UiChange], _: &Theme, _: &mut UiBackendCx) {}
+        fn drain_signals(&mut self, _: &mut Vec<UiSignal>) {}
+        fn capture(&self) -> UiCapture {
+            UiCapture::default()
+        }
+    }
+    let seen = Rc::new(RefCell::new(Vec::<(bool, bool, bool)>::new()));
+    let mut e = Engine::with_config(EngineConfig::headless()).unwrap();
+    e.add_plugin(UiPlugin::with_backend(Eats)).unwrap();
+    let s = seen.clone();
+    e.add_system(Stage::Update, move |cx| {
+        let g = cx.game_input();
+        s.borrow_mut().push((g.mouse_just_pressed(MouseButton::Left), cx.input.mouse_just_pressed(MouseButton::Left), g.just_pressed(KeyCode::Space)));
+    });
+    e.inject(InputEvent::new(InputEventKind::MouseButton { button: MouseButton::Left, state: ElementState::Pressed, pos: (1.0, 1.0) }));
+    e.inject(InputEvent::new(InputEventKind::key_pressed(KeyCode::Space)));
+    e.run_frames(2, 1.0 / 60.0);
+    // Frame 1: the pointer was consumed (game view false, raw view true), the key passed.
+    assert_eq!(seen.borrow()[0], (false, true, true));
+    // The capture is per frame: frame 2 has no consumed event.
+    assert!(!e.input().capture().pointer);
+}
+
+#[test]
+fn modal_layer_captures_through_input_state() {
+    let mut t = UiTest::new(|_| {});
+    t.ui_mut().layer("m", Layer::fill(5).modal());
+    t.step(1);
+    assert_eq!(t.engine.input().capture(), UiCapture { pointer: true, keyboard: true });
+    assert_eq!(t.capture(), t.engine.input().capture());
+}
+
+#[test]
+fn bindings_resource_tick_does_not_move_every_frame() {
+    struct Score(u32);
+    let ticks = Rc::new(RefCell::new(Vec::<bool>::new()));
+    let tk = ticks.clone();
+    let mut t = UiTest::new(|e| {
+        e.insert_resource(Score(1));
+        e.add_system(Stage::Update, move |cx| tk.borrow_mut().push(cx.res_changed::<UiBindings>()));
+    });
+    let r = root(&mut t);
+    t.ui_mut().text(r, Bind::res(|s: &Score| s.0.to_string())).key("score");
+    t.step(4);
+    assert_eq!(t.text("score"), "1");
+    t.resource_mut::<Score>().0 = 2;
+    t.step(2);
+    assert_eq!(t.text("score"), "2");
+    // Registered in frame 1 (absorbed in its PostUpdate), seen as changed in frame 2 at most; later frames quiet.
+    let v = ticks.borrow().clone();
+    assert!(v[2..].iter().all(|c| !c), "UiBindings tick moved every frame: {v:?}");
 }

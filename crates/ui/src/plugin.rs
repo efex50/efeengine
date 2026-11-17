@@ -2,27 +2,30 @@
 //!
 //! Frame order:
 //! - `PreUpdate`, `order::INPUT + 5`: raw input events go to `backend.input`, window resizes to
-//!   `backend.resize`.
+//!   `backend.resize`. A `Filter::Captured` result counts into this frame's capture.
 //! - `PreUpdate`, `order::INPUT + 10`: `backend.drain_signals`, checks and value write-back
-//!   ([`filter_signals`]), [`UiSignals`] refilled, [`UiCapture`] updated.
+//!   ([`filter_signals`]); the signals become readable `Events<UiSignal>` for the rest of the
+//!   frame (`Ctx::send_batch_now`); `InputState::set_capture` is written (backend capture, a
+//!   visible modal layer, or an input event the backend consumed this frame).
+//! - `PreUpdate`, `order::INPUT + 11`: view message systems (see [`crate::view`]).
 //! - `PostUpdate`, `order::LATE + 10`: bindings evaluated, changed values written to the tree.
+//! - `PostUpdate`, `order::LATE + 11`: view systems (after bindings).
 //! - `PostUpdate`, `order::LATE + 20`: the journal goes to `backend.sync`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use efeengine_core::input::{InputEventKind, WindowEvent};
+use efeengine_core::input::{InputCapture, InputEventKind, WindowEvent};
 use efeengine_core::prelude::*;
 
-use crate::backend::{UiBackend, UiBackendCx};
+use crate::backend::{Filter, UiBackend, UiBackendCx};
 use crate::bindings::{BindCx, UiBindings};
-use crate::capture::UiCapture;
 use crate::headless::HeadlessBackend;
-use crate::signal::{UiSignals, filter_signals};
+use crate::signal::{UiSignal, filter_signals};
 use crate::theme::Theme;
 use crate::tree::UiTree;
 
-/// Adds the UI: the [`UiTree`], [`UiBindings`], [`UiSignals`] and [`UiCapture`] resources and the
+/// Adds the UI: the [`UiTree`] and [`UiBindings`] resources, the `Events<UiSignal>` queue and the
 /// systems above. The default backend is headless (it also inserts a `HeadlessHandle`
 /// resource); pick another with [`with_backend`](Self::with_backend).
 pub struct UiPlugin {
@@ -74,18 +77,20 @@ impl Plugin for UiPlugin {
         }
         engine.insert_resource(tree);
         engine.insert_resource(UiBindings::new());
-        engine.insert_resource(UiSignals::default());
-        engine.insert_resource(UiCapture::default());
+        engine.add_event::<UiSignal>();
 
         let mut bcx = UiBackendCx { logical_size: (0.0, 0.0), scale_factor: 1.0 };
         backend.init(&mut bcx);
         let backend = Rc::new(RefCell::new(backend));
         let bcx = Rc::new(RefCell::new(bcx));
+        // Pointer / keyboard input the backend consumed since the last `ui_signals` run.
+        let consumed = Rc::new(Cell::new((false, false)));
 
         // Raw input and window changes.
         {
             let backend = backend.clone();
             let bcx = bcx.clone();
+            let consumed = consumed.clone();
             let physical = Cell::new((0u32, 0u32));
             engine
                 .add_system(Stage::PreUpdate, move |cx| {
@@ -105,7 +110,18 @@ impl Plugin for UiPlugin {
                             }
                             _ => {}
                         }
-                        be.input(ev, &tree);
+                        if be.input(ev, &tree) == Filter::Captured {
+                            let (mut p, mut k) = consumed.get();
+                            match &ev.kind {
+                                InputEventKind::Key { .. } | InputEventKind::Text(_) => k = true,
+                                InputEventKind::MouseMotion { .. }
+                                | InputEventKind::MouseButton { .. }
+                                | InputEventKind::MouseWheel { .. }
+                                | InputEventKind::Touch { .. } => p = true,
+                                InputEventKind::Window(_) => {}
+                            }
+                            consumed.set((p, k));
+                        }
                     }
                     if size_changed {
                         let (w, h) = physical.get();
@@ -123,6 +139,7 @@ impl Plugin for UiPlugin {
         // Signals in, capture out.
         {
             let backend = backend.clone();
+            let consumed = consumed.clone();
             engine
                 .add_system(Stage::PreUpdate, move |cx| {
                     let mut raw = Vec::new();
@@ -131,29 +148,38 @@ impl Plugin for UiPlugin {
                         be.drain_signals(&mut raw);
                         be.capture()
                     };
+                    let (cp, ck) = consumed.replace((false, false));
                     let Some(tree) = cx.resources.get_mut::<UiTree>() else { return };
                     let signals = filter_signals(tree, raw);
                     let modal = tree.modal_active();
-                    if let Some(s) = cx.resources.get_mut::<UiSignals>() {
-                        s.set(signals);
-                    }
-                    if let Some(c) = cx.resources.get_mut::<UiCapture>() {
-                        *c = UiCapture { pointer: capture.pointer || modal, keyboard: capture.keyboard || modal };
-                    }
+                    cx.send_batch_now(signals);
+                    cx.input.set_capture(InputCapture {
+                        pointer: capture.pointer || modal || cp,
+                        keyboard: capture.keyboard || modal || ck,
+                    });
                 })
                 .order(order::INPUT + 10)
                 .name("ui_signals");
         }
 
-        // Bindings.
+        // Bindings. The `UiBindings` resource is borrowed in place and written (which stamps its
+        // change tick) only when the tree has new registrations or removals.
         engine
             .add_system(Stage::PostUpdate, |cx| {
-                let Some(mut binds) = cx.resources.remove::<UiBindings>() else { return };
-                if let Some(tree) = cx.resources.get_mut::<UiTree>() {
-                    binds.absorb(tree);
+                if cx.resources.get::<UiTree>().is_some_and(|t| t.has_binding_work())
+                    && let Some(mut tree) = cx.resources.remove::<UiTree>()
+                {
+                    if let Some(binds) = cx.resources.get_mut::<UiBindings>() {
+                        binds.absorb(&mut tree);
+                    }
+                    cx.resources.insert(tree);
                 }
-                let updates = binds.evaluate(&BindCx { resources: &*cx.resources, world: &*cx.world, time: cx.time });
-                cx.resources.insert(binds);
+                let updates = match cx.resources.get::<UiBindings>() {
+                    Some(binds) if !binds.is_empty() => {
+                        binds.evaluate(&BindCx { resources: &*cx.resources, world: &*cx.world, time: cx.time })
+                    }
+                    _ => return,
+                };
                 if !updates.is_empty()
                     && let Some(tree) = cx.resources.get_mut::<UiTree>()
                 {

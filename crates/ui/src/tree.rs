@@ -349,6 +349,11 @@ impl UiTree {
         std::mem::take(&mut self.journal)
     }
 
+    /// Whether the bindings system has anything to absorb (new registrations or removed ids).
+    pub(crate) fn has_binding_work(&self) -> bool {
+        !self.pending_binds.is_empty() || !self.removed_log.is_empty()
+    }
+
     /// Ids removed since the last call (the bindings system drops their bindings).
     pub(crate) fn take_removed(&mut self) -> Vec<WidgetId> {
         std::mem::take(&mut self.removed_log)

@@ -1,6 +1,6 @@
 //! Bindings: read-only functions from game state to one node property (API.md section 8).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use efeengine_core::engine::resources::{Res, Resources};
 use efeengine_core::engine::time::Time;
@@ -148,7 +148,7 @@ struct Entry {
     id: WidgetId,
     target: BindTarget,
     eval: Erased,
-    last: Option<BoundValue>,
+    last: Mutex<Option<BoundValue>>,
 }
 
 /// All bindings, keyed by widget. A resource next to the [`UiTree`]; the UI plugin evaluates it
@@ -184,7 +184,7 @@ impl UiBindings {
     pub(crate) fn add(&mut self, id: WidgetId, target: BindTarget, eval: Erased) {
         // A second binding of the same property replaces the first.
         self.entries.retain(|e| !(e.id == id && e.target == target));
-        self.entries.push(Entry { id, target, eval, last: None });
+        self.entries.push(Entry { id, target, eval, last: Mutex::new(None) });
     }
 
     /// Takes the bindings registered on the tree since the last call and forgets the bindings
@@ -202,12 +202,17 @@ impl UiBindings {
 
     /// Evaluates every binding and returns the ones whose value changed since the last
     /// evaluation (the first evaluation always reports).
-    pub fn evaluate(&mut self, cx: &BindCx) -> Vec<BindUpdate> {
+    ///
+    /// Takes `&self` (the last values sit behind a mutex per entry), so the plugin can evaluate
+    /// through a shared borrow and the resource's change tick only moves when bindings are added
+    /// or removed.
+    pub fn evaluate(&self, cx: &BindCx) -> Vec<BindUpdate> {
         let mut out = Vec::new();
-        for e in &mut self.entries {
+        for e in &self.entries {
             let Some(v) = (e.eval)(cx) else { continue };
-            if e.last.as_ref() != Some(&v) {
-                e.last = Some(v.clone());
+            let mut last = e.last.lock().unwrap_or_else(|p| p.into_inner());
+            if last.as_ref() != Some(&v) {
+                *last = Some(v.clone());
                 out.push(BindUpdate { widget: e.id, target: e.target, value: v });
             }
         }

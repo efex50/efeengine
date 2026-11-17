@@ -1,6 +1,6 @@
 # efeengine-ui
 
-The common UI API of the engine (design: `docs/ui/API.md`, sections 1 to 15; plan: `ui-roadmap.md`, Phase 1 retained layer). A retained `UiTree` resource with a change journal, a style subset and themes, signals, bindings, the `UiBackend` trait, a headless backend and the `UiTest` helper. No backend is real yet (web, iced and fallback come later); no UI toolkit type appears in the API. The Elm-style view layer (section 16) is built on top of this public API by another module.
+The common UI API of the engine (design: `docs/ui/API.md`, sections 1 to 15; plan: `ui-roadmap.md`, Phase 1 retained layer). A retained `UiTree` resource with a change journal, a style subset and themes, signals, bindings, the `UiBackend` trait, a headless backend and the `UiTest` helper. No backend is real yet (web, iced and fallback come later); no UI toolkit type appears in the API. The Elm-style view layer (section 16) is the `view` module, built on top of the public tree API.
 
 ## At a glance
 | | |
@@ -11,7 +11,7 @@ The common UI API of the engine (design: `docs/ui/API.md`, sections 1 to 15; pla
 | External deps | `smallvec` (node classes), `thiserror` (`TreeError`) |
 | Used by | nothing yet |
 | Targets | native and `wasm32-unknown-unknown` (both check clean) |
-| Tests | `tests/tree.rs` (14), `tests/theme.rs` (5), `tests/plugin.rs` (19), `tests/settings.rs` (2); all headless, no window or GPU |
+| Tests | `tests/tree.rs` (14), `tests/theme.rs` (5), `tests/plugin.rs` (22), `tests/settings.rs` (2), `tests/view.rs` (22); all headless, no window or GPU |
 
 ## Layout
 ```text
@@ -27,12 +27,13 @@ crates/ui
 │   ├── journal.rs    UiChange
 │   ├── tree.rs       UiTree (slots, keys, owners, layers, classes, fonts, journal, builders, setters, theme), NodeRef (builder handle), StyleMut, TreeError
 │   ├── theme.rs      Theme, StateStyles, WidgetState, resolution, built-in dark theme
-│   ├── signal.rs     UiSignal, UiSignalKind, UiValue, UiSignals resource, UiCtxExt (`cx.ui_signals()`), filter_signals
+│   ├── signal.rs     UiSignal, UiSignalKind, UiValue, UiCtxExt (`cx.ui_signals()`), filter_signals
 │   ├── bindings.rs   Bind<T>, BindCx, UiBindings resource, BindUpdate, TextSrc
-│   ├── capture.rs    UiCapture
+│   ├── capture.rs    UiCapture (alias of core's `InputCapture`)
 │   ├── backend.rs    UiBackend trait, Filter, UiBackendCx
 │   ├── headless.rs   HeadlessBackend (journal recorder and consistency checker) and HeadlessHandle
 │   ├── plugin.rs     UiPlugin (resources and four main-thread systems)
+│   ├── view/         the Elm-style view layer: mod.rs (docs: key scheme, frame order), el.rs (El, IntoChildren, constructors, `column!` / `row!`), reconcile.rs (tree diff), plugin.rs (UiView, UiViews, ViewCx, RunCondition, `changed`)
 │   └── testing.rs    UiTest
 └── tests/            see above
 ```
@@ -55,23 +56,30 @@ crates/ui
 `Style` is `Copy` with `Option` fields; `merge(&over)` / `overlaid(&over)` put set fields on top. `Theme { base, kinds, classes }` with `Theme::dark()` (the default), `Theme::empty()`. Resolution (`UiTree::resolve(id, WidgetState)` or `Theme::resolve`): `base`, kind normal, each class normal in order, inline style; then the state styles (hovered, pressed, focused, disabled; active ones only, later wins) of the kind and of each class on top of that, so a state style also beats the inline style (the literal reading of the design doc). `disabled` is added from the node's own or an ancestor's `enabled == false`.
 
 ### Signals (`signal.rs`)
-`UiSignal { widget, key, owner, kind }`, `UiSignalKind { Click, Changed(UiValue), Submit(String), Focus(bool), Hover(bool) }`, `UiValue { Bool, F32, Text }`, `signal.key_kind()` -> `(&str, &UiSignalKind)`. `filter_signals(tree, raw)` is what the plugin runs on the backend's signals: drops stale, hidden, disabled and ill-typed ones (and `Hover` without `.hover_signals()`), sanitizes `Changed` values and writes them into the tree without a journal entry, fills key and owner from the node. The result goes into the `UiSignals` resource (readable the same frame at `INPUT + 10`; core's `Events<T>` only becomes readable a frame after `send`, and `Ctx` cannot write the readable buffer). Systems read it with `cx.ui_signals()` (trait `UiCtxExt`, a copy) or `resources.get::<UiSignals>()`.
+`UiSignal { widget, key, owner, kind }`, `UiSignalKind { Click, Changed(UiValue), Submit(String), Focus(bool), Hover(bool) }`, `UiValue { Bool, F32, Text }`, `signal.key_kind()` -> `(&str, &UiSignalKind)`. `filter_signals(tree, raw)` is what the plugin runs on the backend's signals: drops stale, hidden, disabled and ill-typed ones (and `Hover` without `.hover_signals()`), sanitizes `Changed` values and writes them into the tree without a journal entry, fills key and owner from the node. The result is put into the readable buffer of core's `Events<UiSignal>` (registered by the plugin) with `Ctx::send_batch_now` at `INPUT + 10`, so every later system of the same frame reads it with `cx.events::<UiSignal>()` or `cx.ui_signals()` (trait `UiCtxExt`, an iterator over the same events; collect it first if the loop needs `cx` mutably). They are dropped at the next frame's event update.
 
 ### Bindings (`bindings.rs`)
-`Bind<T>` is a `Send + Sync` function `Fn(&BindCx) -> Option<T>`: `Bind::res(|s: &R| ..)`, `Bind::query::<Component>(entity, |c| ..)` (reads the world), `Bind::with(|cx: &BindCx| ..)` (resources, world, time). Register with `ui.bind_text / bind_value / bind_checked / bind_visible / bind_enabled / bind_class / bind_image`, or pass a `Bind<String>` to `ui.text(..)` / `ui.button(..)`. The registrations wait in the tree until the bindings system moves them into the `UiBindings` resource (`absorb`), which also drops the bindings of removed widgets. `evaluate` returns only the values that changed since last time; applying them is a normal tree change (journal entry only if the node really changed). A `None` result leaves the property alone.
+`Bind<T>` is a `Send + Sync` function `Fn(&BindCx) -> Option<T>`: `Bind::res(|s: &R| ..)`, `Bind::query::<Component>(entity, |c| ..)` (reads the world), `Bind::with(|cx: &BindCx| ..)` (resources, world, time). Register with `ui.bind_text / bind_value / bind_checked / bind_visible / bind_enabled / bind_class / bind_image`, or pass a `Bind<String>` to `ui.text(..)` / `ui.button(..)`. The registrations wait in the tree until the bindings system moves them into the `UiBindings` resource (`absorb`), which also drops the bindings of removed widgets. `evaluate` returns only the values that changed since last time; applying them is a normal tree change (journal entry only if the node really changed). A `None` result leaves the property alone. `evaluate` takes `&self` (last values behind a mutex per entry): the plugin borrows `UiBindings` in place instead of removing and reinserting it every frame, and only writes it (`absorb`, which moves the tree out of its slot for the call) on frames where the tree has new registrations or removed ids, so `res_changed::<UiBindings>()` is quiet otherwise.
 
 ### Backend and plugin (`backend.rs`, `headless.rs`, `plugin.rs`)
-`UiBackend: 'static` (not `Send`): `init`, `input(&InputEvent, &UiTree) -> Filter`, `sync(tree, changes, theme, cx)`, `drain_signals`, `capture`, `resize`. `render(gpu, target)` comes with the core overlay pass. `UiPlugin::new()` uses the headless backend (and inserts `HeadlessHandle`), `UiPlugin::with_backend(b)` any other, `.theme(t)` replaces the dark theme. The backend sits in an `Rc<RefCell<..>>` shared by four main-thread systems (`add_system`): `ui_input` (PreUpdate, `INPUT + 5`: raw events to `backend.input`, resizes to `backend.resize`), `ui_signals` (PreUpdate, `INPUT + 10`: drain, filter, write back, fill `UiSignals`, update `UiCapture` = backend OR visible modal layer), `ui_bindings` (PostUpdate, `LATE + 10`), `ui_sync` (PostUpdate, `LATE + 20`: `take_changes`, `sync` only when not empty).
+`UiBackend: 'static` (not `Send`): `init`, `input(&InputEvent, &UiTree) -> Filter`, `sync(tree, changes, theme, cx)`, `drain_signals`, `capture`, `resize`. `render(gpu, target)` comes with the core overlay pass. `UiPlugin::new()` uses the headless backend (and inserts `HeadlessHandle`), `UiPlugin::with_backend(b)` any other, `.theme(t)` replaces the dark theme. The backend sits in an `Rc<RefCell<..>>` shared by four main-thread systems (`add_system`): `ui_input` (PreUpdate, `INPUT + 5`: raw events to `backend.input`, resizes to `backend.resize`), `ui_signals` (PreUpdate, `INPUT + 10`: drain, filter, write back, `send_batch_now` the signals, `InputState::set_capture` = backend `capture()` OR visible modal layer OR input events `backend.input` answered `Filter::Captured` this frame: key and text count as keyboard, mouse, wheel and touch as pointer), `ui_bindings` (PostUpdate, `LATE + 10`, borrows `UiBindings` in place), `ui_sync` (PostUpdate, `LATE + 20`: `take_changes`, `sync` only when not empty).
 `HeadlessBackend` keeps no widgets: it records every change, checks consistency (created id new and alive with a live parent; removed id known and gone; other changes name a known live id; moved parent exists) and collects violations as strings (`HeadlessHandle::errors()`). `HeadlessHandle` also injects signals, sets the capture flag and reads the recorded journal and batch sizes.
 
 ### UiTest (`testing.rs`)
-`UiTest::new(|engine| ..)` (headless engine, 60 Hz, `UiPlugin::new()`), `step(n)` (panics on journal errors), `click`, `set_value`, `set_checked`, `type_text`, `submit`, `focus`, `hover`, `signal`, `text(key)`, `value(key)`, `id(key)`, `ui()`, `ui_mut()`, `resource::<T>()`, `resource_mut::<T>()`, `capture()`, `changes()`, `backend()`, and the public `engine`. Helpers only queue a signal in the headless backend; the next `step` delivers it through the plugin's normal path.
+`UiTest::new(|engine| ..)` (headless engine, 60 Hz, `UiPlugin::new()`), `step(n)` (panics on journal errors), `click`, `set_value`, `set_checked`, `type_text`, `submit`, `focus`, `hover`, `signal`, `text(key)`, `value(key)`, `id(key)`, `ui()`, `ui_mut()`, `resource::<T>()`, `resource_mut::<T>()`, `capture()` (core's `InputState::capture()`), `changes()`, `backend()`, and the public `engine`. Helpers only queue a signal in the headless backend; the next `step` delivers it through the plugin's normal path.
+
+### View layer (`view/`, API.md section 16)
+- `El<Msg>` (`el.rs`): kind data, classes, inline `Style` (all setters chained through the same `style_fields!` macro as `NodeRef`), key, visible / enabled, children, and handlers `on_click(Msg)`, `on_change` / `on_toggle` / `on_input` / `on_submit` / `on_focus` (boxed `Fn + Send + Sync` closures), `map(f)`. Kind setters `.placeholder .max_len .password .step`. Constructors `text button button_with checkbox slider text_input image container row column scroll slot`; `.child(x)` / `.children(x)` take an `El` or any iterable of `El` (`IntoChildren`); macros `column![..]`, `row![..]` (`#[macro_export]`: `efeengine_ui::column`, import explicitly, std has a `column!` too).
+- `UiView<Msg>` (`plugin.rs`): `new(name, Fn(&S) -> El)`, `with(name, Fn(&ViewCx) -> El)`, `.layer`, `.when(RunCondition)` (repeated calls OR), `.enabled`. Plugin `efeengine-ui/view/<name>`, depends on `efeengine-ui`, registers `Events<Msg>` and the `UiViews` resource (`set_enabled`, `is_enabled`, `toggle`). Nodes are owned by `Owner::Plugin(<plugin name>)`, the layer key is `<name>`.
+- Systems per view: `ui_view_messages` (PreUpdate, `INPUT + 11`: signals of widgets in the handler table become `Msg` via `send_batch_now`, and mark the view dirty so it runs this frame under `.when`) and `ui_view` (PostUpdate, `LATE + 11`, after bindings at `LATE + 10` and before sync at `LATE + 20`: enabled check, condition, build the whole `El`, `validate` duplicate keys, then `tree.with_owner(..)` { layer, visible, `reconcile_root` }, replace the handler table).
+- `reconcile.rs`: diffs the `El` against the tree (not a previous `El`). Per parent: keyed children match the node with the full key (parent must be the same, else that node is removed and recreated), unkeyed ones match an unkeyed child at the same index; kind mismatch or leftovers are removed (before creating, so keys are free); then in order create / `move_to` when the child at index i differs / update kind data, classes, style, visible, enabled. Slots are updated but their children are not visited. Key scheme: `<view>/<keys of keyed ancestors>/<own key>`, unkeyed elements add nothing.
+- Frame order: INPUT+10 signals, INPUT+11 messages, Update (game reads `Events<Msg>`), LATE+10 bindings, LATE+11 views, LATE+20 sync.
 
 ### Fonts
 `UiTree::load_font(name, bytes)` registers a `FontId` and journals `Font(id)`; `font`, `font_by_name`, `fonts`. No font file is bundled yet (the native default font and `THIRD_PARTY_NOTICES.md` entry come with the native backend).
 
 ## Not done yet
 - Script host functions (API.md section 9, Phase 4); `Owner::Mod` and per-owner queries exist.
-- Real backends, `render(gpu, target)`, wiring `UiCapture` to core's `InputState` flag and the input pre-filter (the plugin already calls `backend.input` for each raw event and ignores the `Filter`).
-- The view layer (section 16).
+- Real backends and `render(gpu, target)`.
 - Image-from-`Textures` handling, IME, focus navigation.
+- View layer: moves across parents recreate the node; reorder uses one `move_to` per out-of-place child (no longest-increasing-subsequence minimization); no `hover_signals` on `El`.
