@@ -2,6 +2,7 @@ use core::marker::PhantomData;
 
 use crate::entities::EntityMeta;
 use crate::query::{assert_borrow, Fetch, With, Without};
+use crate::tick::{QueryTicks, Tick};
 use crate::QueryOneError;
 use crate::{Archetype, Query};
 
@@ -11,6 +12,7 @@ pub struct QueryOne<'a, Q: Query> {
     archetype: Option<&'a Archetype>,
     index: u32,
     borrowed: bool,
+    ticks: QueryTicks,
     _marker: PhantomData<Q>,
 }
 
@@ -20,14 +22,31 @@ impl<'a, Q: Query> QueryOne<'a, Q> {
     /// # Safety
     ///
     /// `index` must be in-bounds for `archetype`
-    pub(crate) unsafe fn new(meta: &'a [EntityMeta], archetype: &'a Archetype, index: u32) -> Self {
+    pub(crate) unsafe fn new(
+        meta: &'a [EntityMeta],
+        archetype: &'a Archetype,
+        index: u32,
+        now: Tick,
+    ) -> Self {
         Self {
             meta,
             archetype: Some(archetype),
             index,
             borrowed: false,
+            ticks: QueryTicks {
+                last_run: Tick::new(0),
+                this_run: now,
+            },
             _marker: PhantomData,
         }
+    }
+
+    /// Set the tick window used by change filters and by `&mut` stamping
+    ///
+    /// Defaults to `(Tick::new(0), world.change_tick())`.
+    pub fn with_ticks(mut self, last_run: Tick, this_run: Tick) -> Self {
+        self.ticks = QueryTicks { last_run, this_run };
+        self
     }
 
     /// Get the query result, or an error if the entity does not exist or satisfy the query
@@ -45,7 +64,12 @@ impl<'a, Q: Query> QueryOne<'a, Q> {
         let archetype = self.archetype.as_ref().ok_or(QueryOneError::NoSuchEntity)?;
         let state = Q::Fetch::prepare(archetype).ok_or(QueryOneError::Unsatisfied)?;
         Q::Fetch::borrow(archetype, state);
-        let fetch = Q::Fetch::execute(archetype, state);
+        let fetch = Q::Fetch::execute(archetype, state, self.ticks);
+        // SAFETY: `index` is in bounds for `archetype` (constructor contract)
+        if Q::Fetch::HAS_FILTER && !unsafe { fetch.filter(self.index as usize) } {
+            Q::Fetch::release(archetype, state);
+            return Err(QueryOneError::Unsatisfied);
+        }
         self.borrowed = true;
         unsafe { Ok(Q::get(self.meta, &fetch, self.index as usize)) }
     }
@@ -71,6 +95,7 @@ impl<'a, Q: Query> QueryOne<'a, Q> {
             archetype: self.archetype,
             index: self.index,
             borrowed: self.borrowed,
+            ticks: self.ticks,
             _marker: PhantomData,
         };
         // Ensure `Drop` won't fire redundantly
@@ -87,6 +112,10 @@ impl<Q: Query> Default for QueryOne<'_, Q> {
             archetype: None,
             index: 0,
             borrowed: false,
+            ticks: QueryTicks {
+                last_run: Tick::new(0),
+                this_run: Tick::new(0),
+            },
             _marker: PhantomData,
         }
     }

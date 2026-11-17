@@ -1,11 +1,11 @@
-use core::any::TypeId;
 use core::fmt::{self, Debug, Display, Formatter};
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut, FnOnce};
 use core::ptr::NonNull;
 
-use crate::archetype::Archetype;
+use crate::archetype::{Archetype, ComponentId};
 use crate::entities::EntityMeta;
+use crate::tick::Tick;
 use crate::{
     ArchetypeColumn, ArchetypeColumnMut, Component, Entity, Fetch, MissingComponent, Query,
     QueryOne,
@@ -18,15 +18,31 @@ pub struct EntityRef<'a> {
     archetype: &'a Archetype,
     /// Position of this entity in `archetype`
     index: u32,
+    /// The world's change tick, stamped into tracked components borrowed uniquely through this
+    now: Tick,
 }
 
 impl<'a> EntityRef<'a> {
-    pub(crate) unsafe fn new(meta: &'a [EntityMeta], archetype: &'a Archetype, index: u32) -> Self {
+    pub(crate) unsafe fn new(
+        meta: &'a [EntityMeta],
+        archetype: &'a Archetype,
+        index: u32,
+        now: Tick,
+    ) -> Self {
         Self {
             meta,
             archetype,
             index,
+            now,
         }
+    }
+
+    /// Use `now` instead of the world's change tick as the tick stamped into tracked components
+    /// borrowed uniquely through this reference (e.g. a system's own `this_run`)
+    #[inline]
+    pub fn with_tick(mut self, now: Tick) -> Self {
+        self.now = now;
+        self
     }
 
     /// Get the [`Entity`] handle associated with this entity
@@ -49,6 +65,11 @@ impl<'a> EntityRef<'a> {
     /// Equivalent to [`satisfies::<&T>`](Self::satisfies)
     pub fn has<T: Component>(&self) -> bool {
         self.archetype.has::<T>()
+    }
+
+    /// Determine whether this entity has the component identified by `id` (Rust or dynamic)
+    pub fn has_component(&self, id: ComponentId) -> bool {
+        self.archetype.has_component(id)
     }
 
     /// Borrow a single component, if it exists
@@ -88,16 +109,16 @@ impl<'a> EntityRef<'a> {
     /// assert_eq!(*number, 246);
     /// ```
     pub fn query<Q: Query>(&self) -> QueryOne<'a, Q> {
-        unsafe { QueryOne::new(self.meta, self.archetype, self.index) }
+        unsafe { QueryOne::new(self.meta, self.archetype, self.index, self.now) }
     }
 
     /// Enumerate the types of the entity's components
     ///
     /// Convenient for dispatching component-specific logic for a single entity. For example, this
-    /// can be combined with a `HashMap<TypeId, Box<dyn Handler>>` where `Handler` is some
+    /// can be combined with a `HashMap<ComponentId, Box<dyn Handler>>` where `Handler` is some
     /// user-defined trait with methods for serialization, or to be called after spawning or before
     /// despawning to maintain secondary indices.
-    pub fn component_types(&self) -> impl Iterator<Item = TypeId> + 'a {
+    pub fn component_types(&self) -> impl Iterator<Item = ComponentId> + 'a {
         self.archetype.types().iter().map(|ty| ty.id())
     }
 
@@ -213,8 +234,9 @@ impl<'a, T: Component> RefMut<'a, T> {
     pub(crate) unsafe fn new(
         archetype: &'a Archetype,
         index: u32,
+        now: Tick,
     ) -> Result<Self, MissingComponent> {
-        let (target, borrow) = ComponentBorrowMut::for_component::<T>(archetype, index)?;
+        let (target, borrow) = ComponentBorrowMut::for_component::<T>(archetype, index, now)?;
         Ok(Self {
             borrow,
             target,
@@ -347,7 +369,7 @@ impl<'a, T: Component> ComponentRef<'a> for &'a mut T {
     type Component = T;
 
     fn get_component(entity: EntityRef<'a>) -> Option<Self::Ref> {
-        Some(unsafe { RefMut::new(entity.archetype, entity.index).ok()? })
+        Some(unsafe { RefMut::new(entity.archetype, entity.index, entity.now).ok()? })
     }
 
     unsafe fn from_raw(raw: *mut Self::Component) -> Self {
@@ -428,6 +450,7 @@ impl<'a> ComponentBorrowMut<'a> {
     unsafe fn for_component<T: Component>(
         archetype: &'a Archetype,
         index: u32,
+        now: Tick,
     ) -> Result<(NonNull<T>, Self), MissingComponent> {
         let state = archetype
             .get_state::<T>()
@@ -437,6 +460,9 @@ impl<'a> ComponentBorrowMut<'a> {
             NonNull::new_unchecked(archetype.get_base::<T>(state).as_ptr().add(index as usize));
 
         archetype.borrow_mut::<T>(state);
+        // SAFETY: `index` is in bounds per this function's contract, and the unique borrow of
+        // the column was just acquired, which covers its tick array.
+        archetype.stamp_changed(state, index, now);
 
         Ok((target, Self { archetype, state }))
     }

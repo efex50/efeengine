@@ -105,6 +105,34 @@ During the script phase every lane works on a read-only snapshot of the world:
 
 With one thread the lanes run in sequence through the same code, with the same buffering.
 
+## Change ticks
+
+The world has a change tick (`world.change_tick()`, `engine.change_tick()`). Components that are
+tracked (`engine.track_changes::<T>()`; `Transform` and `GlobalTransform` are) remember the tick
+they were added and last changed at, and `Changed<T>` / `Added<T>` filters compare those with the
+tick at which the querying system last ran. Every system has a `last_run` (`Tick::new(0)` before
+its first run, so the first run sees everything as new) and a `this_run`.
+
+* **Exclusive systems**: the schedule calls `world.increment_change_tick()` right before the
+  system runs; that is its `this_run` (`ctx.this_run()`, `ctx.last_run()`). Use `ctx.query::<Q>()`
+  (not `ctx.world.query`) so filters and `&mut T` stamps use the system's ticks.
+* **Par batches**: before any task starts, the members get their ticks in **sorted system order**
+  (one `increment_change_tick` per member, in `members` order). The assignment never depends on
+  completion order, so component ticks are identical for `Single` and `Fixed(n)`
+  (`tests/parallel.rs` compares them entity by entity). `ParCtx::query`, `query_one` and
+  `par_for_each` and `get` (through `World::get_at`) carry the system's `(last_run, this_run)`.
+* **Commands**: `Engine::apply_commands` bumps the tick once before applying, so everything applied
+  after a stage (Rust commands, buffered script writes and inserts) is newer than every system
+  of that stage. Every system, the one that queued it included, sees it as added/changed on its
+  next run. A system's own direct writes are not new for itself.
+* **Scripts**: the script system is exclusive, so the world is frozen at its `this_run`.
+  `engine.world.tick()` returns it; `engine.world.changed(entity, component, since)` is 1 if the
+  component was added or changed after `since`, 0 if not, 1 for an untracked component, and
+  -1 / -2 / -3 for a stale entity / missing component / unknown id. A script stores `tick()` and
+  passes it next frame. Buffered `set`s are applied after the stage, so a module's own writes
+  show as changed on the next frame.
+* The world clamps old ticks once per frame (`maybe_check_change_ticks`), so wrapping is safe.
+
 ## Spawn pools
 
 Entity ids are handed out in a fixed order, so `engine.world.spawn` in a script takes an entity

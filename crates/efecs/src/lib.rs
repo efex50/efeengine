@@ -71,6 +71,7 @@ mod borrow;
 mod bundle;
 mod change_tracker;
 mod command_buffer;
+mod dynamic;
 mod entities;
 mod entity_builder;
 mod entity_ref;
@@ -79,26 +80,32 @@ mod query_one;
 #[cfg(any(feature = "row-serialize", feature = "column-serialize"))]
 pub mod serialize;
 mod take;
+mod tick;
 mod world;
 
-pub use archetype::{Archetype, ArchetypeColumn, ArchetypeColumnMut, TypeIdMap, TypeInfo};
+pub use archetype::{
+    Archetype, ArchetypeColumn, ArchetypeColumnMut, ComponentId, DynColumn, DynamicId, TypeIdMap,
+    TypeInfo,
+};
 pub use batch::{BatchIncomplete, BatchWriter, ColumnBatch, ColumnBatchBuilder, ColumnBatchType};
 pub use bundle::{
     bundle_satisfies_query, dynamic_bundle_satisfies_query, Bundle, DynamicBundle,
     DynamicBundleClone, MissingComponent,
 };
 pub use change_tracker::{ChangeTracker, Changes};
+pub use dynamic::{DynRef, DynRefMut, DynamicError, DynamicInfo};
 pub use command_buffer::CommandBuffer;
 pub use entities::{Entity, NoSuchEntity};
 pub use entity_builder::{BuiltEntity, BuiltEntityClone, EntityBuilder, EntityBuilderClone};
 pub use entity_ref::{ComponentRef, ComponentRefShared, EntityRef, Ref, RefMut};
 pub use query::{
-    Access, Batch, BatchedIter, Or, PreparedQuery, PreparedQueryBorrow, PreparedQueryIter,
+    Access, Added, Batch, BatchedIter, Changed, Mut, Or, PreparedQuery, PreparedQueryBorrow, PreparedQueryIter,
     PreparedView, Query, QueryBorrow, QueryIter, QueryMut, QueryShared, Satisfies, View,
     ViewBorrow, With, Without,
 };
 pub use query_one::QueryOne;
 pub use take::TakenEntity;
+pub use tick::{ComponentTicks, QueryTicks, Tick, CHECK_TICK_THRESHOLD, MAX_CHANGE_AGE};
 pub use world::{
     ArchetypesGeneration, Component, ComponentError, Iter, QueryOneError, SpawnBatchIter,
     SpawnColumnBatchIter, World,

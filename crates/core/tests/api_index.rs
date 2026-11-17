@@ -76,6 +76,7 @@ fn engine_namespaces_and_functions_are_exactly_the_documented_ones() {
     let expected = [
         "engine.world.spawn", "engine.world.despawn", "engine.world.alive", "engine.world.get", "engine.world.set",
         "engine.world.has", "engine.world.insert", "engine.world.remove", "engine.world.query", "engine.world.component_id",
+        "engine.world.changed", "engine.world.tick",
         "engine.input.key_down", "engine.input.key_pressed", "engine.input.key_released", "engine.input.mouse_x",
         "engine.input.mouse_y", "engine.input.mouse_down",
         "engine.time.delta", "engine.time.elapsed", "engine.time.frame", "engine.time.fixed_delta",

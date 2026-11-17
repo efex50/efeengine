@@ -151,6 +151,8 @@ fn build_with(threads: Threads, mixed: bool) -> Engine {
         r.expect("register");
     }
     e.insert_resource(Stats::default());
+    // change ticks of these must also be identical for every thread count
+    e.track_changes::<Health>().track_changes::<Heat>();
 
     let mut seed = 12345u32;
     let mut targets = Vec::new();
@@ -286,6 +288,10 @@ fn hash_world(e: &Engine) -> u64 {
                 t.read(world, ent, &mut buf).unwrap();
                 h.u64(t.id() as u64);
                 h.bytes(&buf);
+                if let Ok(Some(tk)) = world.component_ticks(ent, t.component_id(world).unwrap()) {
+                    h.u64(tk.added.get() as u64);
+                    h.u64(tk.changed.get() as u64);
+                }
             }
         }
         if let Ok(s) = world.get::<&Script>(ent) {
@@ -293,6 +299,22 @@ fn hash_world(e: &Engine) -> u64 {
         }
     }
     h.0
+}
+
+/// Every `(entity, component id, added, changed)` of tracked components, sorted by entity.
+fn collect_ticks(e: &Engine) -> Vec<(u64, u32, u32, u32)> {
+    let world = e.world();
+    let mut out = Vec::new();
+    for t in e.types().entries().iter().filter(|t| t.is_component()) {
+        let cid = t.component_id(world).unwrap();
+        for r in world.iter() {
+            if let Ok(Some(tk)) = world.component_ticks(r.entity(), cid) {
+                out.push((entity_to_bits(r.entity()), t.id(), tk.added.get(), tk.changed.get()));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Run the game; returns the world hash, the summed write conflicts and the entity count.
@@ -352,5 +374,24 @@ fn mixed_orders_are_deterministic_across_thread_counts() {
     for i in 0..5 {
         let (h, ..) = run_with(Threads::Fixed(4), true);
         assert_eq!(h, single, "run {i}");
+    }
+}
+
+/// Change ticks are assigned in sorted system order, never completion order: the add/change
+/// tick of every tracked component is identical for 1 and 4 threads, entity by entity.
+#[test]
+fn change_ticks_are_identical_for_single_and_fixed_4() {
+    for mixed in [false, true] {
+        let mut single = build_with(Threads::Single, mixed);
+        single.run_frames(120, 1.0 / 60.0);
+        let want = collect_ticks(&single);
+        assert!(want.len() > ENTITIES, "tracked components carry ticks ({})", want.len());
+        assert!(want.iter().any(|t| t.3 > 5), "ticks advanced");
+        for i in 0..5 {
+            let mut e = build_with(Threads::Fixed(4), mixed);
+            e.run_frames(120, 1.0 / 60.0);
+            assert_eq!(e.change_tick(), single.change_tick(), "run {i} mixed={mixed}: world tick");
+            assert_eq!(collect_ticks(&e), want, "run {i} mixed={mixed}: component ticks");
+        }
     }
 }

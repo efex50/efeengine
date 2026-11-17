@@ -11,7 +11,7 @@ use std::any::TypeId;
 use std::collections::HashMap;
 
 use efevm::{Prim, StructDesc};
-use hecs::{Component, ComponentError, Entity, World};
+use hecs::{Component, ComponentError, ComponentId, DynRef, DynRefMut, DynamicError, Entity, World};
 
 /// A `#[repr(C)]`, `Pod` type with a described byte layout. Derive it with
 /// `#[derive(ScriptType)]`; the derive fills [`ScriptType::layout`] from `offset_of!`.
@@ -103,6 +103,15 @@ pub enum CompError {
     /// The type is a layout-only struct, not a component.
     #[error("`{0}` is not a component")]
     NotComponent(String),
+    /// A mod-defined component that is not (or no longer) registered in the world.
+    #[error("component `{0}` is not registered in the world")]
+    Unregistered(String),
+    /// The type has no byte-level access (a Rust component read through [`TypeEntry::dyn_get`]).
+    #[error("`{0}` is not a mod-defined component")]
+    NotDynamic(String),
+    /// A named field that the layout does not have, or has with another type.
+    #[error("`{component}` has no field `{field}` of that type")]
+    NoField { component: String, field: String },
 }
 
 /// Error of a registration.
@@ -133,17 +142,39 @@ struct ComponentFns {
     has: HasFn,
 }
 
+/// How a registered type is stored.
+#[derive(Clone, Copy)]
+enum Storage {
+    /// A Rust component type with typed byte-level functions.
+    Rust(ComponentFns),
+    /// A mod-defined component: plain bytes in the world's dynamic columns
+    /// ([`World::register_dynamic`]).
+    Dynamic,
+    /// A layout-only struct: no component behind it.
+    Layout,
+}
+
 /// One registered type.
 #[derive(Clone)]
 pub struct TypeEntry {
     id: u32,
     desc: StructDesc,
-    fns: Option<ComponentFns>,
+    storage: Storage,
 }
 
 impl std::fmt::Debug for TypeEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TypeEntry").field("id", &self.id).field("desc", &self.desc).field("component", &self.fns.is_some()).finish()
+        f.debug_struct("TypeEntry").field("id", &self.id).field("desc", &self.desc).field("component", &self.is_component()).finish()
+    }
+}
+
+fn dyn_err(name: &str, e: DynamicError) -> CompError {
+    match e {
+        DynamicError::NoSuchEntity => CompError::NoEntity,
+        DynamicError::Missing => CompError::Missing(name.to_string()),
+        DynamicError::Unregistered(_) => CompError::Unregistered(name.to_string()),
+        DynamicError::WrongSize { expected, got } => CompError::WrongSize { name: name.to_string(), expected: expected as u32, got },
+        DynamicError::AlreadyRegistered(_) | DynamicError::BadLayout => CompError::Unregistered(name.to_string()),
     }
 }
 
@@ -164,38 +195,206 @@ impl TypeEntry {
     pub fn align(&self) -> u32 {
         self.desc.align
     }
-    /// `true` for a hecs component type, `false` for a layout-only struct.
+    /// `true` for a component (a Rust type or a mod-defined one), `false` for a layout-only
+    /// struct.
     pub fn is_component(&self) -> bool {
-        self.fns.is_some()
+        !matches!(self.storage, Storage::Layout)
     }
-    /// The Rust type of a component.
+    /// `true` for a mod-defined component (bytes in the world's dynamic columns).
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self.storage, Storage::Dynamic)
+    }
+    /// The Rust type of a component (`None` for mod-defined components and layout-only structs).
     pub fn type_id(&self) -> Option<TypeId> {
-        self.fns.map(|f| f.type_id)
+        match &self.storage {
+            Storage::Rust(f) => Some(f.type_id),
+            _ => None,
+        }
     }
 
-    fn fns(&self) -> Result<&ComponentFns, CompError> {
-        self.fns.as_ref().ok_or_else(|| CompError::NotComponent(self.desc.name.clone()))
+    /// The efecs [`ComponentId`] of a component (`None` for a layout-only struct, and for a
+    /// mod-defined component that is not registered in `world`). Takes the world because
+    /// dynamic components (registered at run time) are looked up there; the id carries the
+    /// generation of the registration.
+    pub fn component_id(&self, world: &World) -> Option<ComponentId> {
+        match &self.storage {
+            Storage::Rust(f) => Some(ComponentId::from(f.type_id)),
+            Storage::Dynamic => world.dynamic_info(self.id).map(|(c, _)| c),
+            Storage::Layout => None,
+        }
+    }
+
+    fn not_component(&self) -> CompError {
+        CompError::NotComponent(self.desc.name.clone())
     }
 
     /// Copy the component of `e` into `out` (`out.len()` must be the size).
     pub fn read(&self, world: &World, e: Entity, out: &mut [u8]) -> Result<(), CompError> {
-        (self.fns()?.read)(world, e, out)
+        match &self.storage {
+            Storage::Rust(f) => (f.read)(world, e, out),
+            Storage::Dynamic => {
+                let r = world.get_dynamic(e, self.id).map_err(|x| dyn_err(&self.desc.name, x))?;
+                if out.len() != r.len() {
+                    return Err(CompError::WrongSize { name: self.desc.name.clone(), expected: r.len() as u32, got: out.len() });
+                }
+                out.copy_from_slice(&r);
+                Ok(())
+            }
+            Storage::Layout => Err(self.not_component()),
+        }
     }
-    /// Overwrite the existing component of `e` with `bytes`.
+    /// Overwrite the existing component of `e` with `bytes`. A mod-defined component that
+    /// tracks changes is stamped changed.
     pub fn write(&self, world: &mut World, e: Entity, bytes: &[u8]) -> Result<(), CompError> {
-        (self.fns()?.write)(world, e, bytes)
+        match &self.storage {
+            Storage::Rust(f) => (f.write)(world, e, bytes),
+            Storage::Dynamic => {
+                let mut r = world.get_dynamic_mut(e, self.id).map_err(|x| dyn_err(&self.desc.name, x))?;
+                if bytes.len() != r.len() {
+                    return Err(CompError::WrongSize { name: self.desc.name.clone(), expected: r.len() as u32, got: bytes.len() });
+                }
+                r.copy_from_slice(bytes);
+                Ok(())
+            }
+            Storage::Layout => Err(self.not_component()),
+        }
     }
     /// Add (or replace) the component of `e` from `bytes`.
     pub fn insert(&self, world: &mut World, e: Entity, bytes: &[u8]) -> Result<(), CompError> {
-        (self.fns()?.insert)(world, e, bytes)
+        match &self.storage {
+            Storage::Rust(f) => (f.insert)(world, e, bytes),
+            Storage::Dynamic => world.insert_dynamic(e, self.id, bytes).map_err(|x| dyn_err(&self.desc.name, x)),
+            Storage::Layout => Err(self.not_component()),
+        }
     }
     /// Remove the component from `e`.
     pub fn remove(&self, world: &mut World, e: Entity) -> Result<(), CompError> {
-        (self.fns()?.remove)(world, e)
+        match &self.storage {
+            Storage::Rust(f) => (f.remove)(world, e),
+            Storage::Dynamic => world.remove_dynamic(e, self.id).map_err(|x| dyn_err(&self.desc.name, x)),
+            Storage::Layout => Err(self.not_component()),
+        }
     }
     /// `true` if `e` is alive and has the component (`false` for layout-only types).
     pub fn has(&self, world: &World, e: Entity) -> bool {
-        self.fns.is_some_and(|f| (f.has)(world, e))
+        match &self.storage {
+            Storage::Rust(f) => (f.has)(world, e),
+            Storage::Dynamic => world.has_dynamic(e, self.id),
+            Storage::Layout => false,
+        }
+    }
+
+    /// Shared borrow of the bytes of a mod-defined component (holds the column borrow).
+    pub fn dyn_ref<'w>(&self, world: &'w World, e: Entity) -> Result<DynRef<'w>, CompError> {
+        if !self.is_dynamic() {
+            return Err(if self.is_component() { CompError::NotDynamic(self.desc.name.clone()) } else { self.not_component() });
+        }
+        world.get_dynamic(e, self.id).map_err(|x| dyn_err(&self.desc.name, x))
+    }
+
+    /// Exclusive-by-contract borrow of the bytes of a mod-defined component; stamps it changed.
+    pub fn dyn_ref_mut<'w>(&self, world: &'w World, e: Entity) -> Result<DynRefMut<'w>, CompError> {
+        if !self.is_dynamic() {
+            return Err(if self.is_component() { CompError::NotDynamic(self.desc.name.clone()) } else { self.not_component() });
+        }
+        world.get_dynamic_mut(e, self.id).map_err(|x| dyn_err(&self.desc.name, x))
+    }
+}
+
+/// A read-only typed view of a mod-defined component: its layout and its bytes. Hold it only
+/// briefly; the bytes borrow the world's column.
+pub struct DynComponent<'a> {
+    pub desc: &'a StructDesc,
+    pub bytes: &'a [u8],
+}
+
+fn field_of<'d>(desc: &'d StructDesc, name: &str, size: usize) -> Option<&'d efevm::FieldDesc> {
+    desc.field_named(name).filter(|f| f.ty.size() as usize * f.count as usize == size)
+}
+
+impl<'a> DynComponent<'a> {
+    /// The field `name` as `T`. `T` must have the size of the whole field (`[f32; 2]` reads an
+    /// `f32` field with `count = 2`); the primitive type is not checked beyond the size.
+    pub fn field<T: bytemuck::Pod>(&self, name: &str) -> Option<T> {
+        let f = field_of(self.desc, name, size_of::<T>())?;
+        let at = f.offset as usize;
+        Some(bytemuck::pod_read_unaligned(self.bytes.get(at..at + size_of::<T>())?))
+    }
+    /// A scalar `f32` field.
+    pub fn field_f32(&self, name: &str) -> Option<f32> {
+        self.scalar(name, Prim::F32).and_then(|_| self.field::<f32>(name))
+    }
+    /// A scalar `i32` field.
+    pub fn field_i32(&self, name: &str) -> Option<i32> {
+        self.scalar(name, Prim::I32).and_then(|_| self.field::<i32>(name))
+    }
+    /// A scalar `u32` field.
+    pub fn field_u32(&self, name: &str) -> Option<u32> {
+        self.scalar(name, Prim::U32).and_then(|_| self.field::<u32>(name))
+    }
+    fn scalar(&self, name: &str, ty: Prim) -> Option<()> {
+        self.desc.field_named(name).filter(|f| f.ty == ty && f.count == 1).map(|_| ())
+    }
+}
+
+/// The borrow behind [`TypeRegistry::view`]: the layout and the column guard.
+pub struct DynView<'w> {
+    desc: StructDesc,
+    guard: DynRef<'w>,
+}
+
+impl DynView<'_> {
+    /// The typed view of the bytes.
+    pub fn get(&self) -> DynComponent<'_> {
+        DynComponent { desc: &self.desc, bytes: &self.guard }
+    }
+    pub fn field<T: bytemuck::Pod>(&self, name: &str) -> Option<T> {
+        self.get().field(name)
+    }
+    pub fn field_f32(&self, name: &str) -> Option<f32> {
+        self.get().field_f32(name)
+    }
+}
+
+/// The borrow behind [`TypeRegistry::view_mut`].
+pub struct DynViewMut<'w> {
+    desc: StructDesc,
+    guard: DynRefMut<'w>,
+}
+
+impl DynViewMut<'_> {
+    /// The typed mutable view of the bytes.
+    pub fn get_mut(&mut self) -> DynComponentMut<'_> {
+        DynComponentMut { desc: &self.desc, bytes: &mut self.guard }
+    }
+    pub fn set_field<T: bytemuck::Pod>(&mut self, name: &str, value: T) -> bool {
+        self.get_mut().set_field(name, value)
+    }
+}
+
+/// A mutable typed view of a mod-defined component (see [`DynComponent`]).
+pub struct DynComponentMut<'a> {
+    pub desc: &'a StructDesc,
+    pub bytes: &'a mut [u8],
+}
+
+impl<'a> DynComponentMut<'a> {
+    /// Write `value` into field `name` (`T` must have the size of the whole field). `false` if
+    /// there is no such field or the size differs.
+    pub fn set_field<T: bytemuck::Pod>(&mut self, name: &str, value: T) -> bool {
+        let Some(f) = field_of(self.desc, name, size_of::<T>()) else { return false };
+        let at = f.offset as usize;
+        match self.bytes.get_mut(at..at + size_of::<T>()) {
+            Some(dst) => {
+                dst.copy_from_slice(bytemuck::bytes_of(&value));
+                true
+            }
+            None => false,
+        }
+    }
+    /// Read-only access to the same bytes.
+    pub fn as_view(&self) -> DynComponent<'_> {
+        DynComponent { desc: self.desc, bytes: self.bytes }
     }
 }
 
@@ -298,7 +497,17 @@ impl TypeRegistry {
             remove: remove_impl::<T>,
             has: has_impl::<T>,
         };
-        self.add(desc, Some(fns))
+        self.add(desc, Storage::Rust(fns))
+    }
+
+    /// Register a mod-defined component (bytes in the world's dynamic columns; the caller
+    /// registers it in the world with [`World::register_dynamic`] under the returned id).
+    /// `desc.name` is `mod:<mod>/<Name>`, `desc.owner` `mod:<mod>`. Returns the id.
+    pub(crate) fn register_dynamic(&mut self, desc: StructDesc) -> Result<u32, TypeError> {
+        if desc.component.is_some() {
+            return Err(TypeError::Invalid(format!("`{}`: the component id is assigned by the registry", desc.name)));
+        }
+        self.add(desc, Storage::Dynamic)
     }
 
     /// Register a layout-only struct (no hecs component; e.g. defined by a mod at run time).
@@ -310,10 +519,10 @@ impl TypeRegistry {
         if desc.owner.is_empty() {
             desc.owner = ENGINE_OWNER.to_string();
         }
-        self.add(desc, None)
+        self.add(desc, Storage::Layout)
     }
 
-    fn add(&mut self, mut desc: StructDesc, fns: Option<ComponentFns>) -> Result<u32, TypeError> {
+    fn add(&mut self, mut desc: StructDesc, storage: Storage) -> Result<u32, TypeError> {
         desc.validate().map_err(TypeError::Invalid)?;
         if self.by_name.contains_key(&desc.name) {
             return Err(TypeError::DuplicateName(desc.name));
@@ -322,22 +531,35 @@ impl TypeRegistry {
         if let Some(&i) = self.by_id.get(&id) {
             return Err(TypeError::IdCollision { name: desc.name, other: self.entries[i].desc.name.clone(), id });
         }
-        if fns.is_some() {
+        if !matches!(storage, Storage::Layout) {
             desc.component = Some(id);
         }
         self.generation += 1;
         let i = self.entries.len();
         self.by_id.insert(id, i);
         self.by_name.insert(desc.name.clone(), i);
-        self.entries.push(TypeEntry { id, desc, fns });
+        self.entries.push(TypeEntry { id, desc, storage });
         Ok(id)
     }
 
     /// Remove every type owned by `owner` (a mod unload; keeps the registry in step with
     /// the API index, which drops them too). Returns how many were removed.
+    ///
+    /// The mod's components have the owner `mod:<owner>` and go with it.
     pub(crate) fn remove_owner(&mut self, owner: &str) -> usize {
         let before = self.entries.len();
-        self.entries.retain(|e| e.desc.owner != owner);
+        let comp_owner = format!("mod:{owner}");
+        self.entries.retain(|e| e.desc.owner != owner && e.desc.owner != comp_owner);
+        self.generation += 1;
+        self.reindex();
+        before - self.entries.len()
+    }
+
+    /// Remove the mod-defined components of mod `owner` only.
+    pub(crate) fn remove_mod_components(&mut self, owner: &str) -> usize {
+        let before = self.entries.len();
+        let comp_owner = format!("mod:{owner}");
+        self.entries.retain(|e| e.desc.owner != comp_owner);
         self.generation += 1;
         self.reindex();
         before - self.entries.len()
@@ -384,8 +606,30 @@ impl TypeRegistry {
     /// The entry of a component id (`UnknownId` / `NotComponent` otherwise).
     pub fn component(&self, id: u32) -> Result<&TypeEntry, CompError> {
         let e = self.get(id).ok_or(CompError::UnknownId(id))?;
-        e.fns()?;
+        if !e.is_component() {
+            return Err(e.not_component());
+        }
         Ok(e)
+    }
+
+    /// The mod-defined components owned by `owner` (a mod id) in registration order.
+    pub fn mod_components<'a>(&'a self, owner: &'a str) -> impl Iterator<Item = &'a TypeEntry> + 'a {
+        let comp_owner = format!("mod:{owner}");
+        self.entries.iter().filter(move |e| e.is_dynamic() && e.desc.owner == comp_owner)
+    }
+
+    /// Borrow the mod-defined component `id` of `e` for reading its fields by name.
+    pub fn view<'w>(&self, world: &'w World, e: Entity, id: u32) -> Result<DynView<'w>, CompError> {
+        let entry = self.get(id).ok_or(CompError::UnknownId(id))?;
+        let guard = entry.dyn_ref(world, e)?;
+        Ok(DynView { desc: entry.desc.clone(), guard })
+    }
+
+    /// Like [`view`](Self::view), for writing (stamps the component changed).
+    pub fn view_mut<'w>(&self, world: &'w World, e: Entity, id: u32) -> Result<DynViewMut<'w>, CompError> {
+        let entry = self.get(id).ok_or(CompError::UnknownId(id))?;
+        let guard = entry.dyn_ref_mut(world, e)?;
+        Ok(DynViewMut { desc: entry.desc.clone(), guard })
     }
 
     /// All entries in registration order.

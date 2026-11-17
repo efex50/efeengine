@@ -53,7 +53,7 @@ use crate::{
 /// impl SerializeContext for Context {
 ///     fn component_count(&self, archetype: &Archetype) -> usize {
 ///         archetype.component_types()
-///             .filter(|&t| t == TypeId::of::<Position>() || t == TypeId::of::<Velocity>())
+///             .filter(|&t| t == TypeId::of::<Position>().into() || t == TypeId::of::<Velocity>().into())
 ///             .count()
 ///     }
 ///

@@ -10,11 +10,14 @@ use spin::Mutex;
 use hashbrown::hash_map::{Entry, HashMap};
 
 use crate::alloc::boxed::Box;
-use crate::archetype::{Archetype, TypeIdMap, TypeInfo};
+use crate::alloc::collections::BTreeSet;
+use crate::archetype::{Archetype, ComponentId, TypeIdMap, TypeInfo};
+use crate::dynamic::DynamicSlot;
 use crate::entities::{Entities, EntityMeta, Location, ReserveEntitiesIterator};
 #[cfg(feature = "std")]
 use crate::query::QueryCache;
 use crate::query::{assert_borrow, assert_distinct, CachedQuery};
+use crate::tick::{ComponentTicks, QueryTicks, Tick, CHECK_TICK_THRESHOLD};
 use crate::{
     Bundle, ColumnBatch, ComponentRef, DynamicBundle, Entity, EntityRef, Fetch, MissingComponent,
     NoSuchEntity, Query, QueryBorrow, QueryMut, QueryOne, TakenEntity, View, ViewBorrow,
@@ -39,8 +42,8 @@ use crate::{
 /// newly-allocated `Entity` handle. Very long-lived applications should therefore limit the period
 /// over which they may retain handles of despawned entities.
 pub struct World {
-    entities: Entities,
-    archetypes: ArchetypeSet,
+    pub(crate) entities: Entities,
+    pub(crate) archetypes: ArchetypeSet,
     /// Maps statically-typed bundle types to archetypes
     bundle_to_archetype: TypeIdMap<u32>,
     /// Maps source archetype and static bundle types to the archetype that an entity is moved to
@@ -52,6 +55,16 @@ pub struct World {
     #[cfg(feature = "std")]
     query_cache: QueryCache,
     id: u64,
+    /// The world's current change tick; see [`World::change_tick`]
+    pub(crate) change_tick: Tick,
+    /// The change tick at the last [`World::check_change_ticks`]
+    last_check_tick: Tick,
+    /// Runtime-registered component layouts, by user id; see [`World::register_dynamic`]
+    pub(crate) dynamic: HashMap<u32, DynamicSlot>,
+    /// Target archetype of adding dynamic component `.1` to archetype `.0`
+    pub(crate) dyn_insert_edges: HashMap<(u32, ComponentId), u32>,
+    /// Target archetype of removing dynamic component `.1` from archetype `.0`
+    pub(crate) dyn_remove_edges: HashMap<(u32, ComponentId), u32>,
 }
 
 impl World {
@@ -75,6 +88,11 @@ impl World {
             #[cfg(feature = "std")]
             query_cache: QueryCache::default(),
             id,
+            change_tick: Tick::new(1),
+            last_check_tick: Tick::new(1),
+            dynamic: HashMap::default(),
+            dyn_insert_edges: HashMap::default(),
+            dyn_remove_edges: HashMap::default(),
         }
     }
 
@@ -98,6 +116,7 @@ impl World {
     /// let b = world.spawn((456, true));
     /// ```
     pub fn spawn(&mut self, components: impl DynamicBundle) -> Entity {
+        self.check_dynamic_bundle(&components);
         // Ensure all entity allocations are accounted for so `self.entities` can realloc if
         // necessary
         self.flush();
@@ -131,6 +150,7 @@ impl World {
     /// assert!(world.contains(a));
     /// ```
     pub fn spawn_at(&mut self, handle: Entity, components: impl DynamicBundle) {
+        self.check_dynamic_bundle(&components);
         // Ensure all entity allocations are accounted for so `self.entities` can realloc if
         // necessary
         self.flush();
@@ -158,11 +178,12 @@ impl World {
             None => components.with_ids(|ids| self.archetypes.get(ids, || components.type_info())),
         };
 
+        let now = self.change_tick;
         let archetype = &mut self.archetypes.archetypes[archetype_id as usize];
         unsafe {
-            let index = archetype.allocate(entity.id);
+            let index = archetype.allocate(entity.id, now);
             components.put(|ptr, ty| {
-                archetype.put_dynamic(ptr, ty.id(), ty.layout().size(), index);
+                archetype.put_raw(ptr, ty.id(), ty.layout().size(), index);
             });
             self.entities.meta[entity.id as usize].location = Location {
                 archetype: archetype_id,
@@ -205,6 +226,7 @@ impl World {
             entities: &mut self.entities,
             archetype_id,
             archetype: &mut self.archetypes.archetypes[archetype_id as usize],
+            now: self.change_tick,
         }
     }
 
@@ -213,12 +235,13 @@ impl World {
     /// The fastest, but most specialized, way to spawn large numbers of entities. Useful for high
     /// performance deserialization. Supports dynamic component types.
     pub fn spawn_column_batch(&mut self, batch: ColumnBatch) -> SpawnColumnBatchIter<'_> {
+        self.check_dynamic_types(batch.0.types());
         self.flush();
 
         let archetype = batch.0;
         let entity_count = archetype.len();
         // Store component data
-        let (archetype_id, base) = self.archetypes.insert_batch(archetype);
+        let (archetype_id, base) = self.archetypes.insert_batch(archetype, self.change_tick);
 
         let archetype = &mut self.archetypes.archetypes[archetype_id as usize];
         let id_alloc = self.entities.alloc_many(entity_count, archetype_id, base);
@@ -241,6 +264,7 @@ impl World {
 
     /// Hybrid of [`spawn_column_batch`](Self::spawn_column_batch) and [`spawn_at`](Self::spawn_at)
     pub fn spawn_column_batch_at(&mut self, handles: &[Entity], batch: ColumnBatch) {
+        self.check_dynamic_types(batch.0.types());
         let archetype = batch.0;
         assert_eq!(
             handles.len(),
@@ -266,7 +290,7 @@ impl World {
         }
 
         // Store components
-        let (archetype_id, base) = self.archetypes.insert_batch(archetype);
+        let (archetype_id, base) = self.archetypes.insert_batch(archetype, self.change_tick);
 
         // Fix up entity IDs and drop duplicates, working backwards so we can remove duplicate
         // entities we just inserted
@@ -426,7 +450,8 @@ impl World {
     pub fn view_mut<Q: Query>(&mut self) -> View<'_, Q> {
         assert_borrow::<Q>();
         let cache = CachedQuery::get(self);
-        unsafe { View::<Q>::new(self.entities_meta(), self.archetypes_inner(), cache) }
+        let ticks = self.default_ticks();
+        unsafe { View::<Q>::new(self.entities_meta(), self.archetypes_inner(), cache, ticks) }
     }
 
     /// Query a uniquely borrowed world
@@ -436,6 +461,139 @@ impl World {
     /// directly to a `for` loop.
     pub fn query_mut<Q: Query>(&mut self) -> QueryMut<'_, Q> {
         QueryMut::new(self)
+    }
+
+    /// Like [`query`](Self::query), with change filters (`Changed`, `Added`, `Mut::is_changed`)
+    /// evaluated against `last_run` and the world's current [`change_tick`](Self::change_tick)
+    pub fn query_since<Q: Query>(&self, last_run: Tick) -> QueryBorrow<'_, Q> {
+        QueryBorrow::new(self).with_ticks(last_run, self.change_tick)
+    }
+
+    /// The tick window used by queries that were not given one explicitly
+    pub(crate) fn default_ticks(&self) -> QueryTicks {
+        QueryTicks {
+            last_run: Tick::new(0),
+            this_run: self.change_tick,
+        }
+    }
+
+    /// The world's current change tick
+    ///
+    /// New components and mutable accesses made through the world are stamped with this tick. It
+    /// starts at 1 and only changes in [`increment_change_tick`](Self::increment_change_tick).
+    #[inline]
+    pub fn change_tick(&self) -> Tick {
+        self.change_tick
+    }
+
+    /// Advance the change tick by one (wrapping) and return the new tick
+    ///
+    /// Call this once per frame/system run. Wrapping is handled by comparing ticks relative to the
+    /// current one, as long as [`check_change_ticks`](Self::check_change_ticks) runs often enough
+    /// (see [`maybe_check_change_ticks`](Self::maybe_check_change_ticks)).
+    pub fn increment_change_tick(&mut self) -> Tick {
+        self.change_tick = Tick::new(self.change_tick.get().wrapping_add(1));
+        self.change_tick
+    }
+
+    /// Clamp every stored change tick that has become too old to compare reliably
+    ///
+    /// See [`MAX_CHANGE_AGE`](crate::MAX_CHANGE_AGE). Visits every row of every tracked column.
+    pub fn check_change_ticks(&mut self) {
+        let now = self.change_tick;
+        for archetype in &mut self.archetypes.archetypes {
+            archetype.check_ticks(now);
+        }
+        self.last_check_tick = now;
+    }
+
+    /// Run [`check_change_ticks`](Self::check_change_ticks) if the change tick has advanced by at
+    /// least [`CHECK_TICK_THRESHOLD`] since the previous check; cheap otherwise
+    pub fn maybe_check_change_ticks(&mut self) {
+        let elapsed = self.change_tick.get().wrapping_sub(self.last_check_tick.get());
+        if elapsed >= CHECK_TICK_THRESHOLD {
+            self.check_change_ticks();
+        }
+    }
+
+    /// Start recording change ticks for components of type `T`
+    ///
+    /// See [`track_changes_id`](Self::track_changes_id).
+    pub fn track_changes<T: Component>(&mut self) {
+        self.track_changes_id(ComponentId::of::<T>());
+    }
+
+    /// Start recording change ticks for the component `id`
+    ///
+    /// Untracked components have no tick storage at all. Components that already exist in the
+    /// world when tracking is enabled get both their `added` and `changed` tick set to the current
+    /// [`change_tick`](Self::change_tick), so they look added and changed once. Tracking cannot be
+    /// turned off. Does nothing if `id` is already tracked.
+    pub fn track_changes_id(&mut self, id: ComponentId) {
+        if !self.archetypes.tracked.insert(id) {
+            return;
+        }
+        let now = self.change_tick;
+        for archetype in &mut self.archetypes.archetypes {
+            archetype.track_id(id, now);
+        }
+    }
+
+    /// Whether change ticks are recorded for `id`
+    pub fn is_tracked(&self, id: ComponentId) -> bool {
+        self.archetypes.tracked.contains(&id)
+    }
+
+    /// The change ticks of `entity`'s `id` component
+    ///
+    /// `Ok(None)` means the entity has the component but it is not tracked. Panics if the column
+    /// is currently uniquely borrowed.
+    pub fn component_ticks(
+        &self,
+        entity: Entity,
+        id: ComponentId,
+    ) -> Result<Option<ComponentTicks>, ComponentError> {
+        let loc = self.entities.get(entity)?;
+        let archetype = &self.archetypes.archetypes[loc.archetype as usize];
+        let state = archetype
+            .state_of(id)
+            .ok_or_else(MissingComponent::unnamed)?;
+        // Hold a shared borrow so a concurrent unique borrow (which may stamp ticks) cannot race.
+        // SAFETY: `state` is a valid column index, released below.
+        unsafe { archetype.borrow_raw(state) };
+        // SAFETY: `loc.index < len`; the shared borrow is held
+        let ticks = unsafe { archetype.ticks_at(id, loc.index) };
+        // SAFETY: balances `borrow_raw` above
+        unsafe { archetype.release_raw(state) };
+        Ok(ticks)
+    }
+
+    /// Whether `entity`'s `T` component changed (or was added) after `since`, judged at the
+    /// world's current tick
+    ///
+    /// Untracked components report `true`.
+    pub fn is_changed<T: Component>(
+        &self,
+        entity: Entity,
+        since: Tick,
+    ) -> Result<bool, ComponentError> {
+        Ok(self
+            .component_ticks(entity, ComponentId::of::<T>())?
+            .map_or(true, |t| t.changed.is_newer_than(since, self.change_tick)))
+    }
+
+    /// Whether `entity`'s `T` component was added after `since`, judged at the world's current
+    /// tick
+    ///
+    /// Untracked components report `true`.
+    pub fn is_added<T: Component>(
+        &self,
+        entity: Entity,
+        since: Tick,
+    ) -> Result<bool, ComponentError> {
+        Ok(self
+            .component_ticks(entity, ComponentId::of::<T>())?
+            .map_or(true, |t| t.added.is_newer_than(since, self.change_tick)))
     }
 
     pub(crate) fn memo(&self) -> (u64, u32) {
@@ -488,6 +646,7 @@ impl World {
                 &self.entities.meta,
                 &self.archetypes.archetypes[loc.archetype as usize],
                 loc.index,
+                self.change_tick,
             )
         }
     }
@@ -502,12 +661,19 @@ impl World {
         entity: Entity,
     ) -> Result<Q::Item<'_>, QueryOneError> {
         assert_borrow::<Q>();
+        let ticks = self.default_ticks();
 
         let loc = self.entities.get(entity)?;
         let archetype = &self.archetypes.archetypes[loc.archetype as usize];
         let state = Q::Fetch::prepare(archetype).ok_or(QueryOneError::Unsatisfied)?;
-        let fetch = Q::Fetch::execute(archetype, state);
-        unsafe { Ok(Q::get(&self.entities.meta, &fetch, loc.index as usize)) }
+        let fetch = Q::Fetch::execute(archetype, state, ticks);
+        // SAFETY: `loc.index` is in bounds; `&mut self` gives exclusive access to all components
+        unsafe {
+            if Q::Fetch::HAS_FILTER && !fetch.filter(loc.index as usize) {
+                return Err(QueryOneError::Unsatisfied);
+            }
+            Ok(Q::get(&self.entities.meta, &fetch, loc.index as usize))
+        }
     }
 
     /// Query a fixed number of distinct entities in a uniquely borrowed world
@@ -521,13 +687,21 @@ impl World {
     ) -> [Result<Q::Item<'_>, QueryOneError>; N] {
         assert_borrow::<Q>();
         assert_distinct(&entities);
+        let ticks = self.default_ticks();
 
         entities.map(|entity| {
             let loc = self.entities.get(entity)?;
             let archetype = &self.archetypes.archetypes[loc.archetype as usize];
             let state = Q::Fetch::prepare(archetype).ok_or(QueryOneError::Unsatisfied)?;
-            let fetch = Q::Fetch::execute(archetype, state);
-            unsafe { Ok(Q::get(&self.entities.meta, &fetch, loc.index as usize)) }
+            let fetch = Q::Fetch::execute(archetype, state, ticks);
+            // SAFETY: `loc.index` is in bounds; the entities are distinct and `&mut self` gives
+            // exclusive access, so the items never alias.
+            unsafe {
+                if Q::Fetch::HAS_FILTER && !fetch.filter(loc.index as usize) {
+                    return Err(QueryOneError::Unsatisfied);
+                }
+                Ok(Q::get(&self.entities.meta, &fetch, loc.index as usize))
+            }
         })
     }
 
@@ -551,6 +725,20 @@ impl World {
             .ok_or_else(MissingComponent::new::<T::Component>)?)
     }
 
+    /// Like [`get`](Self::get), but a unique borrow of a tracked component stamps `now` instead of
+    /// the world's change tick
+    pub fn get_at<'a, T: ComponentRef<'a>>(
+        &'a self,
+        entity: Entity,
+        now: Tick,
+    ) -> Result<T::Ref, ComponentError> {
+        Ok(self
+            .entity(entity)?
+            .with_tick(now)
+            .get::<T>()
+            .ok_or_else(MissingComponent::new::<T::Component>)?)
+    }
+
     /// Short-hand for [`entity`](Self::entity) followed by [`EntityRef::satisfies`]
     ///
     /// Returns `true` if `entity` exists and satisfies the query `Q`.
@@ -568,6 +756,7 @@ impl World {
                 &self.entities.meta,
                 &self.archetypes.archetypes[loc.archetype as usize],
                 loc.index,
+                self.change_tick,
             ))
         }
     }
@@ -599,7 +788,7 @@ impl World {
     /// assert!(ids.contains(&b));
     /// ```
     pub fn iter(&self) -> Iter<'_> {
-        Iter::new(&self.archetypes.archetypes, &self.entities)
+        Iter::new(&self.archetypes.archetypes, &self.entities, self.change_tick)
     }
 
     /// Add `components` to `entity`
@@ -623,6 +812,7 @@ impl World {
         entity: Entity,
         components: impl DynamicBundle,
     ) -> Result<(), NoSuchEntity> {
+        self.check_dynamic_bundle(&components);
         self.flush();
 
         let loc = self.entities.get(entity)?;
@@ -655,6 +845,8 @@ impl World {
             target_index: u32,
             /// Components being updated
             components: Option<T>,
+            /// The world's change tick when the insertion began
+            now: Tick,
         }
 
         impl<T: DynamicBundle> Drop for Guard<'_, T> {
@@ -662,9 +854,16 @@ impl World {
                 if self.target.index == self.loc.archetype {
                     // Update components in the current archetype
                     let arch = &mut self.archetypes.archetypes[self.loc.archetype as usize];
+                    let (loc, target, now) = (self.loc, self.target, self.now);
                     unsafe {
                         self.components.take().unwrap().put(|ptr, ty| {
-                            arch.put_dynamic(ptr, ty.id(), ty.layout().size(), self.loc.index);
+                            arch.put_raw(ptr, ty.id(), ty.layout().size(), loc.index);
+                            if arch.has_tracked() {
+                                // A component not in `replaced` can only occur for `exchange`,
+                                // where it was removed and is re-added: it counts as added.
+                                let is_new = !target.replaced.iter().any(|r| r.id() == ty.id());
+                                arch.stamp_in_place(ty.id(), loc.index, now, is_new);
+                            }
                         });
                     }
 
@@ -680,7 +879,7 @@ impl World {
                 unsafe {
                     // Move the new components
                     self.components.take().unwrap().put(|ptr, ty| {
-                        target_arch.put_dynamic(
+                        target_arch.put_raw(
                             ptr,
                             ty.id(),
                             ty.layout().size(),
@@ -691,14 +890,38 @@ impl World {
                     // Move the components we're keeping
                     for &ty in &self.target.retained {
                         let src = source_arch
-                            .get_dynamic(ty.id(), ty.layout().size(), self.loc.index)
+                            .get_ptr(ty.id(), ty.layout().size(), self.loc.index)
                             .unwrap();
-                        target_arch.put_dynamic(
+                        target_arch.put_raw(
                             src.as_ptr(),
                             ty.id(),
                             ty.layout().size(),
                             self.target_index,
                         )
+                    }
+
+                    // Ticks: `allocate` stamped the new row as all-new. Kept components carry
+                    // their ticks over; replaced ones keep `added` and get `changed = now`.
+                    if target_arch.has_tracked() {
+                        Archetype::copy_ticks_from(
+                            target_arch,
+                            self.target_index,
+                            source_arch,
+                            self.loc.index,
+                            Some(&self.target.retained),
+                            self.now,
+                        );
+                        Archetype::copy_ticks_from(
+                            target_arch,
+                            self.target_index,
+                            source_arch,
+                            self.loc.index,
+                            Some(&self.target.replaced),
+                            self.now,
+                        );
+                        for &ty in &self.target.replaced {
+                            target_arch.stamp_in_place(ty.id(), self.target_index, self.now, false);
+                        }
                     }
 
                     // Free storage in the old archetype
@@ -724,11 +947,12 @@ impl World {
             },
         };
 
+        let now = self.change_tick;
         let mut target_index = 0;
         if target.index != loc.archetype {
             // Allocate storage in the archetype and update the entity's location to address it
             target_index =
-                unsafe { self.archetypes.archetypes[target.index as usize].allocate(entity.id) };
+                unsafe { self.archetypes.archetypes[target.index as usize].allocate(entity.id, now) };
             let meta = &mut self.entities.meta[entity.id as usize];
             meta.location.archetype = target.index;
             meta.location.index = target_index;
@@ -741,6 +965,7 @@ impl World {
             target,
             target_index,
             components: Some(components),
+            now,
         };
 
         let source_arch = &mut guard.archetypes.archetypes[loc.archetype as usize];
@@ -748,7 +973,7 @@ impl World {
             // Drop the components we're overwriting
             for &ty in &target.replaced {
                 let ptr = source_arch
-                    .get_dynamic(ty.id(), ty.layout().size(), loc.index)
+                    .get_ptr(ty.id(), ty.layout().size(), loc.index)
                     .unwrap();
                 ty.drop(ptr.as_ptr());
             }
@@ -795,7 +1020,7 @@ impl World {
 
         // Move out of the source archetype, or bail out if a component is missing
         let bundle = unsafe {
-            T::get(|ty| source_arch.get_dynamic(ty.id(), ty.layout().size(), old_index))?
+            T::get(|ty| source_arch.get_ptr(ty.id(), ty.layout().size(), old_index))?
         };
 
         // Find the target archetype ID
@@ -810,13 +1035,25 @@ impl World {
                 loc.archetype as usize,
                 target as usize,
             );
-            let target_index = unsafe { target_arch.allocate(entity.id) };
+            let target_index = unsafe { target_arch.allocate(entity.id, self.change_tick) };
             loc.archetype = target;
             loc.index = target_index;
+            // SAFETY: `old_index` is the entity's row in `source_arch`, `target_index` was just
+            // allocated in `target_arch`; the target's components are a subset of the source's.
+            unsafe {
+                Archetype::copy_ticks_from(
+                    target_arch,
+                    target_index,
+                    source_arch,
+                    old_index,
+                    None,
+                    self.change_tick,
+                );
+            }
             if let Some(moved) = unsafe {
                 source_arch.move_to(old_index, |src, ty, size| {
                     // Only move the components present in the target archetype, i.e. the non-removed ones.
-                    if let Some(dst) = target_arch.get_dynamic(ty, size, target_index) {
+                    if let Some(dst) = target_arch.get_ptr(ty, size, target_index) {
                         ptr::copy_nonoverlapping(src, dst.as_ptr(), size);
                     }
                 })
@@ -867,6 +1104,7 @@ impl World {
         entity: Entity,
         components: T,
     ) -> Result<S, ComponentError> {
+        self.check_dynamic_bundle(&components);
         self.flush();
 
         // Gather current metadata
@@ -876,7 +1114,7 @@ impl World {
         let source_arch = &self.archetypes.archetypes[loc.archetype as usize];
 
         let bundle = unsafe {
-            S::get(|ty| source_arch.get_dynamic(ty.id(), ty.layout().size(), loc.index))?
+            S::get(|ty| source_arch.get_ptr(ty.id(), ty.layout().size(), loc.index))?
         };
 
         // Find the intermediate archetype ID
@@ -932,9 +1170,10 @@ impl World {
     /// Invoked implicitly by operations that add or remove components or entities, i.e. all
     /// variations of `spawn`, `despawn`, `insert`, and `remove`.
     pub fn flush(&mut self) {
+        let now = self.change_tick;
         let arch = &mut self.archetypes.archetypes[0];
         self.entities
-            .flush(|id, location| location.index = unsafe { arch.allocate(id) });
+            .flush(|id, location| location.index = unsafe { arch.allocate(id, now) });
     }
 
     /// Inspect the archetypes that entities are organized into
@@ -1041,7 +1280,7 @@ impl<'a> IntoIterator for &'a World {
     }
 }
 
-fn index2<T>(x: &mut [T], i: usize, j: usize) -> (&mut T, &mut T) {
+pub(crate) fn index2<T>(x: &mut [T], i: usize, j: usize) -> (&mut T, &mut T) {
     assert!(i != j);
     assert!(i < x.len());
     assert!(j < x.len());
@@ -1122,15 +1361,17 @@ pub struct Iter<'a> {
     entities: &'a Entities,
     current: Option<&'a Archetype>,
     index: u32,
+    now: Tick,
 }
 
 impl<'a> Iter<'a> {
-    fn new(archetypes: &'a [Archetype], entities: &'a Entities) -> Self {
+    fn new(archetypes: &'a [Archetype], entities: &'a Entities, now: Tick) -> Self {
         Self {
             archetypes: archetypes.iter(),
             entities,
             current: None,
             index: 0,
+            now,
         }
     }
 }
@@ -1154,7 +1395,7 @@ impl<'a> Iterator for Iter<'a> {
                     }
                     let index = self.index;
                     self.index += 1;
-                    return Some(unsafe { EntityRef::new(&self.entities.meta, current, index) });
+                    return Some(unsafe { EntityRef::new(&self.entities.meta, current, index, self.now) });
                 }
             }
         }
@@ -1205,6 +1446,7 @@ where
     entities: &'a mut Entities,
     archetype_id: u32,
     archetype: &'a mut Archetype,
+    now: Tick,
 }
 
 impl<I> Drop for SpawnBatchIter<'_, I>
@@ -1227,11 +1469,11 @@ where
     fn next(&mut self) -> Option<Entity> {
         let components = self.inner.next()?;
         let entity = self.entities.alloc();
-        let index = unsafe { self.archetype.allocate(entity.id) };
+        let index = unsafe { self.archetype.allocate(entity.id, self.now) };
         unsafe {
             components.put(|ptr, ty| {
                 self.archetype
-                    .put_dynamic(ptr, ty.id(), ty.layout().size(), index);
+                    .put_raw(ptr, ty.id(), ty.layout().size(), index);
             });
         }
         self.entities.meta[entity.id as usize].location = Location {
@@ -1289,11 +1531,13 @@ impl Drop for SpawnColumnBatchIter<'_> {
     }
 }
 
-struct ArchetypeSet {
+pub(crate) struct ArchetypeSet {
     /// Maps sorted component type sets to archetypes
-    index: HashMap<Box<[TypeId]>, u32>,
+    index: HashMap<Box<[ComponentId]>, u32>,
     /// Length must never exceed `u32::MAX`
-    archetypes: Vec<Archetype>,
+    pub(crate) archetypes: Vec<Archetype>,
+    /// Components whose columns carry change ticks, in every archetype
+    pub(crate) tracked: BTreeSet<ComponentId>,
 }
 
 impl ArchetypeSet {
@@ -1302,11 +1546,12 @@ impl ArchetypeSet {
         Self {
             index: Some((Box::default(), 0)).into_iter().collect(),
             archetypes: vec![Archetype::new(Vec::new())],
+            tracked: BTreeSet::new(),
         }
     }
 
     /// Find the archetype ID that has exactly `components`
-    fn get<T: Borrow<[TypeId]> + Into<Box<[TypeId]>>>(
+    pub(crate) fn get<T: Borrow<[ComponentId]> + Into<Box<[ComponentId]>>>(
         &mut self,
         components: T,
         info: impl FnOnce() -> Vec<TypeInfo>,
@@ -1317,19 +1562,21 @@ impl ArchetypeSet {
             .unwrap_or_else(|| self.insert(components.into(), info()))
     }
 
-    fn insert(&mut self, components: Box<[TypeId]>, info: Vec<TypeInfo>) -> u32 {
+    fn insert(&mut self, components: Box<[ComponentId]>, info: Vec<TypeInfo>) -> u32 {
         let x = self.archetypes.len() as u32;
         if x == u32::MAX {
             panic!("too many archetypes");
         }
-        self.archetypes.push(Archetype::new(info));
+        let mut archetype = Archetype::new(info);
+        Self::track_new(&self.tracked, &mut archetype, Tick::default());
+        self.archetypes.push(archetype);
         let old = self.index.insert(components, x);
         debug_assert!(old.is_none(), "inserted duplicate archetype");
         x
     }
 
     /// Returns archetype ID and starting location index
-    fn insert_batch(&mut self, archetype: Archetype) -> (u32, u32) {
+    fn insert_batch(&mut self, mut archetype: Archetype, now: Tick) -> (u32, u32) {
         let ids = archetype
             .types()
             .iter()
@@ -1342,7 +1589,7 @@ impl ArchetypeSet {
                 let existing = &mut self.archetypes[*x.get() as usize];
                 let base = existing.len();
                 unsafe {
-                    existing.merge(archetype);
+                    existing.merge(archetype, now);
                 }
                 (*x.get(), base)
             }
@@ -1352,9 +1599,23 @@ impl ArchetypeSet {
                 if id == u32::MAX {
                     panic!("too many archetypes");
                 }
+                Self::track_new(&self.tracked, &mut archetype, now);
                 self.archetypes.push(archetype);
                 x.insert(id);
                 (id, 0)
+            }
+        }
+    }
+
+    /// Give `archetype` tick arrays for every tracked component it has, stamping existing rows
+    /// with `now`
+    fn track_new(tracked: &BTreeSet<ComponentId>, archetype: &mut Archetype, now: Tick) {
+        if tracked.is_empty() {
+            return;
+        }
+        for id in archetype.type_ids().to_vec() {
+            if tracked.contains(&id) {
+                archetype.track_id(id, now);
             }
         }
     }
@@ -1381,7 +1642,7 @@ impl ArchetypeSet {
                 }
                 src_ty += 1;
             }
-            if arch.has_dynamic(ty.id()) {
+            if arch.has_component(ty.id()) {
                 replaced.push(ty);
             } else {
                 info.push(ty);

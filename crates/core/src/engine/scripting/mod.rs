@@ -13,6 +13,7 @@
 
 mod api_engine;
 mod cache;
+mod components;
 mod host;
 mod load;
 mod mods;
@@ -31,6 +32,7 @@ use efevm::{
 use hecs::World;
 
 pub use cache::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT};
+pub use components::{component_name, parse_components, ModComponent, SpawnedBy};
 pub use host::{LogLevel, LogLine, ScriptHost};
 #[cfg(not(target_family = "wasm"))]
 pub use load::DirSource;
@@ -237,6 +239,10 @@ pub struct Scripting {
     pub(crate) sources: Vec<Box<dyn ModSource>>,
     pub(crate) origins: Vec<packages::Origin>,
     pub(crate) next_watch_check: f64,
+    /// Component registrations kept in the world across a swap (see `components.rs`).
+    pub(crate) stash: components::StashMap,
+    /// Layout changes to apply when the running swap succeeds.
+    pub(crate) migrations: Vec<components::Migration>,
 }
 
 impl Scripting {
@@ -261,6 +267,8 @@ impl Scripting {
             sources: Vec::new(),
             origins: Vec::new(),
             next_watch_check: 0.0,
+            stash: Default::default(),
+            migrations: Vec::new(),
         }
     }
 

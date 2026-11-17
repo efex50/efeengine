@@ -50,14 +50,14 @@ impl WorldCloner {
         for archetype in world.archetypes() {
             let mut batch_type = ColumnBatchType::new();
             for (&type_id, clone_metadata) in self.registry.iter() {
-                if archetype.has_dynamic(type_id) {
+                if archetype.has_component(type_id.into()) {
                     batch_type.add_dynamic(clone_metadata.type_info);
                 }
             }
 
             let mut batch_builder = batch_type.into_batch(archetype.ids().len() as u32);
             for (&type_id, clone_metadata) in self.registry.iter() {
-                if archetype.has_dynamic(type_id) {
+                if archetype.has_component(type_id.into()) {
                     (clone_metadata.insert_into_batch_func)(archetype, &mut batch_builder)
                 }
             }

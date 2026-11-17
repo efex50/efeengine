@@ -15,7 +15,7 @@ efeengine is MIT-licensed (see `LICENSE`). This file lists code that is copied i
 - Every file or block that copies or closely adapts Bevy code starts with:
   `// Adapted from Bevy (https://github.com/bevyengine/bevy), <path> at <commit>, MIT OR Apache-2.0, Copyright (c) Bevy contributors.`
 - Adapted locations:
-  - _(none yet)_
+  - `crates/efecs/src/tick.rs`: the wrap-aware `Tick` comparison (`is_newer_than`), `check_tick` clamping and the `CHECK_TICK_THRESHOLD` / `MAX_CHANGE_AGE` constants, adapted from `crates/bevy_ecs/src/component.rs` and `change_detection.rs` at v0.14.0.
 
 ### Bevy MIT license text
 

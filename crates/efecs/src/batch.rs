@@ -2,8 +2,9 @@ use crate::alloc::{
     alloc::{alloc, dealloc},
     collections::BinaryHeap,
 };
+use hashbrown::HashMap;
 use core::{
-    any::{type_name, TypeId},
+    any::type_name,
     fmt,
     mem::MaybeUninit,
     slice,
@@ -11,7 +12,7 @@ use core::{
 };
 
 use crate::{
-    archetype::{TypeIdMap, TypeInfo},
+    archetype::{ComponentId, TypeInfo},
     Archetype, Bundle, Component,
 };
 
@@ -69,7 +70,7 @@ impl ColumnBatchType {
 /// An incomplete collection of component data for entities with the same component types
 pub struct ColumnBatchBuilder {
     /// Number of components written so far for each component type
-    fill: TypeIdMap<AtomicU32>,
+    fill: HashMap<ComponentId, AtomicU32>,
     target_fill: u32,
     pub(crate) archetype: Option<Archetype>,
 }
@@ -88,7 +89,7 @@ impl ColumnBatchBuilder {
         let archetype = self.archetype.as_ref().unwrap();
         let state = archetype.get_state::<T>()?;
         let base = unsafe { archetype.get_base::<T>(state) };
-        let fill_storage = self.fill.get(&TypeId::of::<T>()).unwrap();
+        let fill_storage = self.fill.get(&ComponentId::of::<T>()).unwrap();
         let fill = fill_storage.swap(u32::MAX, Ordering::Acquire);
         if fill == u32::MAX {
             panic!("another {} writer still exists", type_name::<T>());
@@ -133,7 +134,7 @@ impl Drop for ColumnBatchBuilder {
                         0 => layout.align() as *mut u8,
                         _ => alloc(layout),
                     };
-                    let base = archetype.get_dynamic(ty.id(), 0, 0).unwrap();
+                    let base = archetype.get_ptr(ty.id(), 0, 0).unwrap();
                     for i in 0..fill {
                         scratch.copy_from_nonoverlapping(
                             base.as_ptr().add(i as usize * ty.layout().size()),

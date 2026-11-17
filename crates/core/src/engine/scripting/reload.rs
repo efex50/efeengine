@@ -23,6 +23,7 @@ use super::packages::{Built, LoadReport, ModError, Origin, Reloaded, UnloadRepor
 use super::{LogLevel, ModuleId, ScriptError, Scripting};
 use crate::engine::resources::Resources;
 use crate::engine::types::TypeRegistry;
+use hecs::World;
 
 /// Builds the new version of a mod that is being replaced (compiles a folder, or just hands
 /// over the read package) and what a source keeps of a folder.
@@ -93,16 +94,27 @@ impl Scripting {
 
     /// Unload module `idx` for good: its instance, registrations, asset handlers and origin,
     /// and the component types it owned.
-    fn unload_swap(&mut self, idx: usize, res: &mut Resources, types: &mut TypeRegistry) -> Result<String, ScriptError> {
+    ///
+    /// Also despawns the entities its scripts spawned and handles its components: with `keep`
+    /// (a swap) their world registration and data are stashed for the new version, else they
+    /// are unregistered.
+    fn unload_swap(
+        &mut self,
+        idx: usize,
+        res: &mut Resources,
+        types: &mut TypeRegistry,
+        world: &mut World,
+        keep: bool,
+    ) -> Result<String, ScriptError> {
         let name = self.unload_now(idx)?;
         self.release_module(ModuleId(idx as u32), res);
-        types.remove_owner(&name);
+        self.release_module_state(ModuleId(idx as u32), &name, world, types, keep);
         Ok(name)
     }
 
     /// Unload `idx` and its dependents (dependents first). Refused, with nothing unloaded,
     /// when a game module is among the dependents. Returns the unloaded mod ids.
-    fn unload_closure(&mut self, idx: usize, res: &mut Resources, types: &mut TypeRegistry) -> Result<Vec<String>, ModError> {
+    fn unload_closure(&mut self, idx: usize, res: &mut Resources, types: &mut TypeRegistry, world: &mut World) -> Result<Vec<String>, ModError> {
         let mut all: Vec<usize> = self.dependents_closure(idx).into_iter().collect();
         all.push(idx);
         all.sort_unstable_by(|a, b| b.cmp(a));
@@ -112,7 +124,7 @@ impl Scripting {
         }
         let mut out = Vec::new();
         for i in all {
-            out.push(self.unload_swap(i, res, types)?);
+            out.push(self.unload_swap(i, res, types, world, false)?);
         }
         Ok(out)
     }
@@ -120,7 +132,7 @@ impl Scripting {
     /// `Engine::unload_mods`: every loaded mod, dependents before dependencies. A mod that a
     /// game module (or a mod that could not be unloaded) still depends on stays loaded and is
     /// reported in `failed`.
-    pub(crate) fn unload_mods(&mut self, res: &mut Resources, types: &mut TypeRegistry) -> UnloadReport {
+    pub(crate) fn unload_mods(&mut self, res: &mut Resources, types: &mut TypeRegistry, world: &mut World) -> UnloadReport {
         let mut report = UnloadReport::default();
         for idx in (0..self.modules.len()).rev() {
             let slot = &self.modules[idx];
@@ -133,7 +145,7 @@ impl Scripting {
                 report.failed.push((slot.name.clone(), e.into()));
                 continue;
             }
-            match self.unload_swap(idx, res, types) {
+            match self.unload_swap(idx, res, types, world, false) {
                 Ok(name) => report.unloaded.push(name),
                 Err(e) => report.failed.push((self.modules[idx].name.clone(), e.into())),
             }
@@ -161,6 +173,20 @@ impl Scripting {
         targets: Vec<Target<'_>>,
         res: &mut Resources,
         types: &mut TypeRegistry,
+        world: &mut World,
+    ) -> Result<Vec<(String, ModuleId)>, (String, bool)> {
+        let r = self.swap_mods_inner(targets, res, types, world);
+        // Success or rollback: run the component migrations, drop unclaimed components.
+        self.finish_swap(world, types);
+        r
+    }
+
+    fn swap_mods_inner(
+        &mut self,
+        targets: Vec<Target<'_>>,
+        res: &mut Resources,
+        types: &mut TypeRegistry,
+        world: &mut World,
     ) -> Result<Vec<(String, ModuleId)>, (String, bool)> {
         let mut affected: BTreeSet<usize> = BTreeSet::new();
         for t in &targets {
@@ -201,9 +227,9 @@ impl Scripting {
             saved.push(Saved { idx: i, name: names[&i].clone(), built, origin });
         }
         for &i in affected.iter().rev() {
-            if let Err(e) = self.unload_swap(i, res, types) {
+            if let Err(e) = self.unload_swap(i, res, types, world, true) {
                 let cause = format!("unloading `{}`: {e}", names[&i]);
-                let restored = self.restore(saved, res);
+                let restored = self.restore(saved, res, world, types);
                 return Err((cause, restored));
             }
         }
@@ -246,7 +272,7 @@ impl Scripting {
                         }
                     }
                 };
-                let id = self.load_package_item(built, res)?;
+                let id = self.load_package_item(built, res, world, types)?;
                 Ok((id, folder))
             })();
             match step {
@@ -262,11 +288,11 @@ impl Scripting {
         }
         if let Some(cause) = failure {
             for &(_, id) in done.iter().rev() {
-                if let Err(e) = self.unload_swap(id.0 as usize, res, types) {
+                if let Err(e) = self.unload_swap(id.0 as usize, res, types, world, true) {
                     self.log(LogLevel::Error, format!("reload: undoing the load of module {} failed: {e}", id.0));
                 }
             }
-            let restored = self.restore(saved, res);
+            let restored = self.restore(saved, res, world, types);
             return Err((cause, restored));
         }
 
@@ -297,12 +323,12 @@ impl Scripting {
     }
 
     /// Load the saved mods again, in load order, with their origins. True when all are back.
-    fn restore(&mut self, saved: Vec<Saved>, res: &mut Resources) -> bool {
+    fn restore(&mut self, saved: Vec<Saved>, res: &mut Resources, world: &mut World, types: &mut TypeRegistry) -> bool {
         let mut ok = true;
         for Saved { idx, name, built, origin } in saved {
             let id = match self.loaded_mod_idx(&name) {
                 Some(i) => Ok(ModuleId(i as u32)),
-                None => self.load_package_item(built, res),
+                None => self.load_package_item(built, res, world, types),
             };
             match id {
                 Ok(id) => {
@@ -323,7 +349,7 @@ impl Scripting {
 
 impl Scripting {
     /// Load one candidate that is not loaded yet.
-    fn load_cand(&mut self, c: Cand, report: &mut LoadReport, failed_ids: &mut Vec<String>, res: &mut Resources) {
+    fn load_cand(&mut self, c: Cand, report: &mut LoadReport, failed_ids: &mut Vec<String>, res: &mut Resources, world: &mut World, types: &mut TypeRegistry) {
         let Cand { source, label, manifest, kind, .. } = c;
         if let Some(dep) = manifest.dependencies.iter().find(|d| failed_ids.contains(&d.id)) {
             failed_ids.push(manifest.id.clone());
@@ -331,10 +357,10 @@ impl Scripting {
             return;
         }
         let r: Result<(ModuleId, FolderKept), ModError> = match kind {
-            Kind::Pkg(b) => self.load_package_item(b, res).map(|id| (id, None)),
+            Kind::Pkg(b) => self.load_package_item(b, res, world, types).map(|id| (id, None)),
             #[cfg(feature = "efa")]
             Kind::Folder { files, assets, hash } => match self.build_folder(&label, &*files, &assets, Some(hash)) {
-                Ok(b) => self.load_package_item(b, res).map(|id| (id, Some((files, assets)))),
+                Ok(b) => self.load_package_item(b, res, world, types).map(|id| (id, Some((files, assets)))),
                 Err(e) => Err(e),
             },
         };
@@ -358,7 +384,7 @@ impl Scripting {
     /// mods that stay loaded. New mods load in resolution order; changed mods are swapped
     /// together after the new mods they do not depend on, and the new mods that depend on a
     /// changed one load after the swap. `init`s are pending; the engine runs them after.
-    pub(crate) fn load_mods(&mut self, res: &mut Resources, types: &mut TypeRegistry, reload: bool) -> LoadReport {
+    pub(crate) fn load_mods(&mut self, res: &mut Resources, types: &mut TypeRegistry, world: &mut World, reload: bool) -> LoadReport {
         let mut report = LoadReport::default();
         if self.sources.is_empty() {
             return report;
@@ -446,7 +472,7 @@ impl Scripting {
             if !self.is_loaded(ModuleId(idx as u32)) {
                 continue;
             }
-            match self.unload_closure(idx, res, types) {
+            match self.unload_closure(idx, res, types, world) {
                 Ok(ids) => {
                     for id in &ids {
                         self.log(LogLevel::Info, format!("[{id}] unloaded: its source `{label}` no longer lists it"));
@@ -472,7 +498,7 @@ impl Scripting {
                 deferred_ids.insert(c.manifest.id.clone());
                 deferred.push(c);
             } else {
-                self.load_cand(c, &mut report, &mut failed_ids, res);
+                self.load_cand(c, &mut report, &mut failed_ids, res, world, types);
             }
         }
 
@@ -497,7 +523,7 @@ impl Scripting {
             targets.push(Target { idx, label, deps: manifest.dependencies.iter().map(|d| d.id.clone()).collect(), source: Some(source), build });
         }
         if !targets.is_empty() {
-            match self.swap_mods(targets, res, types) {
+            match self.swap_mods(targets, res, types, world) {
                 Ok(done) => {
                     for (name, id) in done {
                         let label = self.origins.iter().find(|o| o.id == id).map(|o| o.label.clone()).unwrap_or_else(|| name.clone());
@@ -515,7 +541,7 @@ impl Scripting {
             }
         }
         for c in deferred {
-            self.load_cand(c, &mut report, &mut failed_ids, res);
+            self.load_cand(c, &mut report, &mut failed_ids, res, world, types);
         }
 
         sources.append(&mut self.sources);
@@ -533,16 +559,17 @@ impl Scripting {
         build: Build<'a>,
         res: &mut Resources,
         types: &mut TypeRegistry,
+        world: &mut World,
     ) -> Result<Reloaded, ModError> {
         let Some(idx) = self.loaded_mod_idx(&manifest.id) else {
             let (b, _) = build(self)?;
-            return Ok(Reloaded::Loaded(self.load_package_item(b, res)?));
+            return Ok(Reloaded::Loaded(self.load_package_item(b, res, world, types)?));
         };
         if self.modules[idx].package.as_ref().is_some_and(|p| p.hash == hash) {
             return Ok(Reloaded::Unchanged(ModuleId(idx as u32)));
         }
         let target = Target { idx, label: label.to_string(), deps: manifest.dependencies.iter().map(|d| d.id.clone()).collect(), source: None, build };
-        match self.swap_mods(vec![target], res, types) {
+        match self.swap_mods(vec![target], res, types, world) {
             Ok(done) => {
                 let id = done.iter().find(|(n, _)| *n == manifest.id).map(|d| d.1).expect("the target is loaded again");
                 let dependents = done.into_iter().map(|d| d.0).filter(|n| *n != manifest.id).collect();

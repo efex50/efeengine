@@ -49,7 +49,7 @@ fn gen_dynamic_bundle_impl(
                 ::core::option::Option::Some(::core::any::TypeId::of::<Self>())
             }
 
-            fn with_ids<__hecs__T>(&self, f: impl ::core::ops::FnOnce(&[::core::any::TypeId]) -> __hecs__T) -> __hecs__T {
+            fn with_ids<__hecs__T>(&self, f: impl ::core::ops::FnOnce(&[::hecs::ComponentId]) -> __hecs__T) -> __hecs__T {
                 <Self as ::hecs::Bundle>::with_static_ids(f)
             }
 
@@ -79,13 +79,13 @@ fn gen_bundle_impl(
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let with_static_ids_inner = quote! {
         {
-            let mut tys = [#((::core::mem::align_of::<#tys>(), ::core::any::TypeId::of::<#tys>())),*];
+            let mut tys = [#((::core::mem::align_of::<#tys>(), ::hecs::ComponentId::of::<#tys>())),*];
             tys.sort_unstable_by(|x, y| {
                 ::core::cmp::Ord::cmp(&x.0, &y.0)
                     .reverse()
                     .then(::core::cmp::Ord::cmp(&x.1, &y.1))
             });
-            let mut ids = [::core::any::TypeId::of::<()>(); #num_tys];
+            let mut ids = [::hecs::ComponentId::of::<()>(); #num_tys];
             for (id, info) in ::core::iter::Iterator::zip(ids.iter_mut(), tys.iter()) {
                 *id = info.1;
             }
@@ -94,7 +94,7 @@ fn gen_bundle_impl(
     };
     let with_static_ids_body = if generics.params.is_empty() {
         quote! {
-            static ELEMENTS: ::hecs::spin::Lazy<[::core::any::TypeId; #num_tys]> = ::hecs::spin::Lazy::new(|| {
+            static ELEMENTS: ::hecs::spin::Lazy<[::hecs::ComponentId; #num_tys]> = ::hecs::spin::Lazy::new(|| {
                 #with_static_ids_inner
             });
             f(&*ELEMENTS)
@@ -107,7 +107,7 @@ fn gen_bundle_impl(
     quote! {
         unsafe impl #impl_generics ::hecs::Bundle for #ident #ty_generics #where_clause {
             #[allow(non_camel_case_types)]
-            fn with_static_ids<__hecs__T>(f: impl ::core::ops::FnOnce(&[::core::any::TypeId]) -> __hecs__T) -> __hecs__T {
+            fn with_static_ids<__hecs__T>(f: impl ::core::ops::FnOnce(&[::hecs::ComponentId]) -> __hecs__T) -> __hecs__T {
                 #with_static_ids_body
             }
 
@@ -139,7 +139,7 @@ fn gen_unit_struct_bundle_impl(ident: syn::Ident, generics: &syn::Generics) -> T
     quote! {
         unsafe impl #impl_generics ::hecs::Bundle for #ident #ty_generics #where_clause {
             #[allow(non_camel_case_types)]
-            fn with_static_ids<__hecs__T>(f: impl ::core::ops::FnOnce(&[::core::any::TypeId]) -> __hecs__T) -> __hecs__T { f(&[]) }
+            fn with_static_ids<__hecs__T>(f: impl ::core::ops::FnOnce(&[::hecs::ComponentId]) -> __hecs__T) -> __hecs__T { f(&[]) }
             #[allow(non_camel_case_types)]
             fn with_static_type_info<__hecs__T>(f: impl ::core::ops::FnOnce(&[::hecs::TypeInfo]) -> __hecs__T) -> __hecs__T { f(&[]) }
 

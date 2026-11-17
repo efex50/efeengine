@@ -95,7 +95,7 @@ impl SerializeContext for SaveContextSerialize {
     fn component_count(&self, archetype: &Archetype) -> usize {
         archetype
             .component_types()
-            .filter(|&t| t == TypeId::of::<ComponentA>() || t == TypeId::of::<ComponentB>())
+            .filter(|&t| t == TypeId::of::<ComponentA>().into() || t == TypeId::of::<ComponentB>().into())
             .count()
     }
 

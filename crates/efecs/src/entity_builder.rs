@@ -1,12 +1,12 @@
 use crate::alloc::alloc::{alloc, dealloc, Layout};
 use crate::alloc::vec::Vec;
 use crate::bundle::{DynamicBundleClone, DynamicClone};
-use core::any::TypeId;
 use core::ptr::{self, NonNull};
 
 use hashbrown::hash_map::Entry;
+use hashbrown::HashMap;
 
-use crate::archetype::{TypeIdMap, TypeInfo};
+use crate::archetype::{ComponentId, TypeInfo};
 use crate::{align, Component, ComponentRef, ComponentRefShared, DynamicBundle};
 
 /// Helper for incrementally constructing a bundle of components with dynamic component types
@@ -84,7 +84,7 @@ impl EntityBuilder {
     }
 
     /// Enumerate the types of the entity builder's components
-    pub fn component_types(&self) -> impl Iterator<Item = TypeId> + '_ {
+    pub fn component_types(&self) -> impl Iterator<Item = ComponentId> + '_ {
         self.inner.component_types()
     }
 
@@ -108,7 +108,7 @@ unsafe impl DynamicBundle for BuiltEntity<'_> {
         self.builder.has::<T>()
     }
 
-    fn with_ids<T>(&self, f: impl FnOnce(&[TypeId]) -> T) -> T {
+    fn with_ids<T>(&self, f: impl FnOnce(&[ComponentId]) -> T) -> T {
         f(&self.builder.ids)
     }
 
@@ -213,7 +213,7 @@ impl EntityBuilderClone {
     }
 
     /// Enumerate the types of the entity builder's components
-    pub fn component_types(&self) -> impl Iterator<Item = TypeId> + '_ {
+    pub fn component_types(&self) -> impl Iterator<Item = ComponentId> + '_ {
         self.inner.component_types()
     }
 
@@ -238,7 +238,7 @@ unsafe impl DynamicBundle for &'_ BuiltEntityClone {
         self.0.has::<T>()
     }
 
-    fn with_ids<T>(&self, f: impl FnOnce(&[TypeId]) -> T) -> T {
+    fn with_ids<T>(&self, f: impl FnOnce(&[ComponentId]) -> T) -> T {
         f(&self.0.ids)
     }
 
@@ -292,17 +292,17 @@ struct Common<M> {
     layout: Layout,
     cursor: usize,
     info: Vec<(TypeInfo, usize, M)>,
-    ids: Vec<TypeId>,
-    indices: TypeIdMap<usize>,
+    ids: Vec<ComponentId>,
+    indices: HashMap<ComponentId, usize>,
 }
 
 impl<M> Common<M> {
     fn has<T: Component>(&self) -> bool {
-        self.indices.contains_key(&TypeId::of::<T>())
+        self.indices.contains_key(&ComponentId::of::<T>())
     }
 
     fn get<'a, T: ComponentRefShared<'a>>(&'a self) -> Option<T> {
-        let index = self.indices.get(&TypeId::of::<T::Component>())?;
+        let index = self.indices.get(&ComponentId::of::<T::Component>())?;
         let (_, offset, _) = self.info[*index];
         unsafe {
             let storage = self.storage.as_ptr().add(offset).cast::<T::Component>();
@@ -311,7 +311,7 @@ impl<M> Common<M> {
     }
 
     fn get_mut<'a, T: ComponentRef<'a>>(&'a self) -> Option<T> {
-        let index = self.indices.get(&TypeId::of::<T::Component>())?;
+        let index = self.indices.get(&ComponentId::of::<T::Component>())?;
         let (_, offset, _) = self.info[*index];
         unsafe {
             let storage = self.storage.as_ptr().add(offset).cast::<T::Component>();
@@ -319,7 +319,7 @@ impl<M> Common<M> {
         }
     }
 
-    fn component_types(&self) -> impl Iterator<Item = TypeId> + '_ {
+    fn component_types(&self) -> impl Iterator<Item = ComponentId> + '_ {
         self.info.iter().map(|(info, _, _)| info.id())
     }
 

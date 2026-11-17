@@ -190,7 +190,7 @@ A call to an import is shown by its index name and parameter names
   `unsafe`, no raw pointers.
 - **Engine namespaces** (owner `engine`, version 1; full list and docs come from the index):
   `engine.world` (`spawn`, `despawn`, `alive`, `get`, `set`, `has`, `insert`, `remove`,
-  `query`, `component_id`), `engine.input` (`key_down`, `key_pressed`, `key_released` by key
+  `query`, `component_id`, `changed`, `tick`), `engine.input` (`key_down`, `key_pressed`, `key_released` by key
   name, `mouse_x`, `mouse_y`, `mouse_down`), `engine.time` (`delta`, `elapsed`, `frame`,
   `fixed_delta`), `engine.events` (`send(name: str, data: bytes)`, `count(name: str)`,
   `read(name: str, index: i64, buf: bytes) -> len`), `engine.log` (`info`, `warn`, `error`),

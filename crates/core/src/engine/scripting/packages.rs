@@ -31,9 +31,12 @@ use std::fmt;
 use efemod::{Manifest, Package, PackageError, ResolveProblem, Version};
 
 use super::load::{AssetHandler, FolderKept, ModBody, ModSource};
+use super::components::{ModComponent, parse_components, same_declarations};
 use super::mods::ModOptions;
 use super::{DEFAULT_BUDGET, DEFAULT_MEMORY_PAGES, LogLevel, ModuleId, ScriptError, Scripting};
 use crate::engine::resources::Resources;
+use crate::engine::types::TypeRegistry;
+use hecs::World;
 
 /// What the engine asks the game's policy about one package.
 pub struct ModRequest<'a> {
@@ -46,6 +49,10 @@ pub struct ModRequest<'a> {
     /// They are checked like imports: the grant (plus dependency ids) must cover each one, else
     /// `NotGranted`. Kept apart from `imports` so a policy can tell calling from event use.
     pub events: &'a [String],
+    /// The components the mod declares in `meta.component` (names, sizes, layouts), in
+    /// declaration order. The policy may refuse by what it sees here; the grant's
+    /// `max_component_types` and `max_component_size` are checked after it answers.
+    pub components: &'a [ModComponent],
 }
 
 /// What a policy grants a whole package.
@@ -58,14 +65,30 @@ pub struct Grant {
     pub budget: u64,
     /// Most memory pages (64 KiB) of the module's instance.
     pub memory_pages: u32,
+    /// Most component types the mod may declare (default 16).
+    pub max_component_types: u32,
+    /// Largest size in bytes of one declared component (default 256).
+    pub max_component_size: u32,
 }
 
 impl Default for Grant {
-    /// No namespace, the engine's default budget and memory.
+    /// No namespace, the engine's default budget and memory, 16 component types of at most
+    /// 256 bytes.
     fn default() -> Self {
-        Grant { namespaces: Vec::new(), budget: DEFAULT_BUDGET, memory_pages: DEFAULT_MEMORY_PAGES }
+        Grant {
+            namespaces: Vec::new(),
+            budget: DEFAULT_BUDGET,
+            memory_pages: DEFAULT_MEMORY_PAGES,
+            max_component_types: DEFAULT_MAX_COMPONENT_TYPES,
+            max_component_size: DEFAULT_MAX_COMPONENT_SIZE,
+        }
     }
 }
+
+/// `Grant::default().max_component_types`.
+pub const DEFAULT_MAX_COMPONENT_TYPES: u32 = 16;
+/// `Grant::default().max_component_size`.
+pub const DEFAULT_MAX_COMPONENT_SIZE: u32 = 256;
 
 /// The game's decision on a package: a [`Grant`] or a refusal (the text becomes
 /// [`ModError::Denied`]). Any `FnMut(&ModRequest) -> Result<Grant, String>` is a policy.
@@ -98,6 +121,8 @@ pub struct PackageInfo {
     pub manifest: Manifest,
     pub grant: Grant,
     pub assets: BTreeMap<String, Vec<u8>>,
+    /// The components the mod declared (registered while it is loaded).
+    pub components: Vec<ModComponent>,
     /// blake3 of the content, as 64 hex characters: the `.efmod` bytes of a package, or a
     /// canonical walk of the files of a mod folder (sorted paths, each with its bytes). A
     /// folder whose source cannot list its files gets a hash that is never equal to another.
@@ -201,6 +226,10 @@ pub enum ModError {
     /// version (and its dependents) is loaded again, false when the restore failed too and
     /// the mod is left unloaded (the log has the details).
     ReloadFailed { id: String, cause: String, restored: bool },
+    /// A declared component is invalid (bad type, duplicate field, empty, name clash, too many
+    /// or too large for the grant), or a hot reload in place would change the declarations.
+    /// `component` is empty when the whole `meta.component` entry is at fault.
+    Component { id: String, component: String, reason: String },
 }
 
 impl fmt::Display for ModError {
@@ -230,6 +259,13 @@ impl fmt::Display for ModError {
                     f.write_str(" (contents changed; use reload_mod)")?;
                 }
                 Ok(())
+            }
+            ModError::Component { id, component, reason } => {
+                if component.is_empty() {
+                    write!(f, "mod `{id}`: components: {reason}")
+                } else {
+                    write!(f, "mod `{id}`: component `{component}`: {reason}")
+                }
             }
             ModError::ReloadFailed { id, cause, restored } => write!(
                 f,
@@ -353,11 +389,11 @@ impl Scripting {
     }
 
     /// Ask the policy, intersect, and check the imports.
-    fn negotiate(&mut self, manifest: &Manifest, module: &efevm::Module) -> Result<Negotiated, ModError> {
+    fn negotiate(&mut self, manifest: &Manifest, module: &efevm::Module, components: &[ModComponent]) -> Result<Negotiated, ModError> {
         let imports = imports_of(module);
         let events: Vec<String> =
             module.data().event_namespaces().into_iter().filter(|ns| *ns != manifest.id).map(str::to_string).collect();
-        let req = ModRequest { manifest, imports: &imports, events: &events };
+        let req = ModRequest { manifest, imports: &imports, events: &events, components };
         let mut grant = self.policy.grant(&req).map_err(|reason| ModError::Denied { id: manifest.id.clone(), reason })?;
         grant.namespaces = intersect(&grant.namespaces, &manifest.permissions.namespaces);
         let mut allowed = grant.namespaces.clone();
@@ -370,6 +406,20 @@ impl Scripting {
         }
         if !bad.is_empty() {
             return Err(ModError::NotGranted { id: manifest.id.clone(), namespaces: bad });
+        }
+        if components.len() as u64 > grant.max_component_types as u64 {
+            return Err(ModError::Component {
+                id: manifest.id.clone(),
+                component: String::new(),
+                reason: format!("{} component types declared, the grant allows {}", components.len(), grant.max_component_types),
+            });
+        }
+        if let Some(c) = components.iter().find(|c| c.size() > grant.max_component_size) {
+            return Err(ModError::Component {
+                id: manifest.id.clone(),
+                component: c.name.clone(),
+                reason: format!("{} bytes, the grant allows {}", c.size(), grant.max_component_size),
+            });
         }
         Ok(Negotiated { grant, allowed })
     }
@@ -473,16 +523,25 @@ impl Scripting {
     /// Steps 2 to 5 of the load sequence for a package that was read (or built from a folder).
     /// `init` has not run (it is pending; the engine runs it right after). A mod with the same
     /// id that is loaded is `AlreadyLoaded`.
-    pub(crate) fn load_package_item(&mut self, b: Built, res: &mut Resources) -> Result<ModuleId, ModError> {
+    pub(crate) fn load_package_item(
+        &mut self,
+        b: Built,
+        res: &mut Resources,
+        world: &mut World,
+        types: &mut TypeRegistry,
+    ) -> Result<ModuleId, ModError> {
         let Built { pkg, label, hash } = b;
         let Package { manifest, module, module_bytes, assets, ignored } = pkg;
         self.check_already(&manifest.id, &hash)?;
         self.check_game(&manifest)?;
         self.check_id_clash(&manifest.id)?;
         self.check_deps(&manifest)?;
-        let Negotiated { grant, allowed } = self.negotiate(&manifest, &module)?;
+        let components = parse_components(&manifest.id, manifest.meta.as_ref())?;
+        let Negotiated { grant, allowed } = self.negotiate(&manifest, &module, &components)?;
         let routes = self.route_assets(&manifest, &assets)?;
         let retained = Self::retain(&manifest, &module, module_bytes, &assets, &routes, ignored);
+        // Components first: the mod's `init` (run by the engine after this) may use them.
+        self.register_components(&manifest.id, &components, world, types)?;
         let opts = ModOptions {
             name: manifest.id.clone(),
             version: manifest.api_version,
@@ -491,9 +550,15 @@ impl Scripting {
             memory_pages: grant.memory_pages,
             doc: Some(manifest.namespace_doc()),
         };
-        let id = self.load_mod_decoded(module, opts)?;
+        let id = match self.load_mod_decoded(module, opts) {
+            Ok(id) => id,
+            Err(e) => {
+                self.undo_components(&manifest.id, world, types);
+                return Err(e.into());
+            }
+        };
         let assets = self.commit_assets(id, &manifest, assets, routes, res);
-        self.modules[id.0 as usize].package = Some(PackageInfo { manifest, grant, assets, hash, source: label, retained });
+        self.modules[id.0 as usize].package = Some(PackageInfo { manifest, grant, assets, components, hash, source: label, retained });
         Ok(id)
     }
 
@@ -524,7 +589,15 @@ impl Scripting {
                 }));
             }
         }
-        let Negotiated { grant, allowed } = self.negotiate(&manifest, &module)?;
+        let components = parse_components(&manifest.id, manifest.meta.as_ref())?;
+        if !same_declarations(&components, &self.declared_components(&name)) {
+            return Err(ModError::Component {
+                id: name,
+                component: String::new(),
+                reason: "the declared components changed; a hot reload in place cannot migrate them (use Engine::reload_mod, or the engine's reload_mods)".to_string(),
+            });
+        }
+        let Negotiated { grant, allowed } = self.negotiate(&manifest, &module, &components)?;
         let routes = self.route_assets(&manifest, &assets)?;
         let retained = Self::retain(&manifest, &module, module_bytes, &assets, &routes, ignored);
         let doc = manifest.namespace_doc();
@@ -543,7 +616,7 @@ impl Scripting {
                 let id = ModuleId(idx as u32);
                 self.release_assets(id, res);
                 let assets = self.commit_assets(id, &manifest, assets, routes, res);
-                self.modules[idx].package = Some(PackageInfo { manifest, grant, assets, hash, source: label, retained });
+                self.modules[idx].package = Some(PackageInfo { manifest, grant, assets, components, hash, source: label, retained });
                 Ok(())
             }
             Err(e) => {
@@ -711,7 +784,14 @@ impl Scripting {
                         reloaded.push(id);
                         self.rebuild_dependents(id, reloaded, res);
                     }
-                    Err(e) => self.log_reload(&name, &label, &Err(e)),
+                    Err(e) => {
+                        // Changed component declarations cannot be hot reloaded in place: ask
+                        // the engine for a full reload (the mod is replaced, with migration).
+                        if matches!(e, ModError::Component { .. }) {
+                            self.pending.reload_mods();
+                        }
+                        self.log_reload(&name, &label, &Err(e));
+                    }
                 }
             }
         }

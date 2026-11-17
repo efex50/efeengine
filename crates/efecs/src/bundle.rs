@@ -3,7 +3,7 @@ use core::any::{type_name, TypeId};
 use core::ptr::NonNull;
 use core::{fmt, mem};
 
-use crate::archetype::TypeInfo;
+use crate::archetype::{ComponentId, TypeInfo};
 use crate::Component;
 
 /// Checks if a query is satisfied by a bundle. This is primarily useful for unit tests.
@@ -46,12 +46,12 @@ pub unsafe trait DynamicBundle {
     /// assert!(!my_bundle.has::<usize>());
     /// ```
     fn has<T: Component>(&self) -> bool {
-        self.with_ids(|types| types.contains(&TypeId::of::<T>()))
+        self.with_ids(|types| types.contains(&ComponentId::of::<T>()))
     }
 
     /// Invoke a callback on the fields' type IDs, sorted by descending alignment then id
     #[doc(hidden)]
-    fn with_ids<T>(&self, f: impl FnOnce(&[TypeId]) -> T) -> T;
+    fn with_ids<T>(&self, f: impl FnOnce(&[ComponentId]) -> T) -> T;
 
     /// Obtain the fields' TypeInfos, sorted by descending alignment then id
     #[doc(hidden)]
@@ -70,7 +70,7 @@ pub unsafe trait DynamicBundle {
 #[allow(clippy::missing_safety_doc)]
 pub unsafe trait Bundle: DynamicBundle {
     #[doc(hidden)]
-    fn with_static_ids<T>(f: impl FnOnce(&[TypeId]) -> T) -> T;
+    fn with_static_ids<T>(f: impl FnOnce(&[ComponentId]) -> T) -> T;
 
     /// Obtain the fields' TypeInfos, sorted by descending alignment then id
     #[doc(hidden)]
@@ -129,6 +129,13 @@ impl MissingComponent {
     }
 }
 
+impl MissingComponent {
+    /// An error for a component identified only by a [`ComponentId`](crate::ComponentId)
+    pub(crate) fn unnamed() -> Self {
+        Self("<component identified by id>")
+    }
+}
+
 impl fmt::Display for MissingComponent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "missing {} component", self.0)
@@ -148,7 +155,7 @@ macro_rules! tuple_impl {
                 Some(TypeId::of::<Self>())
             }
 
-            fn with_ids<T>(&self, f: impl FnOnce(&[TypeId]) -> T) -> T {
+            fn with_ids<T>(&self, f: impl FnOnce(&[ComponentId]) -> T) -> T {
                 Self::with_static_ids(f)
             }
 
@@ -189,11 +196,11 @@ macro_rules! tuple_impl {
 
         #[allow(clippy::zero_repeat_side_effects)]
         unsafe impl<$($name: Component),*> Bundle for ($($name,)*) {
-            fn with_static_ids<T>(f: impl FnOnce(&[TypeId]) -> T) -> T {
+            fn with_static_ids<T>(f: impl FnOnce(&[ComponentId]) -> T) -> T {
                 const N: usize = count!($($name),*);
-                let mut xs: [(usize, TypeId); N] = [$((mem::align_of::<$name>(), TypeId::of::<$name>())),*];
+                let mut xs: [(usize, ComponentId); N] = [$((mem::align_of::<$name>(), ComponentId::of::<$name>())),*];
                 xs.sort_unstable_by(|x, y| x.0.cmp(&y.0).reverse().then(x.1.cmp(&y.1)));
-                let mut ids = [TypeId::of::<()>(); N];
+                let mut ids = [ComponentId::of::<()>(); N];
                 for (slot, &(_, id)) in ids.iter_mut().zip(xs.iter()) {
                     *slot = id;
                 }

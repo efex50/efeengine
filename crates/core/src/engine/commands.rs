@@ -126,6 +126,13 @@ impl Commands {
         self.ops.push(WorldOp::Spawn(e, EntityBuilder::new()));
     }
 
+    /// Like [`spawn_reserved`](Self::spawn_reserved), with `bundle` inserted when applied.
+    pub fn spawn_reserved_with(&mut self, e: Entity, bundle: impl DynamicBundle) {
+        let mut b = EntityBuilder::new();
+        b.add_bundle(bundle);
+        self.ops.push(WorldOp::Spawn(e, b));
+    }
+
     pub fn despawn(&mut self, e: Entity) {
         self.ops.push(WorldOp::Despawn(e));
     }

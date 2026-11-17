@@ -1,4 +1,3 @@
-use core::any::TypeId;
 use core::mem;
 use core::ops::Range;
 use core::ptr::{self, NonNull};
@@ -6,7 +5,7 @@ use core::ptr::{self, NonNull};
 use crate::alloc::alloc::{alloc, dealloc, Layout};
 use crate::alloc::boxed::Box;
 use crate::alloc::vec::Vec;
-use crate::archetype::TypeInfo;
+use crate::archetype::{ComponentId, TypeInfo};
 use crate::{align, DynamicBundle};
 use crate::{Bundle, Entity};
 use crate::{Component, World};
@@ -30,7 +29,7 @@ pub struct CommandBuffer {
     layout: Layout,
     cursor: usize,
     components: Vec<ComponentInfo>,
-    ids: Vec<TypeId>,
+    ids: Vec<ComponentId>,
 }
 
 impl CommandBuffer {
@@ -261,7 +260,7 @@ struct RecordedEntity<'a> {
 }
 
 unsafe impl DynamicBundle for RecordedEntity<'_> {
-    fn with_ids<T>(&self, f: impl FnOnce(&[TypeId]) -> T) -> T {
+    fn with_ids<T>(&self, f: impl FnOnce(&[ComponentId]) -> T) -> T {
         f(&self.cmd.ids)
     }
 

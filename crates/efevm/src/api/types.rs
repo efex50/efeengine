@@ -397,7 +397,7 @@ impl StructDesc {
     /// field names, `align` a power of two dividing `size`, every field inside `size`,
     /// aligned to its primitive size, `count >= 1`, and no two fields overlapping.
     pub fn validate(&self) -> Result<(), String> {
-        if !is_ident(&self.name) {
+        if !is_type_name(&self.name) {
             return Err(format!("struct name `{}` is not an identifier", self.name));
         }
         if self.align == 0 || !self.align.is_power_of_two() {
@@ -444,6 +444,16 @@ pub fn is_ident(s: &str) -> bool {
         _ => return false,
     }
     c.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+/// `true` for a struct name: an identifier, or the form of a mod-defined component,
+/// `mod:<mod>/<Name>` (both parts identifiers). The second form cannot be used in a `&Name`
+/// parameter; only the engine registers it.
+pub fn is_type_name(s: &str) -> bool {
+    match s.strip_prefix("mod:").and_then(|r| r.split_once('/')) {
+        Some((m, n)) => is_ident(m) && is_ident(n),
+        None => is_ident(s),
+    }
 }
 
 /// `true` for one or more identifiers joined by single dots (`std`, `engine.world`).

@@ -254,6 +254,8 @@ impl Engine {
         engine.register_component::<Visibility>().expect("built-in components register");
         engine.register_component::<Parent>().expect("built-in components register");
         engine.register_component::<GlobalTransform>().expect("built-in components register");
+        engine.state.world.track_changes::<Transform>();
+        engine.state.world.track_changes::<GlobalTransform>();
         Ok(engine)
     }
 
@@ -443,8 +445,9 @@ impl Engine {
     /// [`unload_module_and_dependents`](Self::unload_module_and_dependents).
     pub fn unload_module(&mut self, id: ModuleId) -> Result<(), ScriptError> {
         let name = self.state.scripting.unload(id)?;
-        self.state.scripting.release_module(id, &mut self.state.resources);
-        self.state.types.remove_owner(&name);
+        let EngineState { scripting, resources, types, world, .. } = &mut self.state;
+        scripting.release_module(id, resources);
+        scripting.release_module_state(id, &name, world, types, false);
         Ok(())
     }
 
@@ -452,9 +455,10 @@ impl Engine {
     /// (the latest loaded first). Returns the unloaded modules in that order, `id` last.
     pub fn unload_module_and_dependents(&mut self, id: ModuleId) -> Result<Vec<ModuleId>, ScriptError> {
         let removed = self.state.scripting.unload_cascade(id)?;
+        let EngineState { scripting, resources, types, world, .. } = &mut self.state;
         for (id, name) in &removed {
-            self.state.scripting.release_module(*id, &mut self.state.resources);
-            self.state.types.remove_owner(name);
+            scripting.release_module(*id, resources);
+            scripting.release_module_state(*id, name, world, types, false);
         }
         Ok(removed.into_iter().map(|(id, _)| id).collect())
     }
@@ -502,12 +506,14 @@ impl Engine {
             LoadInput::Efvm { name, bytes } => Loaded::Module(self.state.scripting.load_module(name, bytes)?),
             LoadInput::Package { label, bytes } => {
                 let b = self.state.scripting.read_built(label, bytes)?;
-                Loaded::Package(self.state.scripting.load_package_item(b, &mut self.state.resources)?)
+                let EngineState { scripting, resources, types, world, .. } = &mut self.state;
+                Loaded::Package(scripting.load_package_item(b, resources, world, types)?)
             }
             #[cfg(feature = "efa")]
             LoadInput::Folder { label, files, assets } => {
                 let b = self.state.scripting.build_folder(label, files, assets, None)?;
-                Loaded::Package(self.state.scripting.load_package_item(b, &mut self.state.resources)?)
+                let EngineState { scripting, resources, types, world, .. } = &mut self.state;
+                Loaded::Package(scripting.load_package_item(b, resources, world, types)?)
             }
         };
         self.run_script_inits();
@@ -594,7 +600,7 @@ impl Engine {
     /// Module ids change (an id is never reused) and `init` runs again for every module that
     /// was loaded again.
     pub fn reload_mod_input(&mut self, input: LoadInput<'_>) -> Result<Reloaded, LoadError> {
-        let EngineState { scripting, resources, types, .. } = &mut self.state;
+        let EngineState { scripting, resources, types, world, .. } = &mut self.state;
         let reloaded = match input {
             #[cfg(feature = "efa")]
             LoadInput::Efa { name, .. } => return Err(LoadError::NotAMod(name.to_string())),
@@ -602,14 +608,14 @@ impl Engine {
             LoadInput::Package { label, bytes } => {
                 let b = scripting.read_built(label, bytes)?;
                 let (manifest, hash) = (b.pkg.manifest.clone(), b.hash.clone());
-                scripting.reload_one(&manifest, &hash, label, Box::new(move |_| Ok((b, None))), resources, types)
+                scripting.reload_one(&manifest, &hash, label, Box::new(move |_| Ok((b, None))), resources, types, world)
             }
             #[cfg(feature = "efa")]
             LoadInput::Folder { label, files, assets } => {
                 let (manifest, hash) = Scripting::peek_folder(files)?;
                 let (l, h) = (label.to_string(), hash.clone());
                 let build = Box::new(move |s: &mut Scripting| s.build_folder(&l, files, assets, Some(h)).map(|b| (b, None)));
-                scripting.reload_one(&manifest, &hash, label, build, resources, types)
+                scripting.reload_one(&manifest, &hash, label, build, resources, types, world)
             }
         };
         // Also after a failure: a restored version runs its `init` again.
@@ -627,8 +633,8 @@ impl Engine {
     /// other contents it fails with [`ModError::AlreadyLoaded`] (use
     /// [`reload_mods`](Self::reload_mods)).
     pub fn load_mods(&mut self) -> LoadReport {
-        let EngineState { scripting, resources, types, .. } = &mut self.state;
-        let report = scripting.load_mods(resources, types, false);
+        let EngineState { scripting, resources, types, world, .. } = &mut self.state;
+        let report = scripting.load_mods(resources, types, world, false);
         self.run_script_inits();
         report
     }
@@ -639,8 +645,8 @@ impl Engine {
     /// that mods can change in step), unchanged mods are `skipped`, and mods that came from a
     /// source that no longer lists them are unloaded (`unloaded`, dependents included).
     pub fn reload_mods(&mut self) -> LoadReport {
-        let EngineState { scripting, resources, types, .. } = &mut self.state;
-        let report = scripting.load_mods(resources, types, true);
+        let EngineState { scripting, resources, types, world, .. } = &mut self.state;
+        let report = scripting.load_mods(resources, types, world, true);
         self.run_script_inits();
         report
     }
@@ -649,8 +655,8 @@ impl Engine {
     /// their dependencies, calling the asset handlers' `unload`. Game modules stay loaded; a
     /// mod that a game module still depends on stays too and is listed in `failed`.
     pub fn unload_mods(&mut self) -> UnloadReport {
-        let EngineState { scripting, resources, types, .. } = &mut self.state;
-        scripting.unload_mods(resources, types)
+        let EngineState { scripting, resources, types, world, .. } = &mut self.state;
+        scripting.unload_mods(resources, types, world)
     }
 
     /// Hot reload the package `id` from `path` (see `Scripting::watch_package`).
@@ -768,6 +774,18 @@ impl Engine {
 
     pub fn world(&self) -> &hecs::World {
         &self.state.world
+    }
+
+    /// The world's current change tick (see `docs/THREADING.md`, "Change ticks").
+    pub fn change_tick(&self) -> hecs::Tick {
+        self.state.world.change_tick()
+    }
+
+    /// Record add/change ticks for component `T` (forwards to the world). Change filters on an
+    /// untracked component match everything. `Transform` and `GlobalTransform` are tracked.
+    pub fn track_changes<T: hecs::Component>(&mut self) -> &mut Self {
+        self.state.world.track_changes::<T>();
+        self
     }
 
     pub fn world_mut(&mut self) -> &mut hecs::World {
@@ -927,6 +945,9 @@ impl Engine {
 
     /// Apply what systems queued: world changes (in order), then control requests.
     fn apply_commands(&mut self) {
+        // One tick for everything applied: newer than every system of the stage, so each of
+        // them (the one that queued it included) sees it as added/changed on its next run.
+        self.state.world.increment_change_tick();
         self.commands.apply(&mut self.state.world, &self.state.types);
         let cmds: Vec<EngineCommand> = self.commands.drain().collect();
         for c in cmds {
@@ -1118,6 +1139,7 @@ impl Engine {
             }
         }
 
+        self.state.world.maybe_check_change_ticks();
         self.render_frame_to_surface();
     }
 

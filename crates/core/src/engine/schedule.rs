@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use hecs::{DynamicBundle, Entity, World};
+use hecs::{Component, DynamicBundle, Entity, Query, QueryBorrow, Tick, World};
 
 use crate::engine::{
     WindowState,
@@ -60,6 +60,8 @@ pub struct Ctx<'a> {
     events: &'a mut EventRegistry,
     /// The engine's executor (the script system runs its lanes through it).
     pub(crate) exec: &'a Executor,
+    last_run: Tick,
+    this_run: Tick,
 }
 
 impl<'a> Ctx<'a> {
@@ -76,7 +78,67 @@ impl<'a> Ctx<'a> {
         events: &'a mut EventRegistry,
         exec: &'a Executor,
     ) -> Self {
-        Self { world, types, resources, time, input, gamepads, window, commands, scripting, events, exec }
+        Self {
+            world,
+            types,
+            resources,
+            time,
+            input,
+            gamepads,
+            window,
+            commands,
+            scripting,
+            events,
+            exec,
+            last_run: Tick::new(0),
+            this_run: Tick::new(0),
+        }
+    }
+
+    /// The change tick this system last ran at (`Tick::new(0)` before its first run, so the
+    /// first run sees everything as added and changed). Only meaningful inside a system run
+    /// by the schedule.
+    pub fn last_run(&self) -> Tick {
+        self.last_run
+    }
+
+    /// The change tick of this run: what `&mut T` / `Mut<T>` writes through [`Ctx::query`]
+    /// stamp, and what the world's [`change_tick`](World::change_tick) equals while the system
+    /// runs.
+    pub fn this_run(&self) -> Tick {
+        self.this_run
+    }
+
+    /// Query the world with this system's change ticks, so `Changed<T>` / `Added<T>` filters
+    /// compare against its last run and `&mut T` stamps its tick:
+    ///
+    /// ```ignore
+    /// for (e, t, _) in ctx.query::<(Entity, &Transform, Changed<Transform>)>().iter() { /* ... */ }
+    /// ```
+    ///
+    /// Only components registered with `track_changes` report changes (`Transform` and
+    /// `GlobalTransform` do); filters on an untracked component match everything.
+    pub fn query<Q: Query>(&self) -> QueryBorrow<'_, Q> {
+        self.world.query::<Q>().with_ticks(self.last_run, self.this_run)
+    }
+
+    /// Whether component `T` of `e` was added or changed since this system's last run.
+    /// `true` for a component that does not track changes; `false` if `e` or `T` is missing.
+    pub fn changed<T: Component>(&self, e: Entity) -> bool {
+        self.world.is_changed::<T>(e, self.last_run).unwrap_or(false)
+    }
+
+    /// The bytes of the mod-defined component `type_id` (an id from the [`TypeRegistry`], e.g.
+    /// `types.by_name("mod:coins/Health")`) of `e`. Holds a shared column borrow until dropped.
+    /// Use [`TypeRegistry::view`] for field access by name.
+    pub fn dyn_get(&self, e: Entity, type_id: u32) -> Result<hecs::DynRef<'_>, crate::engine::types::CompError> {
+        self.types.component(type_id)?.dyn_ref(self.world, e)
+    }
+
+    /// Like [`dyn_get`](Self::dyn_get), for writing; stamps the component changed (if it tracks
+    /// changes) with the world's current tick.
+    pub fn dyn_get_mut(&mut self, e: Entity, type_id: u32) -> Result<hecs::DynRefMut<'_>, crate::engine::types::CompError> {
+        self.types.component(type_id)?.dyn_ref_mut(self.world, e)
     }
 
     /// Events of type `T` readable this frame (empty if none were ever sent).
@@ -139,6 +201,8 @@ struct Sys {
     name: &'static str,
     /// Plugin that was being built when the system was added.
     owner: Option<Arc<str>>,
+    /// Change tick of this system's previous run (`Tick::new(0)` before the first).
+    last_run: Tick,
 }
 
 impl Sys {
@@ -285,7 +349,7 @@ impl Schedule {
         let seq = self.next_seq;
         self.next_seq += 1;
         let st = &mut self.stages[stage.index()];
-        st.entries.push(Sys { kind, order: order::USER, seq, name, owner: self.owner.clone() });
+        st.entries.push(Sys { kind, order: order::USER, seq, name, owner: self.owner.clone(), last_run: Tick::new(0) });
         st.dirty = true;
         let index = st.entries.len() - 1;
         SystemEntry { stage: st, index }
@@ -349,11 +413,19 @@ impl Schedule {
             let members = &mut entries[b.start..b.end];
             if b.exclusive {
                 let Entry::Exclusive(f) = &mut members[0].kind else { unreachable!("exclusive batch holds an exclusive system") };
+                let this_run = cx.world.increment_change_tick();
+                cx.last_run = members[0].last_run;
+                cx.this_run = this_run;
                 f(cx);
+                members[0].last_run = this_run;
                 continue;
             }
             // Parallel batch: every member gets its own ParCtx over the shared world.
             let mut outs: Vec<ParOutput> = (0..members.len()).map(|_| ParOutput::default()).collect();
+            // Ticks are assigned in sorted member order, before anything runs, so they never
+            // depend on completion order (the 1 vs N thread determinism contract).
+            let ticks: Vec<(Tick, Tick)> =
+                members.iter().map(|m| (m.last_run, cx.world.increment_change_tick())).collect();
             {
                 let world: &World = &*cx.world;
                 let resources: &Resources = &*cx.resources;
@@ -362,11 +434,12 @@ impl Schedule {
                 let mut tasks: Vec<_> = members
                     .iter_mut()
                     .zip(outs.iter_mut())
-                    .map(|(entry, out)| {
+                    .zip(ticks.iter().copied())
+                    .map(|((entry, out), (last_run, this_run))| {
                         let Entry::Par { access, f } = &mut entry.kind else { unreachable!("parallel batch holds par systems") };
                         let access: &Access = access;
                         move || {
-                            let pcx = ParCtx::new(world, types, time, input, gamepads, window, resources, events, access, exec);
+                            let pcx = ParCtx::new(world, types, time, input, gamepads, window, resources, events, access, exec, last_run, this_run);
                             f(&pcx);
                             *out = pcx.into_output();
                         }
@@ -375,6 +448,9 @@ impl Schedule {
                 let mut refs: Vec<&mut (dyn FnMut() + Send)> =
                     tasks.iter_mut().map(|t| t as &mut (dyn FnMut() + Send)).collect();
                 exec.run(&mut refs);
+            }
+            for (m, (_, this_run)) in members.iter_mut().zip(&ticks) {
+                m.last_run = *this_run;
             }
             // Merge in sorted (execution) order, not completion order.
             for out in &mut outs {

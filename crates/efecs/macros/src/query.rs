@@ -184,10 +184,10 @@ fn derive_struct(
                 }
 
                 #[allow(unused_variables)]
-                fn execute(archetype: &::hecs::Archetype, state: Self::State) -> Self {
+                fn execute(archetype: &::hecs::Archetype, state: Self::State, ticks: ::hecs::QueryTicks) -> Self {
                     Self {
                         #(
-                            #fields: #fetches::execute(archetype, state.#fields),
+                            #fields: #fetches::execute(archetype, state.#fields, ticks),
                         )*
                     }
                 }
@@ -198,10 +198,18 @@ fn derive_struct(
                 }
 
                 #[allow(unused_variables, unused_mut)]
-                fn for_each_borrow(mut f: impl ::core::ops::FnMut(::core::any::TypeId, bool)) {
+                fn for_each_borrow(mut f: impl ::core::ops::FnMut(::hecs::ComponentId, bool)) {
                     #(
                         <#fetches as ::hecs::Fetch>::for_each_borrow(&mut f);
                     )*
+                }
+
+                const HAS_FILTER: bool = false #(|| <#fetches as ::hecs::Fetch>::HAS_FILTER)*;
+
+                #[allow(unused_variables)]
+                #[inline(always)]
+                unsafe fn filter(&self, n: usize) -> bool {
+                    true #(&& <#fetches as ::hecs::Fetch>::filter(&self.#fields, n))*
                 }
             }
         };
@@ -224,6 +232,8 @@ fn derive_enum(
     let mut fetch_execute_variants = TokenStream2::new();
     let mut fetch_release_variants = TokenStream2::new();
     let mut fetch_for_each_borrow = TokenStream2::new();
+    let mut fetch_has_filter: Vec<TokenStream2> = Vec::new();
+    let mut fetch_filter_variants = TokenStream2::new();
 
     for variant in &data.variants {
         let (fields, queries) = match variant.fields {
@@ -346,7 +356,7 @@ fn derive_enum(
             Self::State::#ident { #(#named_fields),* } => {
                 return Self::#ident {
                     #(
-                        #named_fields: #fetches::execute(archetype, #named_fields),
+                        #named_fields: #fetches::execute(archetype, #named_fields, ticks),
                     )*
                 };
             },
@@ -365,6 +375,16 @@ fn derive_enum(
                 <#fetches as ::hecs::Fetch>::for_each_borrow(&mut f);
             )*
         });
+
+        fetch_has_filter.push(quote! {
+            false #(|| <#fetches as ::hecs::Fetch>::HAS_FILTER)*
+        });
+
+        fetch_filter_variants.extend(quote! {
+            Self::#ident { #(#named_fields),* } => {
+                true #(&& <#fetches as ::hecs::Fetch>::filter(#named_fields, n))*
+            },
+        });
     }
 
     let dangling_constructor = if let Some(dangling_constructor) = dangling_constructor {
@@ -375,6 +395,9 @@ fn derive_enum(
         });
         query_get_variants.extend(quote! {
             Self::Fetch::__HecsDanglingFetch__ => panic!("Called get() with dangling fetch"),
+        });
+        fetch_filter_variants.extend(quote! {
+            Self::__HecsDanglingFetch__ => true,
         });
         quote! {
             Self::__HecsDanglingFetch__
@@ -443,7 +466,7 @@ fn derive_enum(
                 }
 
                 #[allow(unused_variables)]
-                fn execute(archetype: &::hecs::Archetype, state: Self::State) -> Self {
+                fn execute(archetype: &::hecs::Archetype, state: Self::State, ticks: ::hecs::QueryTicks) -> Self {
                     match state {
                         #fetch_execute_variants
                     }
@@ -457,8 +480,18 @@ fn derive_enum(
                 }
 
                 #[allow(unused_variables, unused_mut)]
-                fn for_each_borrow(mut f: impl ::core::ops::FnMut(::core::any::TypeId, bool)) {
+                fn for_each_borrow(mut f: impl ::core::ops::FnMut(::hecs::ComponentId, bool)) {
                     #fetch_for_each_borrow
+                }
+
+                const HAS_FILTER: bool = false #(|| #fetch_has_filter)*;
+
+                #[allow(unused_variables, unreachable_code)]
+                #[inline(always)]
+                unsafe fn filter(&self, n: usize) -> bool {
+                    match self {
+                        #fetch_filter_variants
+                    }
                 }
             }
         };

@@ -34,7 +34,7 @@ pub mod thread{
     pub use gloo_timers::callback;
 }
 pub use efeengine_macros::{main, ScriptType};
-pub use hecs::{Entity, World};
+pub use hecs::{Entity, World, Tick, Mut, Changed, Added, ComponentTicks};
 /// The GPU API the `Renderer` trait is written against (re-exported so versions always match).
 pub use wgpu;
 pub use bytemuck;

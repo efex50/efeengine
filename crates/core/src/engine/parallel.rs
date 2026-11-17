@@ -9,7 +9,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use hecs::{Component, ComponentError, ComponentRef, Entity, Query, QueryBorrow, QueryOne, World};
+use hecs::{Component, ComponentError, ComponentId, ComponentRef, Entity, Query, QueryBorrow, QueryOne, Tick, World};
 
 use crate::engine::{
     WindowState,
@@ -336,6 +336,8 @@ pub struct ParCtx<'a> {
     commands: RefCell<ParCommands>,
     sends: RefCell<Vec<SendFn>>,
     exec: &'a Executor,
+    last_run: Tick,
+    this_run: Tick,
 }
 
 impl<'a> ParCtx<'a> {
@@ -351,6 +353,8 @@ impl<'a> ParCtx<'a> {
         events: &'a EventRegistry,
         access: &'a Access,
         exec: &'a Executor,
+        last_run: Tick,
+        this_run: Tick,
     ) -> Self {
         Self {
             world,
@@ -365,7 +369,21 @@ impl<'a> ParCtx<'a> {
             commands: RefCell::new(ParCommands::new()),
             sends: RefCell::new(Vec::new()),
             exec,
+            last_run,
+            this_run,
         }
+    }
+
+    /// The change tick this system last ran at (`Tick::new(0)` before its first run): what
+    /// `Changed<T>` / `Added<T>` filters of its queries compare against.
+    pub fn last_run(&self) -> Tick {
+        self.last_run
+    }
+
+    /// The change tick of this run: what `&mut T` and `Mut<T>` writes stamp. Ticks are assigned
+    /// to the members of a batch in sorted order, so it never depends on completion order.
+    pub fn this_run(&self) -> Tick {
+        self.this_run
     }
 
     pub(crate) fn into_output(self) -> ParOutput {
@@ -373,7 +391,9 @@ impl<'a> ParCtx<'a> {
     }
 
     #[cfg(debug_assertions)]
-    fn check_component(&self, id: TypeId, unique: bool) {
+    fn check_component(&self, id: ComponentId, unique: bool) {
+        // Dynamic components cannot appear in typed queries; only Rust components are declared.
+        let ComponentId::Rust(id) = id else { return };
         let a = self.access;
         let ok = if unique { a.write.contains(&id) } else { a.read.contains(&id) };
         if !ok {
@@ -394,19 +414,19 @@ impl<'a> ParCtx<'a> {
     /// Query the world. Debug builds check the query against the declared [`Access`].
     pub fn query<Q: Query>(&self) -> QueryBorrow<'_, Q> {
         self.check_query::<Q>();
-        self.world.query::<Q>()
+        self.world.query::<Q>().with_ticks(self.last_run, self.this_run)
     }
 
     /// Query one entity (checked like [`query`](Self::query)).
     pub fn query_one<Q: Query>(&self, e: Entity) -> QueryOne<'_, Q> {
         self.check_query::<Q>();
-        self.world.query_one::<Q>(e)
+        self.world.query_one::<Q>(e).with_ticks(self.last_run, self.this_run)
     }
 
     /// Get `&T` or `&mut T` of one entity (checked like [`query`](Self::query)).
     pub fn get<'b, T: ComponentRef<'b> + Query>(&'b self, e: Entity) -> Result<T::Ref, ComponentError> {
         self.check_query::<T>();
-        self.world.get::<T>(e)
+        self.world.get_at::<T>(e, self.this_run)
     }
 
     /// The raw world. Nothing is checked against the access declaration; hecs still checks
@@ -509,6 +529,17 @@ impl<'a> ParCtx<'a> {
         let mut refs: Vec<&mut (dyn FnMut() + Send)> =
             tasks.iter_mut().map(|t| t as &mut (dyn FnMut() + Send)).collect();
         self.exec.run(&mut refs);
+    }
+}
+
+// Mod-defined components in parallel systems (kept apart from the rest of `ParCtx`).
+impl<'a> ParCtx<'a> {
+    /// The bytes of the mod-defined component `type_id` of `e`. `Access` cannot declare a
+    /// mod-defined component, so a parallel system may only read them, through this shared
+    /// borrow of the column; hecs checks the borrow at run time and panics if another system
+    /// of the batch holds it uniquely (it never does: only exclusive systems write them).
+    pub fn dyn_get(&self, e: Entity, type_id: u32) -> Result<hecs::DynRef<'_>, crate::engine::types::CompError> {
+        self.types.component(type_id)?.dyn_ref(self.world, e)
     }
 }
 

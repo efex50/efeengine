@@ -22,7 +22,7 @@ fn status_of(e: &CompError) -> i32 {
     match e {
         CompError::NoEntity => STALE,
         CompError::Missing(_) => MISSING,
-        CompError::UnknownId(_) | CompError::NotComponent(_) => UNKNOWN_ID,
+        CompError::UnknownId(_) | CompError::NotComponent(_) | CompError::Unregistered(_) | CompError::NotDynamic(_) | CompError::NoField { .. } => UNKNOWN_ID,
         CompError::WrongSize { .. } => WRONG_SIZE,
     }
 }
@@ -173,6 +173,37 @@ fn world_api(r: &mut HostRegistry<ScriptHost>) -> Result<(), RegistryError> {
             };
             res.set_bool(0, has)?;
             Ok(HostOk::Continue)
+        },
+    )?;
+    r.register(
+        HostFn::new(NS, "changed")
+            .doc("1 if component `component` of `entity` was added or changed after tick `since` (from `engine.world.tick`), 0 if not. A component whose type does not track changes always reports 1. Buffered writes are applied after the stage, so a module's own writes show up as changed on the next frame. Negative status: -1 stale entity, -2 component missing, -3 unknown component id.")
+            .param("entity", T::Entity)
+            .param("component", T::I32)
+            .param("since", T::I32)
+            .result("status", T::I32),
+        |c, a, res| {
+            let (bits, id, since) = (a.entity(0)?, a.i32(1)? as u32, a.i32(2)? as u32);
+            let h = c.host();
+            let Some(e) = alive(h.world(), bits) else { return status(res, -STALE) };
+            let Ok(entry) = h.types().component(id) else { return status(res, -UNKNOWN_ID) };
+            let Some(cid) = entry.component_id(h.world()) else { return status(res, -UNKNOWN_ID) };
+            let world = h.world();
+            match world.component_ticks(e, cid) {
+                Ok(None) => status(res, 1),
+                Ok(Some(t)) => status(res, t.changed.is_newer_than(hecs::Tick::new(since), world.change_tick()) as i32),
+                Err(hecs::ComponentError::NoSuchEntity) => status(res, -STALE),
+                Err(_) => status(res, -MISSING),
+            }
+        },
+    )?;
+    r.register(
+        HostFn::new(NS, "tick")
+            .doc("The current change tick (the script system's tick this frame). Store it and pass it to `changed` next frame.")
+            .result("tick", T::I32),
+        |c, _a, res| {
+            let t = c.host().world().change_tick().get() as i32;
+            status(res, t)
         },
     )?;
     r.register(

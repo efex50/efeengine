@@ -249,14 +249,14 @@ fn load_package_gives_package_info_and_the_grant_and_runs_init() {
     let (mut e, _) = engine();
     e.set_mod_policy(|r: &ModRequest<'_>| {
         assert_eq!((r.manifest.id.as_str(), r.imports), ("logmod", ["engine.log".to_string()].as_slice()));
-        Ok(Grant { namespaces: vec!["engine.log".into()], budget: 500, memory_pages: 4 })
+        Ok(Grant { namespaces: vec!["engine.log".into()], budget: 500, memory_pages: 4, ..Grant::default() })
     });
     let mut m = manifest("logmod", "1.2.3");
     m.permissions.namespaces = vec!["engine.log".into()];
     let id = e.load_package(&pack(&m, &logger(&e, "hi from init"), &[("x.txt", b"X")])).unwrap();
     let info = e.package(id).unwrap();
     assert_eq!(info.manifest, m);
-    assert_eq!(info.grant, Grant { namespaces: vec!["engine.log".into()], budget: 500, memory_pages: 4 });
+    assert_eq!(info.grant, Grant { namespaces: vec!["engine.log".into()], budget: 500, memory_pages: 4, ..Grant::default() });
     assert_eq!(info.assets.len(), 1);
     let mi = e.scripting().modules().into_iter().find(|x| x.id == id).unwrap();
     assert_eq!((mi.name.as_str(), mi.budget), ("logmod", 500));

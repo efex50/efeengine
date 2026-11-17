@@ -31,7 +31,7 @@ impl<'a> TakenEntity<'a> {
 }
 
 unsafe impl DynamicBundle for TakenEntity<'_> {
-    fn with_ids<T>(&self, f: impl FnOnce(&[core::any::TypeId]) -> T) -> T {
+    fn with_ids<T>(&self, f: impl FnOnce(&[crate::ComponentId]) -> T) -> T {
         f(self.archetype.type_ids())
     }
 
@@ -45,7 +45,7 @@ unsafe impl DynamicBundle for TakenEntity<'_> {
         for &ty in self.archetype.types() {
             let ptr = self
                 .archetype
-                .get_dynamic(ty.id(), ty.layout().size(), self.index)
+                .get_ptr(ty.id(), ty.layout().size(), self.index)
                 .unwrap();
             f(ptr.as_ptr(), ty)
         }

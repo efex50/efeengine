@@ -11,8 +11,9 @@ use crate::alloc::boxed::Box;
 #[cfg(feature = "std")]
 use hashbrown::hash_map;
 
-use crate::archetype::Archetype;
+use crate::archetype::{Archetype, ComponentId};
 use crate::entities::EntityMeta;
+use crate::tick::{ComponentTicks, QueryTicks, Tick};
 #[cfg(feature = "std")]
 use crate::TypeIdMap;
 use crate::{Component, Entity, World};
@@ -64,12 +65,33 @@ pub unsafe trait Fetch: Clone + Sized + 'static {
     /// Look up state for `archetype` if it should be traversed
     fn prepare(archetype: &Archetype) -> Option<Self::State>;
     /// Construct a `Fetch` for `archetype` based on the associated state
-    fn execute(archetype: &Archetype, state: Self::State) -> Self;
+    ///
+    /// `ticks` is the window that change filters are evaluated in, and the tick that mutable
+    /// access to tracked components is stamped with.
+    fn execute(archetype: &Archetype, state: Self::State, ticks: QueryTicks) -> Self;
     /// Release dynamic borrows acquired by `borrow`
     fn release(archetype: &Archetype, state: Self::State);
 
+    /// Whether [`filter`](Self::filter) can ever return `false`
+    ///
+    /// Lets iteration skip the per-row check entirely for queries without change filters.
+    const HAS_FILTER: bool = false;
+
+    /// Whether the entity at row `n` of the archetype this was executed for is accepted
+    ///
+    /// Only meaningful, and only called, when `HAS_FILTER` is true.
+    ///
+    /// # Safety
+    /// `n` must be in bounds for the archetype, and the dynamic borrows from `borrow` (or
+    /// exclusive access) must be in effect.
+    #[inline(always)]
+    unsafe fn filter(&self, n: usize) -> bool {
+        let _ = n;
+        true
+    }
+
     /// Invoke `f` for every component type that may be borrowed and whether the borrow is unique
-    fn for_each_borrow(f: impl FnMut(TypeId, bool));
+    fn for_each_borrow(f: impl FnMut(ComponentId, bool));
 }
 
 /// Type of access a [`Query`] may have to an [`Archetype`]
@@ -118,13 +140,13 @@ unsafe impl Fetch for FetchEntity {
         Some(())
     }
 
-    fn execute(archetype: &Archetype, (): Self::State) -> Self {
+    fn execute(archetype: &Archetype, (): Self::State, _: QueryTicks) -> Self {
         Self(archetype.entities())
     }
 
     fn release(_: &Archetype, (): Self::State) {}
 
-    fn for_each_borrow(_: impl FnMut(TypeId, bool)) {}
+    fn for_each_borrow(_: impl FnMut(ComponentId, bool)) {}
 }
 
 impl<T: Component> Query for &'_ T {
@@ -163,15 +185,15 @@ unsafe impl<T: Component> Fetch for FetchRead<T> {
     fn prepare(archetype: &Archetype) -> Option<Self::State> {
         archetype.get_state::<T>()
     }
-    fn execute(archetype: &Archetype, state: Self::State) -> Self {
+    fn execute(archetype: &Archetype, state: Self::State, _: QueryTicks) -> Self {
         unsafe { Self(archetype.get_base(state)) }
     }
     fn release(archetype: &Archetype, state: Self::State) {
         archetype.release::<T>(state);
     }
 
-    fn for_each_borrow(mut f: impl FnMut(TypeId, bool)) {
-        f(TypeId::of::<T>(), false);
+    fn for_each_borrow(mut f: impl FnMut(ComponentId, bool)) {
+        f(ComponentId::of::<T>(), false);
     }
 }
 
@@ -188,18 +210,33 @@ impl<T: Component> Query for &'_ mut T {
     type Fetch = FetchWrite<T>;
 
     unsafe fn get<'q>(_: &[EntityMeta], fetch: &FetchWrite<T>, n: usize) -> &'q mut T {
-        &mut *fetch.0.as_ptr().add(n)
+        if let Some(ticks) = fetch.ticks {
+            // SAFETY: the caller guarantees `n` is in bounds and that the column is uniquely
+            // borrowed (see `Query::get`), which covers its tick array; slots `0..len` of a
+            // tracked column are initialized.
+            (*ticks.as_ptr().add(n)).changed = fetch.this_run;
+        }
+        &mut *fetch.base.as_ptr().add(n)
     }
 }
 
 #[doc(hidden)]
-pub struct FetchWrite<T>(NonNull<T>);
+pub struct FetchWrite<T> {
+    base: NonNull<T>,
+    /// Tick array of the column, if tracked
+    ticks: Option<NonNull<ComponentTicks>>,
+    this_run: Tick,
+}
 
 unsafe impl<T: Component> Fetch for FetchWrite<T> {
     type State = usize;
 
     fn dangling() -> Self {
-        Self(NonNull::dangling())
+        Self {
+            base: NonNull::dangling(),
+            ticks: None,
+            this_run: Tick::new(0),
+        }
     }
 
     fn access(archetype: &Archetype) -> Option<Access> {
@@ -217,22 +254,324 @@ unsafe impl<T: Component> Fetch for FetchWrite<T> {
     fn prepare(archetype: &Archetype) -> Option<Self::State> {
         Some(archetype.get_state::<T>()?)
     }
-    fn execute(archetype: &Archetype, state: Self::State) -> Self {
-        unsafe { Self(archetype.get_base::<T>(state)) }
+    fn execute(archetype: &Archetype, state: Self::State, ticks: QueryTicks) -> Self {
+        unsafe {
+            Self {
+                base: archetype.get_base::<T>(state),
+                ticks: archetype.get_ticks_base(state),
+                this_run: ticks.this_run,
+            }
+        }
     }
     fn release(archetype: &Archetype, state: Self::State) {
         archetype.release_mut::<T>(state);
     }
 
-    fn for_each_borrow(mut f: impl FnMut(TypeId, bool)) {
-        f(TypeId::of::<T>(), true);
+    fn for_each_borrow(mut f: impl FnMut(ComponentId, bool)) {
+        f(ComponentId::of::<T>(), true);
     }
 }
 
 impl<T> Clone for FetchWrite<T> {
     #[inline]
     fn clone(&self) -> Self {
-        Self(self.0)
+        Self {
+            base: self.base,
+            ticks: self.ticks,
+            this_run: self.this_run,
+        }
+    }
+}
+
+/// Mutable access to a component that stamps its change tick only when actually written through
+///
+/// `Mut<T>` is a query item: `world.query::<(Entity, Mut<Pos>)>()`. Unlike `&mut T`, which stamps
+/// the component as changed as soon as it is fetched, `Mut<T>` stamps only when it is mutably
+/// dereferenced (or [`set_changed`](Self::set_changed) /
+/// [`into_inner`](Self::into_inner) is called). It also exposes whether the component was added
+/// or changed since the query's `last_run`.
+///
+/// If the component's column is not tracked (see
+/// [`World::track_changes`](crate::World::track_changes)), nothing is stamped and
+/// [`is_added`](Self::is_added)/[`is_changed`](Self::is_changed) return `true`.
+pub struct Mut<'a, T> {
+    value: &'a mut T,
+    ticks: Option<&'a mut ComponentTicks>,
+    last_run: Tick,
+    this_run: Tick,
+}
+
+impl<'a, T> Mut<'a, T> {
+    /// Whether the component was added since the query's `last_run`
+    pub fn is_added(&self) -> bool {
+        self.ticks
+            .as_ref()
+            .map_or(true, |t| t.added.is_newer_than(self.last_run, self.this_run))
+    }
+
+    /// Whether the component was changed (or added) since the query's `last_run`
+    pub fn is_changed(&self) -> bool {
+        self.ticks
+            .as_ref()
+            .map_or(true, |t| t.changed.is_newer_than(self.last_run, self.this_run))
+    }
+
+    /// Mark the component as changed at the query's `this_run` without dereferencing it mutably
+    pub fn set_changed(&mut self) {
+        if let Some(t) = self.ticks.as_mut() {
+            t.changed = self.this_run;
+        }
+    }
+
+    /// Access the component mutably without marking it as changed
+    pub fn bypass_change_detection(&mut self) -> &mut T {
+        self.value
+    }
+
+    /// Consume this, marking the component changed and returning the plain reference
+    pub fn into_inner(mut self) -> &'a mut T {
+        self.set_changed();
+        self.value
+    }
+}
+
+impl<T> core::ops::Deref for Mut<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<T> core::ops::DerefMut for Mut<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        self.set_changed();
+        self.value
+    }
+}
+
+impl<T: core::fmt::Debug> core::fmt::Debug for Mut<'_, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+impl<T: Component> Query for Mut<'_, T> {
+    type Item<'q> = Mut<'q, T>;
+
+    type Fetch = FetchMut<T>;
+
+    unsafe fn get<'q>(_: &[EntityMeta], fetch: &FetchMut<T>, n: usize) -> Mut<'q, T> {
+        Mut {
+            value: &mut *fetch.base.as_ptr().add(n),
+            // SAFETY: the caller guarantees `n` is in bounds and the column is uniquely borrowed,
+            // which covers the tick array; slots `0..len` of a tracked column are initialized.
+            ticks: fetch.ticks.map(|t| &mut *t.as_ptr().add(n)),
+            last_run: fetch.last_run,
+            this_run: fetch.this_run,
+        }
+    }
+}
+
+#[doc(hidden)]
+pub struct FetchMut<T> {
+    base: NonNull<T>,
+    ticks: Option<NonNull<ComponentTicks>>,
+    last_run: Tick,
+    this_run: Tick,
+}
+
+unsafe impl<T: Component> Fetch for FetchMut<T> {
+    type State = usize;
+
+    fn dangling() -> Self {
+        Self {
+            base: NonNull::dangling(),
+            ticks: None,
+            last_run: Tick::new(0),
+            this_run: Tick::new(0),
+        }
+    }
+
+    fn access(archetype: &Archetype) -> Option<Access> {
+        if archetype.has::<T>() {
+            Some(Access::Write)
+        } else {
+            None
+        }
+    }
+
+    fn borrow(archetype: &Archetype, state: Self::State) {
+        archetype.borrow_mut::<T>(state);
+    }
+    fn prepare(archetype: &Archetype) -> Option<Self::State> {
+        archetype.get_state::<T>()
+    }
+    fn execute(archetype: &Archetype, state: Self::State, ticks: QueryTicks) -> Self {
+        unsafe {
+            Self {
+                base: archetype.get_base::<T>(state),
+                ticks: archetype.get_ticks_base(state),
+                last_run: ticks.last_run,
+                this_run: ticks.this_run,
+            }
+        }
+    }
+    fn release(archetype: &Archetype, state: Self::State) {
+        archetype.release_mut::<T>(state);
+    }
+
+    fn for_each_borrow(mut f: impl FnMut(ComponentId, bool)) {
+        f(ComponentId::of::<T>(), true);
+    }
+}
+
+impl<T> Clone for FetchMut<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base,
+            ticks: self.ticks,
+            last_run: self.last_run,
+            this_run: self.this_run,
+        }
+    }
+}
+
+/// Filter matching entities whose `T` component was changed (or added) since the query's
+/// `last_run`
+///
+/// Like [`With`], requires `T` to be present; the query item is `()`. Takes a shared borrow of the
+/// `T` column (it reads the column's change ticks), so it cannot be combined with `&mut T` or
+/// `Mut<T>` in one query; use [`Mut::is_changed`] for that.
+///
+/// If `T` is not tracked (see [`World::track_changes`](crate::World::track_changes)), this matches
+/// every entity that has a `T`. Not applied inside `Option`, `Satisfies`, or the right-hand side
+/// of `With`/`Without`; inside [`Or`], a side that is present contributes its filter.
+///
+/// Queries with change filters do not know their length cheaply: `len()`/`size_hint()` on their
+/// iterators count the matching rows.
+///
+/// ```
+/// # use hecs::*;
+/// let mut world = World::new();
+/// world.track_changes::<i32>();
+/// let a = world.spawn((1,));
+/// world.increment_change_tick();
+/// let b = world.spawn((2,));
+/// let since = world.change_tick();
+/// let seen: Vec<_> = world
+///     .query::<(Entity, Added<i32>)>()
+///     .with_ticks(Tick::new(1), since)
+///     .iter()
+///     .map(|(e, ())| e)
+///     .collect();
+/// assert_eq!(seen, [b]);
+/// # let _ = a;
+/// ```
+pub struct Changed<T>(PhantomData<fn() -> T>);
+
+/// Filter matching entities whose `T` component was added since the query's `last_run`
+///
+/// See [`Changed`].
+pub struct Added<T>(PhantomData<fn() -> T>);
+
+impl<T: Component> Query for Changed<T> {
+    type Item<'q> = ();
+    type Fetch = FetchTickFilter<T, false>;
+
+    unsafe fn get<'q>(_: &[EntityMeta], _: &Self::Fetch, _: usize) -> Self::Item<'q> {}
+}
+
+unsafe impl<T> QueryShared for Changed<T> {}
+
+impl<T: Component> Query for Added<T> {
+    type Item<'q> = ();
+    type Fetch = FetchTickFilter<T, true>;
+
+    unsafe fn get<'q>(_: &[EntityMeta], _: &Self::Fetch, _: usize) -> Self::Item<'q> {}
+}
+
+unsafe impl<T> QueryShared for Added<T> {}
+
+#[doc(hidden)]
+pub struct FetchTickFilter<T, const ADDED: bool> {
+    ticks: Option<NonNull<ComponentTicks>>,
+    last_run: Tick,
+    this_run: Tick,
+    _marker: PhantomData<fn() -> T>,
+}
+
+unsafe impl<T: Component, const ADDED: bool> Fetch for FetchTickFilter<T, ADDED> {
+    type State = usize;
+
+    const HAS_FILTER: bool = true;
+
+    fn dangling() -> Self {
+        Self {
+            ticks: None,
+            last_run: Tick::new(0),
+            this_run: Tick::new(0),
+            _marker: PhantomData,
+        }
+    }
+
+    fn access(archetype: &Archetype) -> Option<Access> {
+        if archetype.has::<T>() {
+            Some(Access::Read)
+        } else {
+            None
+        }
+    }
+
+    fn borrow(archetype: &Archetype, state: Self::State) {
+        archetype.borrow::<T>(state);
+    }
+    fn prepare(archetype: &Archetype) -> Option<Self::State> {
+        archetype.get_state::<T>()
+    }
+    fn execute(archetype: &Archetype, state: Self::State, ticks: QueryTicks) -> Self {
+        Self {
+            ticks: archetype.get_ticks_base(state),
+            last_run: ticks.last_run,
+            this_run: ticks.this_run,
+            _marker: PhantomData,
+        }
+    }
+    fn release(archetype: &Archetype, state: Self::State) {
+        archetype.release::<T>(state);
+    }
+
+    fn for_each_borrow(mut f: impl FnMut(ComponentId, bool)) {
+        f(ComponentId::of::<T>(), false);
+    }
+
+    #[inline(always)]
+    unsafe fn filter(&self, n: usize) -> bool {
+        match self.ticks {
+            // Untracked columns carry no history: everything counts as new.
+            None => true,
+            Some(ticks) => {
+                // SAFETY: `n < len`, so the slot is initialized; the shared borrow taken by
+                // `borrow` excludes writers of the tick array.
+                let t = &*ticks.as_ptr().add(n);
+                let tick = if ADDED { t.added } else { t.changed };
+                tick.is_newer_than(self.last_run, self.this_run)
+            }
+        }
+    }
+}
+
+impl<T, const ADDED: bool> Clone for FetchTickFilter<T, ADDED> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            ticks: self.ticks,
+            last_run: self.last_run,
+            this_run: self.this_run,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -275,8 +614,8 @@ unsafe impl<T: Fetch> Fetch for TryFetch<T> {
     fn prepare(archetype: &Archetype) -> Option<Self::State> {
         Some(T::prepare(archetype))
     }
-    fn execute(archetype: &Archetype, state: Self::State) -> Self {
-        Self(state.map(|state| T::execute(archetype, state)))
+    fn execute(archetype: &Archetype, state: Self::State, ticks: QueryTicks) -> Self {
+        Self(state.map(|state| T::execute(archetype, state, ticks)))
     }
     fn release(archetype: &Archetype, state: Self::State) {
         if let Some(state) = state {
@@ -284,7 +623,7 @@ unsafe impl<T: Fetch> Fetch for TryFetch<T> {
         }
     }
 
-    fn for_each_borrow(f: impl FnMut(TypeId, bool)) {
+    fn for_each_borrow(f: impl FnMut(ComponentId, bool)) {
         T::for_each_borrow(f);
     }
 }
@@ -419,17 +758,31 @@ unsafe impl<L: Fetch, R: Fetch> Fetch for FetchOr<L, R> {
         Or::new(L::prepare(archetype), R::prepare(archetype))
     }
 
-    fn execute(archetype: &Archetype, state: Self::State) -> Self {
-        Self(state.map(|l| L::execute(archetype, l), |r| R::execute(archetype, r)))
+    fn execute(archetype: &Archetype, state: Self::State, ticks: QueryTicks) -> Self {
+        Self(state.map(
+            |l| L::execute(archetype, l, ticks),
+            |r| R::execute(archetype, r, ticks),
+        ))
     }
 
     fn release(archetype: &Archetype, state: Self::State) {
         state.map(|l| L::release(archetype, l), |r| R::release(archetype, r));
     }
 
-    fn for_each_borrow(mut f: impl FnMut(TypeId, bool)) {
+    fn for_each_borrow(mut f: impl FnMut(ComponentId, bool)) {
         L::for_each_borrow(&mut f);
         R::for_each_borrow(&mut f);
+    }
+
+    const HAS_FILTER: bool = L::HAS_FILTER || R::HAS_FILTER;
+
+    #[inline(always)]
+    unsafe fn filter(&self, n: usize) -> bool {
+        match &self.0 {
+            Or::Left(l) => l.filter(n),
+            Or::Right(r) => r.filter(n),
+            Or::Both(l, r) => l.filter(n) || r.filter(n),
+        }
     }
 }
 
@@ -491,15 +844,22 @@ unsafe impl<F: Fetch, G: Fetch> Fetch for FetchWithout<F, G> {
         }
         F::prepare(archetype)
     }
-    fn execute(archetype: &Archetype, state: Self::State) -> Self {
-        Self(F::execute(archetype, state), PhantomData)
+    fn execute(archetype: &Archetype, state: Self::State, ticks: QueryTicks) -> Self {
+        Self(F::execute(archetype, state, ticks), PhantomData)
     }
     fn release(archetype: &Archetype, state: Self::State) {
         F::release(archetype, state)
     }
 
-    fn for_each_borrow(f: impl FnMut(TypeId, bool)) {
+    fn for_each_borrow(f: impl FnMut(ComponentId, bool)) {
         F::for_each_borrow(f);
+    }
+
+    const HAS_FILTER: bool = F::HAS_FILTER;
+
+    #[inline(always)]
+    unsafe fn filter(&self, n: usize) -> bool {
+        self.0.filter(n)
     }
 }
 
@@ -568,15 +928,22 @@ unsafe impl<F: Fetch, G: Fetch> Fetch for FetchWith<F, G> {
         G::access(archetype)?;
         F::prepare(archetype)
     }
-    fn execute(archetype: &Archetype, state: Self::State) -> Self {
-        Self(F::execute(archetype, state), PhantomData)
+    fn execute(archetype: &Archetype, state: Self::State, ticks: QueryTicks) -> Self {
+        Self(F::execute(archetype, state, ticks), PhantomData)
     }
     fn release(archetype: &Archetype, state: Self::State) {
         F::release(archetype, state)
     }
 
-    fn for_each_borrow(f: impl FnMut(TypeId, bool)) {
+    fn for_each_borrow(f: impl FnMut(ComponentId, bool)) {
         F::for_each_borrow(f);
+    }
+
+    const HAS_FILTER: bool = F::HAS_FILTER;
+
+    #[inline(always)]
+    unsafe fn filter(&self, n: usize) -> bool {
+        self.0.filter(n)
     }
 }
 
@@ -638,12 +1005,12 @@ unsafe impl<F: Fetch> Fetch for FetchSatisfies<F> {
     fn prepare(archetype: &Archetype) -> Option<Self::State> {
         Some(F::prepare(archetype).is_some())
     }
-    fn execute(_archetype: &Archetype, state: Self::State) -> Self {
+    fn execute(_archetype: &Archetype, state: Self::State, _: QueryTicks) -> Self {
         Self(state, PhantomData)
     }
     fn release(_archetype: &Archetype, _state: Self::State) {}
 
-    fn for_each_borrow(_: impl FnMut(TypeId, bool)) {}
+    fn for_each_borrow(_: impl FnMut(ComponentId, bool)) {}
 }
 
 impl<T> Clone for FetchSatisfies<T> {
@@ -659,18 +1026,32 @@ impl<T> Clone for FetchSatisfies<T> {
 pub struct QueryBorrow<'w, Q: Query> {
     world: &'w World,
     cache: Option<CachedQuery<Q::Fetch>>,
+    ticks: QueryTicks,
 }
 
 impl<'w, Q: Query> QueryBorrow<'w, Q> {
     pub(crate) fn new(world: &'w World) -> Self {
-        Self { world, cache: None }
+        Self {
+            world,
+            cache: None,
+            ticks: world.default_ticks(),
+        }
+    }
+
+    /// Set the tick window for change filters (`Changed`, `Added`, `Mut::is_changed`) and the
+    /// tick stamped by mutable access
+    ///
+    /// Defaults to `(Tick::new(0), world.change_tick())`, i.e. everything counts as new.
+    pub fn with_ticks(mut self, last_run: Tick, this_run: Tick) -> Self {
+        self.ticks = QueryTicks { last_run, this_run };
+        self
     }
 
     /// Execute the query
     // The lifetime narrowing here is required for soundness.
     pub fn iter(&mut self) -> QueryIter<'_, Q> {
         let cache = self.borrow().clone();
-        unsafe { QueryIter::new(self.world, cache) }
+        unsafe { QueryIter::new(self.world, cache, self.ticks) }
     }
 
     /// Provide random access to the query results
@@ -681,6 +1062,7 @@ impl<'w, Q: Query> QueryBorrow<'w, Q> {
                 self.world.entities_meta(),
                 self.world.archetypes_inner(),
                 cache,
+                self.ticks,
             )
         }
     }
@@ -698,6 +1080,7 @@ impl<'w, Q: Query> QueryBorrow<'w, Q> {
                 self.world.archetypes_inner(),
                 batch_size,
                 cache,
+                self.ticks,
             )
         }
     }
@@ -763,6 +1146,7 @@ impl<'w, Q: Query> QueryBorrow<'w, Q> {
         QueryBorrow {
             world: self.world,
             cache: None,
+            ticks: self.ticks,
         }
     }
 }
@@ -800,10 +1184,10 @@ impl<'q, Q: Query> QueryIter<'q, Q> {
     /// `'q` must be sufficient to guarantee that `Q` cannot violate borrow safety, either with
     /// dynamic borrow checks or by representing exclusive access to the `World`. `cache` must be
     /// from `world`.
-    unsafe fn new(world: &'q World, cache: CachedQuery<Q::Fetch>) -> Self {
+    unsafe fn new(world: &'q World, cache: CachedQuery<Q::Fetch>, ticks: QueryTicks) -> Self {
         Self {
             world,
-            archetypes: ArchetypeIter::new(world, cache),
+            archetypes: ArchetypeIter::new(world, cache, ticks),
             iter: ChunkIter::empty(),
         }
     }
@@ -872,16 +1256,27 @@ impl<Q: Query> ExactSizeIterator for QueryIter<'_, Q> {
 /// A query builder that's convertible directly into an iterator
 pub struct QueryMut<'q, Q: Query> {
     world: &'q mut World,
+    ticks: QueryTicks,
     _marker: PhantomData<fn() -> Q>,
 }
 
 impl<'q, Q: Query> QueryMut<'q, Q> {
     pub(crate) fn new(world: &'q mut World) -> Self {
         assert_borrow::<Q>();
+        let ticks = world.default_ticks();
         Self {
             world,
+            ticks,
             _marker: PhantomData,
         }
+    }
+
+    /// Set the tick window for change filters and the tick stamped by mutable access
+    ///
+    /// See [`QueryBorrow::with_ticks`].
+    pub fn with_ticks(mut self, last_run: Tick, this_run: Tick) -> Self {
+        self.ticks = QueryTicks { last_run, this_run };
+        self
     }
 
     /// Provide random access to the query results
@@ -892,6 +1287,7 @@ impl<'q, Q: Query> QueryMut<'q, Q> {
                 self.world.entities_meta(),
                 self.world.archetypes_inner(),
                 cache,
+                self.ticks,
             )
         }
     }
@@ -914,6 +1310,7 @@ impl<'q, Q: Query> QueryMut<'q, Q> {
     fn transform<R: Query>(self) -> QueryMut<'q, R> {
         QueryMut {
             world: self.world,
+            ticks: self.ticks,
             _marker: PhantomData,
         }
     }
@@ -929,6 +1326,7 @@ impl<'q, Q: Query> QueryMut<'q, Q> {
                 self.world.archetypes_inner(),
                 batch_size,
                 cache,
+                self.ticks,
             )
         }
     }
@@ -941,7 +1339,7 @@ impl<'q, Q: Query> IntoIterator for QueryMut<'q, Q> {
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
         let cache = CachedQuery::get(self.world);
-        unsafe { QueryIter::new(self.world, cache) }
+        unsafe { QueryIter::new(self.world, cache, self.ticks) }
     }
 }
 
@@ -989,12 +1387,18 @@ impl<Q: Query> ChunkIter<Q> {
 
     #[inline]
     unsafe fn next<'a>(&mut self, meta: &[EntityMeta]) -> Option<Q::Item<'a>> {
-        if self.position == self.len {
-            return None;
+        loop {
+            if self.position == self.len {
+                return None;
+            }
+            let n = self.position;
+            self.position += 1;
+            // `HAS_FILTER` is a constant, so plain queries compile to the unfiltered loop.
+            if Q::Fetch::HAS_FILTER && !self.fetch.filter(n) {
+                continue;
+            }
+            return Some(Q::get(meta, &self.fetch, n));
         }
-        let item = Q::get(meta, &self.fetch, self.position);
-        self.position += 1;
-        Some(item)
     }
 
     #[inline]
@@ -1007,6 +1411,9 @@ impl<Q: Query> ChunkIter<Q> {
         self.position = self.len;
 
         for i in start..self.len {
+            if Q::Fetch::HAS_FILTER && !unsafe { self.fetch.filter(i) } {
+                continue;
+            }
             let components = unsafe { Q::get(meta, &self.fetch, i) };
 
             init = f(init, components);
@@ -1015,8 +1422,16 @@ impl<Q: Query> ChunkIter<Q> {
         init
     }
 
+    /// Number of items this will still yield
     fn remaining(&self) -> usize {
-        self.len - self.position
+        if Q::Fetch::HAS_FILTER {
+            // SAFETY: rows `position..len` are in bounds; the iterator's borrows are in effect
+            (self.position..self.len)
+                .filter(|&n| unsafe { self.fetch.filter(n) })
+                .count()
+        } else {
+            self.len - self.position
+        }
     }
 }
 
@@ -1029,6 +1444,7 @@ pub struct BatchedIter<'q, Q: Query> {
     batch_size: u32,
     cache: CachedQuery<Q::Fetch>,
     batch: u32,
+    ticks: QueryTicks,
 }
 
 impl<'q, Q: Query> BatchedIter<'q, Q> {
@@ -1041,6 +1457,7 @@ impl<'q, Q: Query> BatchedIter<'q, Q> {
         archetypes: &'q [Archetype],
         batch_size: u32,
         cache: CachedQuery<Q::Fetch>,
+        ticks: QueryTicks,
     ) -> Self {
         Self {
             _marker: PhantomData,
@@ -1050,6 +1467,7 @@ impl<'q, Q: Query> BatchedIter<'q, Q> {
             batch_size,
             cache,
             batch: 0,
+            ticks,
         }
     }
 }
@@ -1078,7 +1496,7 @@ impl<'q, Q: Query> Iterator for BatchedIter<'q, Q> {
                 self.batch = 0;
                 continue;
             }
-            let fetch = Q::Fetch::execute(archetype, state);
+            let fetch = Q::Fetch::execute(archetype, state, self.ticks);
             self.batch += 1;
             let mut state = ChunkIter::new(archetype, fetch);
             state.position = offset as usize;
@@ -1147,9 +1565,9 @@ macro_rules! tuple_impl {
             }
             #[allow(unused_variables, non_snake_case, clippy::unused_unit)]
             #[inline(always)]
-            fn execute(archetype: &Archetype, state: Self::State) -> Self {
+            fn execute(archetype: &Archetype, state: Self::State, ticks: QueryTicks) -> Self {
                 let ($($name,)*) = state;
-                ($($name::execute(archetype, $name),)*)
+                ($($name::execute(archetype, $name, ticks),)*)
             }
             #[allow(unused_variables, non_snake_case, clippy::unused_unit)]
             fn release(archetype: &Archetype, state: Self::State) {
@@ -1158,8 +1576,17 @@ macro_rules! tuple_impl {
             }
 
             #[allow(unused_variables, unused_mut, clippy::unused_unit)]
-            fn for_each_borrow(mut f: impl FnMut(TypeId, bool)) {
+            fn for_each_borrow(mut f: impl FnMut(ComponentId, bool)) {
                 $($name::for_each_borrow(&mut f);)*
+            }
+
+            const HAS_FILTER: bool = false $(|| $name::HAS_FILTER)*;
+
+            #[allow(unused_variables, non_snake_case)]
+            #[inline(always)]
+            unsafe fn filter(&self, n: usize) -> bool {
+                let ($($name,)*) = self;
+                true $(&& $name.filter(n))*
             }
         }
 
@@ -1239,7 +1666,13 @@ impl<Q: Query> PreparedQuery<Q> {
         let meta = world.entities_meta();
         let archetypes = world.archetypes_inner();
 
-        PreparedQueryBorrow::new(meta, archetypes, &self.state, &mut self.fetch)
+        PreparedQueryBorrow::new(
+            meta,
+            archetypes,
+            &self.state,
+            &mut self.fetch,
+            world.default_ticks(),
+        )
     }
 
     /// Query a uniquely borrowed world
@@ -1255,7 +1688,7 @@ impl<Q: Query> PreparedQuery<Q> {
         let meta = world.entities_meta();
         let archetypes = world.archetypes_inner();
 
-        unsafe { PreparedQueryIter::new(meta, archetypes, self.state.iter()) }
+        unsafe { PreparedQueryIter::new(meta, archetypes, self.state.iter(), world.default_ticks()) }
     }
 
     /// Provide random access to query results for a uniquely borrow world
@@ -1269,7 +1702,15 @@ impl<Q: Query> PreparedQuery<Q> {
         let meta = world.entities_meta();
         let archetypes = world.archetypes_inner();
 
-        unsafe { PreparedView::new(meta, archetypes, self.state.iter(), &mut self.fetch) }
+        unsafe {
+            PreparedView::new(
+                meta,
+                archetypes,
+                self.state.iter(),
+                &mut self.fetch,
+                world.default_ticks(),
+            )
+        }
     }
 }
 
@@ -1279,6 +1720,7 @@ pub struct PreparedQueryBorrow<'q, Q: Query> {
     archetypes: &'q [Archetype],
     state: &'q [(usize, <Q::Fetch as Fetch>::State)],
     fetch: &'q mut [Option<Q::Fetch>],
+    ticks: QueryTicks,
 }
 
 impl<'q, Q: Query> PreparedQueryBorrow<'q, Q> {
@@ -1287,6 +1729,7 @@ impl<'q, Q: Query> PreparedQueryBorrow<'q, Q> {
         archetypes: &'q [Archetype],
         state: &'q [(usize, <Q::Fetch as Fetch>::State)],
         fetch: &'q mut [Option<Q::Fetch>],
+        ticks: QueryTicks,
     ) -> Self {
         for (idx, state) in state {
             if archetypes[*idx].is_empty() {
@@ -1300,18 +1743,37 @@ impl<'q, Q: Query> PreparedQueryBorrow<'q, Q> {
             archetypes,
             state,
             fetch,
+            ticks,
         }
+    }
+
+    /// Set the tick window for change filters and the tick stamped by mutable access
+    ///
+    /// See [`QueryBorrow::with_ticks`].
+    pub fn with_ticks(mut self, last_run: Tick, this_run: Tick) -> Self {
+        self.ticks = QueryTicks { last_run, this_run };
+        self
     }
 
     /// Execute the prepared query
     // The lifetime narrowing here is required for soundness.
     pub fn iter(&mut self) -> PreparedQueryIter<'_, Q> {
-        unsafe { PreparedQueryIter::new(self.meta, self.archetypes, self.state.iter()) }
+        unsafe {
+            PreparedQueryIter::new(self.meta, self.archetypes, self.state.iter(), self.ticks)
+        }
     }
 
     /// Provides random access to the results of the prepared query
     pub fn view(&mut self) -> PreparedView<'_, Q> {
-        unsafe { PreparedView::new(self.meta, self.archetypes, self.state.iter(), self.fetch) }
+        unsafe {
+            PreparedView::new(
+                self.meta,
+                self.archetypes,
+                self.state.iter(),
+                self.fetch,
+                self.ticks,
+            )
+        }
     }
 }
 
@@ -1332,6 +1794,7 @@ pub struct PreparedQueryIter<'q, Q: Query> {
     archetypes: &'q [Archetype],
     state: SliceIter<'q, (usize, <Q::Fetch as Fetch>::State)>,
     iter: ChunkIter<Q>,
+    ticks: QueryTicks,
 }
 
 impl<'q, Q: Query> PreparedQueryIter<'q, Q> {
@@ -1343,12 +1806,14 @@ impl<'q, Q: Query> PreparedQueryIter<'q, Q> {
         meta: &'q [EntityMeta],
         archetypes: &'q [Archetype],
         state: SliceIter<'q, (usize, <Q::Fetch as Fetch>::State)>,
+        ticks: QueryTicks,
     ) -> Self {
         Self {
             meta,
             archetypes,
             state,
             iter: ChunkIter::empty(),
+            ticks,
         }
     }
 }
@@ -1366,7 +1831,10 @@ impl<'q, Q: Query> Iterator for PreparedQueryIter<'q, Q> {
                 None => {
                     let (idx, state) = self.state.next()?;
                     let archetype = &self.archetypes[*idx];
-                    self.iter = ChunkIter::new(archetype, Q::Fetch::execute(archetype, *state));
+                    self.iter = ChunkIter::new(
+                        archetype,
+                        Q::Fetch::execute(archetype, *state, self.ticks),
+                    );
                     continue;
                 }
                 Some(components) => {
@@ -1391,7 +1859,10 @@ impl<'q, Q: Query> Iterator for PreparedQueryIter<'q, Q> {
 
             if let Some((idx, state)) = self.state.next() {
                 let archetype = &self.archetypes[*idx];
-                self.iter = ChunkIter::new(archetype, Q::Fetch::execute(archetype, *state));
+                self.iter = ChunkIter::new(
+                        archetype,
+                        Q::Fetch::execute(archetype, *state, self.ticks),
+                    );
             } else {
                 break init;
             }
@@ -1403,7 +1874,14 @@ impl<Q: Query> ExactSizeIterator for PreparedQueryIter<'_, Q> {
     fn len(&self) -> usize {
         self.state
             .clone()
-            .map(|(idx, _)| self.archetypes[*idx].len() as usize)
+            .map(|(idx, state)| {
+                let archetype = &self.archetypes[*idx];
+                if Q::Fetch::HAS_FILTER {
+                    count_filtered::<Q>(archetype, *state, self.ticks)
+                } else {
+                    archetype.len() as usize
+                }
+            })
             .sum::<usize>()
             + self.iter.remaining()
     }
@@ -1432,11 +1910,12 @@ impl<'q, Q: Query> View<'q, Q> {
         meta: &'q [EntityMeta],
         archetypes: &'q [Archetype],
         cache: CachedQuery<Q::Fetch>,
+        ticks: QueryTicks,
     ) -> Self {
         Self {
             meta,
             archetypes,
-            fetch: cache.fetch_all(archetypes),
+            fetch: cache.fetch_all(archetypes, ticks),
         }
     }
 
@@ -1456,7 +1935,9 @@ impl<'q, Q: Query> View<'q, Q> {
 
         self.fetch[meta.location.archetype as usize]
             .as_ref()
-            .map(|fetch| unsafe { Q::get(self.meta, fetch, meta.location.index as usize) })
+            .and_then(|fetch| unsafe {
+                get_filtered::<Q>(self.meta, fetch, meta.location.index as usize)
+            })
     }
 
     /// Retrieve the query results corresponding to `entity`
@@ -1474,7 +1955,12 @@ impl<'q, Q: Query> View<'q, Q> {
         if meta.generation != entity.generation {
             return false;
         }
-        self.fetch[meta.location.archetype as usize].is_some()
+        self.fetch[meta.location.archetype as usize]
+            .as_ref()
+            .is_some_and(|fetch| {
+                // SAFETY: the entity's location is in bounds for its archetype
+                !Q::Fetch::HAS_FILTER || unsafe { fetch.filter(meta.location.index as usize) }
+            })
     }
 
     /// Like `get_mut`, but allows simultaneous access to multiple entities
@@ -1490,7 +1976,7 @@ impl<'q, Q: Query> View<'q, Q> {
 
         self.fetch[meta.location.archetype as usize]
             .as_ref()
-            .map(|fetch| Q::get(self.meta, fetch, meta.location.index as usize))
+            .and_then(|fetch| get_filtered::<Q>(self.meta, fetch, meta.location.index as usize))
     }
 
     /// Like `get_mut`, but allows checked simultaneous access to multiple entities
@@ -1614,12 +2100,13 @@ impl<'q, Q: Query> PreparedView<'q, Q> {
         archetypes: &'q [Archetype],
         state: SliceIter<'q, (usize, <Q::Fetch as Fetch>::State)>,
         fetch: &'q mut [Option<Q::Fetch>],
+        ticks: QueryTicks,
     ) -> Self {
         fetch.iter_mut().for_each(|fetch| *fetch = None);
 
         for (idx, state) in state {
             let archetype = &archetypes[*idx];
-            fetch[*idx] = Some(Q::Fetch::execute(archetype, *state));
+            fetch[*idx] = Some(Q::Fetch::execute(archetype, *state, ticks));
         }
 
         Self {
@@ -1645,7 +2132,9 @@ impl<'q, Q: Query> PreparedView<'q, Q> {
 
         self.fetch[meta.location.archetype as usize]
             .as_ref()
-            .map(|fetch| unsafe { Q::get(self.meta, fetch, meta.location.index as usize) })
+            .and_then(|fetch| unsafe {
+                get_filtered::<Q>(self.meta, fetch, meta.location.index as usize)
+            })
     }
 
     /// Retrieve the query results corresponding to `entity`
@@ -1663,7 +2152,12 @@ impl<'q, Q: Query> PreparedView<'q, Q> {
         if meta.generation != entity.generation {
             return false;
         }
-        self.fetch[meta.location.archetype as usize].is_some()
+        self.fetch[meta.location.archetype as usize]
+            .as_ref()
+            .is_some_and(|fetch| {
+                // SAFETY: the entity's location is in bounds for its archetype
+                !Q::Fetch::HAS_FILTER || unsafe { fetch.filter(meta.location.index as usize) }
+            })
     }
 
     /// Like `get_mut`, but allows simultaneous access to multiple entities
@@ -1679,7 +2173,7 @@ impl<'q, Q: Query> PreparedView<'q, Q> {
 
         self.fetch[meta.location.archetype as usize]
             .as_ref()
-            .map(|fetch| Q::get(self.meta, fetch, meta.location.index as usize))
+            .and_then(|fetch| get_filtered::<Q>(self.meta, fetch, meta.location.index as usize))
     }
 
     /// Like `get_mut`, but allows checked simultaneous access to multiple entities
@@ -1753,10 +2247,21 @@ impl<'w, Q: Query> ViewBorrow<'w, Q> {
                 world.entities_meta(),
                 world.archetypes_inner(),
                 cache.clone(),
+                world.default_ticks(),
             )
         };
 
         Self { view, cache }
+    }
+
+    /// Set the tick window for change filters and the tick stamped by mutable access
+    ///
+    /// See [`QueryBorrow::with_ticks`].
+    pub fn with_ticks(mut self, last_run: Tick, this_run: Tick) -> Self {
+        self.view.fetch = self
+            .cache
+            .fetch_all(self.view.archetypes, QueryTicks { last_run, this_run });
+        self
     }
 
     /// Retrieve the query results corresponding to `entity`
@@ -2076,13 +2581,13 @@ impl<F: Fetch> CachedQuery<F> {
         }
     }
 
-    fn fetch_all(&self, archetypes: &[Archetype]) -> Box<[Option<F>]> {
+    fn fetch_all(&self, archetypes: &[Archetype], ticks: QueryTicks) -> Box<[Option<F>]> {
         #[cfg(feature = "std")]
         {
             let mut fetch = (0..archetypes.len()).map(|_| None).collect::<Box<[_]>>();
             for &(archetype_index, state) in &self.inner.state {
                 let archetype = &archetypes[archetype_index];
-                fetch[archetype_index] = Some(F::execute(archetype, state));
+                fetch[archetype_index] = Some(F::execute(archetype, state, ticks));
             }
             fetch
         }
@@ -2090,7 +2595,7 @@ impl<F: Fetch> CachedQuery<F> {
         {
             archetypes
                 .iter()
-                .map(|archetype| F::prepare(archetype).map(|state| F::execute(archetype, state)))
+                .map(|archetype| F::prepare(archetype).map(|state| F::execute(archetype, state, ticks)))
                 .collect()
         }
     }
@@ -2110,13 +2615,15 @@ impl<F: Fetch> Clone for CachedQuery<F> {
 struct ArchetypeIter<Q: Query> {
     archetypes: core::ops::Range<usize>,
     cache: CachedQuery<Q::Fetch>,
+    ticks: QueryTicks,
 }
 
 impl<Q: Query> ArchetypeIter<Q> {
-    fn new(world: &World, cache: CachedQuery<Q::Fetch>) -> Self {
+    fn new(world: &World, cache: CachedQuery<Q::Fetch>, ticks: QueryTicks) -> Self {
         Self {
             archetypes: 0..cache.archetype_count(world.archetypes_inner()),
             cache,
+            ticks,
         }
     }
 
@@ -2129,18 +2636,60 @@ impl<Q: Query> ArchetypeIter<Q> {
             else {
                 continue;
             };
-            let fetch = Q::Fetch::execute(archetype, state);
+            let fetch = Q::Fetch::execute(archetype, state, self.ticks);
             return Some(ChunkIter::new(archetype, fetch));
         }
     }
 
     fn entity_len(&self, world: &World) -> usize {
+        if Q::Fetch::HAS_FILTER {
+            // Row filters decide membership, so every row of the remaining archetypes must be
+            // inspected.
+            return self
+                .archetypes
+                .clone()
+                .filter_map(|x| unsafe { self.cache.get_state(world.archetypes_inner(), x) })
+                .map(|(archetype, state)| count_filtered::<Q>(archetype, state, self.ticks))
+                .sum();
+        }
         self.archetypes
             .clone()
             .filter_map(|x| unsafe { self.cache.get_archetype(world.archetypes_inner(), x) })
             .map(|x| x.len() as usize)
             .sum()
     }
+}
+
+/// Fetch the item at row `n`, unless `Q`'s row filter rejects it
+///
+/// # Safety
+/// Same as [`Query::get`]; additionally `n` must be in bounds.
+#[inline(always)]
+unsafe fn get_filtered<'a, Q: Query>(
+    meta: &[EntityMeta],
+    fetch: &Q::Fetch,
+    n: usize,
+) -> Option<Q::Item<'a>> {
+    if Q::Fetch::HAS_FILTER && !fetch.filter(n) {
+        return None;
+    }
+    Some(Q::get(meta, fetch, n))
+}
+
+/// Number of rows of `archetype` that pass `Q`'s row filter
+///
+/// Only reads change ticks. The caller must hold the borrows of `Q` on `archetype` (the query
+/// iterator does), so tick arrays are not being written.
+fn count_filtered<Q: Query>(
+    archetype: &Archetype,
+    state: <Q::Fetch as Fetch>::State,
+    ticks: QueryTicks,
+) -> usize {
+    let fetch = Q::Fetch::execute(archetype, state, ticks);
+    // SAFETY: `n < archetype.len()`; borrows are held by the caller (see above)
+    (0..archetype.len() as usize)
+        .filter(|&n| unsafe { fetch.filter(n) })
+        .count()
 }
 
 #[cfg(test)]

@@ -82,7 +82,7 @@ fn is_allowed(allowed: &[String], ns: &str) -> bool {
 
 /// Same size, alignment and fields (names, types, counts, offsets); docs, owner and component
 /// id are not compared.
-fn same_layout(a: &StructDesc, b: &StructDesc) -> bool {
+pub(crate) fn same_layout(a: &StructDesc, b: &StructDesc) -> bool {
     a.size == b.size
         && a.align == b.align
         && a.fields.len() == b.fields.len()
