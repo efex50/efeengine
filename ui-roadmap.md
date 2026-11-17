@@ -120,10 +120,13 @@ share the surface or the costs are unacceptable, switch the native plan to secti
 ### Phase 1: shared API (`efeengine-ui`)
 
 - [ ] `UiTree`, `WidgetId`, node types, `Style` subset, themes.
+- [ ] View layer (`docs/ui/API.md` section 16): `El<Msg>`, reconciler with keys, `UiView`, typed
+  message events, `when(changed::<T>())` (needs change ticks on resources).
 - [ ] `UiSignal` events, bindings, input-ownership flag in `InputState`.
 - [ ] A headless backend for tests: signals injected by tests, the tree inspected directly.
 
-**Exit:** a settings menu can be built and driven in headless tests.
+**Exit:** a settings menu written as a view (and one with the retained API) can be built and driven
+in headless tests.
 
 ### Phase 2: web backend
 

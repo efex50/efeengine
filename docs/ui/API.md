@@ -24,6 +24,20 @@ pointer and keyboard input (**`UiCapture`**) so game systems can ignore it.
           └──────────── backend.drain_signals() ◄──────────────────┘
 ```
 
+**Two layers.** Rust game code normally uses the **view layer** (section 16): an Elm-style
+`view(&State) -> El<Msg>` plus typed messages, diffed in Rust into this tree. The retained tree API
+(sections 2 to 13) is the base layer every backend implements, and what scripts, mods and future
+`.efui` files use directly.
+
+```text
+Rust game:  view(&State) -> El<Msg>   update = a system reading Events<Msg>   (section 16)
+                    │ reconcile (diff with the last view, in Rust)
+                    ▼
+            UiTree + change journal   ◄── scripts, mods, .efui files, low-level Rust
+                    ▼
+   web (DOM patches) · iced · fallback · headless
+```
+
 Why a dedicated resource and not ECS entities: children need a stable order, the journal makes
 backend patching cheap, and scripts/mods address widgets by id or key without touching the game
 world. Widgets anchored to entities (world-space labels) are a later extension (section 11).
@@ -351,7 +365,121 @@ need a browser or GPU in their own smoke tests.
   any other resource and may run on the pool.
 - Backends run on the main thread only (DOM access, the overlay pass). Systems never call a backend.
 
-## 16. Open questions
+## 16. View layer (Elm-style)
+
+The recommended API for Rust game code. It is built entirely on the retained tree: backends do not
+know it exists.
+
+### 16.1 Shape
+
+```rust
+#[derive(Clone, Debug)]
+enum MenuMsg { Play, Volume(f32), Name(String), Fullscreen(bool) }
+
+fn menu_view(s: &MenuState) -> El<MenuMsg> {
+    column![
+        text("Coin Dash").class("title"),
+        button("Play").on_click(MenuMsg::Play),
+        slider(0.0..=1.0, s.volume).step(0.05).on_change(MenuMsg::Volume),
+        checkbox("Fullscreen", s.fullscreen).on_toggle(MenuMsg::Fullscreen),
+        text_input(&s.name).placeholder("Player name").max_len(16).on_input(MenuMsg::Name),
+        text(format!("Best: {}", s.best)),
+    ]
+    .class("panel")
+    .gap(12.0)
+}
+
+// One view = one layer, built from one state resource.
+engine.add_plugin(UiView::new("menu", menu_view).layer(Layer::centered(10)));
+
+// update = a normal system reading the typed messages.
+engine.add_system(Stage::Update, |cx: &mut Ctx| {
+    for m in cx.events::<MenuMsg>() {
+        let s = cx.res_mut::<MenuState>();
+        match m {
+            MenuMsg::Play => s.start = true,
+            MenuMsg::Volume(v) => s.volume = *v,
+            MenuMsg::Name(n) => s.name = n.clone(),
+            MenuMsg::Fullscreen(f) => s.fullscreen = *f,
+        }
+    }
+});
+```
+
+- `El<Msg>` is a lightweight description: node kind, classes, inline style, key, children, and the
+  message constructors (`on_click(Msg)`, `on_change(fn(f32) -> Msg)`, `on_input(fn(String) -> Msg)`,
+  `on_submit`, `on_toggle`, `on_focus`). It is the same node set and `Style` as sections 4 and 5.
+- `Msg: Clone + Send + Sync + 'static`. Messages are delivered as `Events<Msg>`, registered by
+  `UiView` (no `add_event` needed).
+- The state is any resource (`UiView::new` takes `fn(&S) -> El<Msg>` for resource `S`). For views
+  over several resources or queries, `UiView::with(|cx: &ViewCx| -> El<Msg>)` gets read access to
+  resources and the world.
+- No bindings are needed: the view reads the state directly. Bindings (section 8) remain for the
+  retained API.
+
+### 16.2 Reconciler
+
+Each frame the view runs (see 16.3), the reconciler compares the new `El` tree with the previous
+one, node by node, and turns the differences into retained-tree operations:
+
+| Difference | Tree operation |
+|---|---|
+| Same position (or same key), same kind | update only changed properties (text, value, classes, style, enabled, visible) |
+| Different kind | remove the old node, create the new one |
+| New child / missing child | create / remove |
+| Keyed child moved | `move_to` (the node keeps its id, so focus, cursor, scroll offset survive) |
+
+- **Identity:** children are matched by `.key(..)` if they have one, otherwise by position. Lists
+  whose items can be inserted, removed or reordered must use keys (inventory rows, chat lines).
+  Keys only need to be unique among siblings in the view layer; the reconciler turns them into
+  tree-wide keys under the view's layer (`menu/<path>`), so scripts and tests can still find nodes.
+- **Cost:** proportional to the size of the view, plus tree operations only for what changed. A
+  menu of a few hundred nodes is cheap to rebuild every frame. The journal stays empty when nothing
+  changed, so backends do no work.
+- **Messages:** the reconciler keeps a table widget id → message constructor, replaced on every
+  run. A `UiSignal` for a widget in the table becomes a `Msg` (`Click` → the `on_click` message,
+  `Changed(F32(v))` → `on_change(v)`, ...) and is sent as `Events<Msg>` in the same frame
+  (`order::INPUT + 10`, like signals). Widgets without a handler send nothing.
+- **Value widgets:** as in section 7, the backend shows the edit immediately and the message is sent.
+  The view returns the value from the state on its next run: if `update` stored it, nothing changes;
+  if `update` clamped or rejected it, the reconciler writes the corrected value.
+
+### 16.3 When the view runs
+
+- Default: every frame, in `PostUpdate` at `order::LATE + 10` (after game systems changed the
+  state, before render extract).
+- `UiView::new(..).when(changed::<MenuState>())` runs it only when the resource changed. This needs
+  change ticks on resources (the efecs fork has them for components only): the UI work adds a
+  `changed` tick to resources written through `res_mut` / `Access` write.
+- `UiView::new(..).enabled(false)` / `set_enabled` hides the layer and stops running the view
+  (pause menus that exist only while paused).
+- A view that panics is a bug in game code like any system panic; the reconciler applies nothing
+  from a half-built tree.
+
+### 16.4 Mixing layers
+
+- A view owns its layer and every node in it: retained-API changes to those nodes are overwritten on
+  the next run. To combine both, put the retained or script-owned UI in another layer, or give the
+  view a `slot(key)` element: an empty container the reconciler never touches, whose children are
+  managed through the retained API (for example a mod panel inside the game's pause menu).
+- Tests use the same headless backend: `t.click("menu/play")` finds the node by its reconciled key
+  and the test then reads `Events<MenuMsg>` or the state.
+
+### 16.5 Why not an Elm runtime on the web
+
+The diff runs once in Rust for every backend. The web backend only applies the journal to DOM
+elements it already created, so no virtual DOM or Elm/JS framework is needed in the page, and the
+web and native backends stay identical in behaviour. iced on native rebuilds its own `Element` tree
+from the retained tree when the journal is not empty, which matches iced's own model.
+
+### 16.6 Scripts and mods
+
+Scripts and mods keep the retained API (section 9). Calling a VM `view` function every frame and
+moving a whole tree across the host boundary would cost more than direct node operations, and grant
+checks per node are simpler on the retained API. A script-side view layer can be added later on top
+of the same host functions if it proves useful.
+
+## 17. Open questions
 
 - Gamepad and keyboard focus navigation (d-pad moves focus to the nearest widget): wanted for games,
   native backends can do it, the web needs a small JS focus manager. Proposed for v2 with a
