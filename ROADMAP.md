@@ -337,6 +337,13 @@ How changes apply:
 - [ ] 7.6 **[N] Hot-patching systems with Subsecond (Dioxus).** Run the scheduler's system calls through `subsecond::HotFn`, so systems registered with `add_system` pick up new code on the next frame. Builds go through `dx` (or its linker shim), driven by `xtask` and the editor. Only function bodies of the game crate can be patched; struct layouts, statics and engine crates cannot. Native first; wasm only if it proves stable. **Start with a small test:** hot-patch one script_demo system and measure the cost per call. _Done when_ editing a system body changes the running game in under a second.
 - [ ] 7.7 **[S] Seamless restart.** When a change cannot be patched (a component layout, a new type), the editor snapshots the scene, rebuilds, restarts the game and restores the snapshot, mapping fields by name through the schema, with added fields set to their defaults. _Done when_ adding a field to a component keeps the scene and the camera position.
 
+## Later: multiple windows
+
+`Engine::create_window(WindowDesc)`: extra SDL windows natively, a canvas mounted in any HTML element on
+the web. Per-window size, scale, focus and input (`InputEvent.window`), cameras targeting a window
+(`Camera.target`), UI layers per window. Built on the core `SurfaceSet` from the UI GPU views
+(`docs/ui/API.md` 17.4), which already handles several surfaces on one device, including WebGL2.
+
 ## Later: missing parts
 
 | Area | What | Priority |

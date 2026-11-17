@@ -631,7 +631,72 @@ moving a whole tree across the host boundary would cost more than direct node op
 checks per node are simpler on the retained API. A script-side view layer can be added later on top
 of the same host functions if it proves useful.
 
-## 17. Open questions
+## 17. GPU views
+
+A **GPU view** is a UI node whose contents the game draws with wgpu: minimaps, 3D model previews,
+live portraits, custom-shader panels. It is laid out, clipped, scrolled and covered by other UI like
+any node. It is not a window: windows (several top-level surfaces with their own input and cameras)
+are a separate, later engine API that reuses the same core surface layer (section 17.4).
+
+### 17.1 API (the same on every backend)
+
+```rust
+pub trait UiPainter: 'static {
+    /// The view's size changed (physical px), or the target format is new: recreate
+    /// size- and format-dependent resources (depth buffers, pipelines).
+    fn resize(&mut self, _gpu: &Gpu, _target: &ViewTarget) {}
+    /// Draw the view. `target` is the view's own texture/surface: origin (0,0) is its top-left
+    /// corner and it is exactly `target.size` big. The painter owns these pixels (clear or load).
+    fn paint(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &ViewTarget);
+}
+
+pub struct ViewTarget<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub format: wgpu::TextureFormat,
+    pub size: (u32, u32),            // physical px
+    pub scale: f32,                  // window scale factor
+    pub widget: WidgetId,            // which node (one painter may serve several nodes)
+}
+
+engine.add_ui_painter("minimap", Minimap::new());           // name -> painter, main thread
+ui.gpu_view(panel, "minimap").width(Size::Px(200.0)).height(Size::Px(200.0));   // retained
+gpu_view("minimap").on_pointer(Msg::Map)                     // view layer
+```
+
+- `NodeKind::GpuView { painter: Arc<str>, pointer: bool }`, sized and styled like `Image`.
+- Pointer input: with `.pointer_signals()` (view layer: `on_pointer`), the node sends
+  `UiSignalKind::Pointer { pos: (f32, f32), buttons: u8, wheel: (f32, f32) }` in view-relative logical
+  px, plus normal `Hover`. A captured pointer over the view is UI-owned input like any widget.
+- A painter name with no registered painter: the view stays transparent and a warning is logged once.
+
+### 17.2 Contract every backend meets
+
+| Point | Rule |
+|---|---|
+| Target | Always the view's own target, sized to the view, origin top-left. No viewport/scissor math in painters. |
+| Format | `ViewTarget.format` is fixed for the run. Painters build pipelines for it (in `resize`). |
+| Alpha | Contents are **premultiplied alpha**. Transparent pixels show the UI behind the view. |
+| Timing | `paint` runs at most once per frame per shown node, after the game renderer, in that frame. Never for hidden nodes; it may run for a node scrolled out of sight. No order between views is promised. |
+| Size | Physical px; `resize` is called before the first `paint` and on every size or scale change. Zero-size views are not painted. |
+| Limits | The device's limits apply (WebGL2: no compute, no storage buffers); `gpu.limits()` tells the painter. |
+| No wgpu | Headless: never painted, layout only. SDL render mode (no wgpu): never painted, warning once. |
+
+### 17.3 Per backend
+
+| Backend | Implementation |
+|---|---|
+| Native (iced) | iced's `shader` widget: the painter draws into an offscreen texture the size of the view, which the widget composites (premultiplied) in UI order, clipped. |
+| Web, WebGPU | Each GPU view node is its own `<canvas>` in the DOM tree. The painter renders to that canvas's surface on the shared device (no copies; DOM z-order and clipping). |
+| Web, WebGL2 | The GL context cannot be shared between canvases. The core surface layer provides the view canvases anyway (OffscreenCanvas + `bitmaprenderer` hand-off, or a copy path, chosen in implementation and documented in `crates/core/structure.md`). |
+
+### 17.4 Core: surface set
+
+Core owns a `SurfaceSet`: the main surface plus extra surfaces on the same device (a canvas per web
+GPU view now, a surface per window later). `add`, `resize`, `acquire`, `present`, per surface, with the
+WebGL2 path hidden inside it. The UI web backend asks core for a surface per GPU-view canvas; the
+iced backend does not need it (it uses textures). `Engine::create_window` will use it later.
+
+## 18. Open questions
 
 - Gamepad and keyboard focus navigation (d-pad moves focus to the nearest widget): wanted for games,
   native backends can do it, the web needs a small JS focus manager. Proposed for v2 with a
