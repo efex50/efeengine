@@ -1,0 +1,26 @@
+# efeengine-ui
+
+The engine-owned UI API: a retained tree (`UiTree`) with a change journal, styles, themes, signals, bindings and a backend trait. Backends turn the tree into real widgets (web DOM, iced, a native fallback); a headless backend and `UiTest` drive it in tests. Design: `docs/ui/API.md`. Layout and details: `structure.md`.
+
+```rust
+engine.add_plugin(UiPlugin::new())?;            // headless backend for now
+
+let ui = engine.resources_mut().get_mut::<UiTree>().unwrap();
+let root = ui.layer("menu", Layer::centered(10));
+let col = ui.column(root).class("panel").gap(12.0).padding(24.0).id();
+ui.button(col, "Play").key("menu/play");
+ui.slider(col, 0.0..=1.0, 0.8).key("menu/volume");
+
+engine.add_system(Stage::Update, |cx| {
+    for s in cx.ui_signals() {                  // trait UiCtxExt
+        if let ("menu/play", UiSignalKind::Click) = s.key_kind() { /* start */ }
+    }
+});
+
+// tests
+let mut t = UiTest::new(|e| { /* setup */ });
+t.click("menu/play");
+t.step(1);
+```
+
+Run the tests with `cargo test -p efeengine-ui`.

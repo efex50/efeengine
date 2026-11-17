@@ -672,6 +672,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "efeengine-ui"
+version = "0.1.0"
+dependencies = [
+ "efeengine-core",
+ "smallvec",
+ "thiserror",
+]
+
+[[package]]
 name = "efemod"
 version = "0.1.0"
 dependencies = [

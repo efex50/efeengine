@@ -60,13 +60,14 @@ pub struct WidgetId { index: u32, generation: u32 }   // generational, Copy, sta
 The tree has several roots called **layers**, drawn in z order:
 
 ```rust
-let hud   = ui.layer("hud",   Layer { z: 0,   modal: false, anchor: Anchor::Fill });
-let pause = ui.layer("pause", Layer { z: 100, modal: true,  anchor: Anchor::Center });
+let hud   = ui.layer("hud",   Layer::fill(0));
+let pause = ui.layer("pause", Layer::centered(100).modal());   // Layer { z, modal, anchor, offset }
 ui.set_visible(pause, false);
 ```
 
 - `anchor` places the layer's root: `Fill`, `Center`, `TopLeft`, `Top`, `TopRight`, `Left`, `Right`,
-  `BottomLeft`, `Bottom`, `BottomRight`, each with a logical-pixel offset.
+  `BottomLeft`, `Bottom`, `BottomRight`, each with a logical-pixel `offset` (`Layer::top_right(z).offset(-8.0, 8.0)`). A layer root is a
+  container node whose key is the layer name; `ui.layer(name, ..)` for an existing name updates it.
 - A visible `modal` layer captures all pointer and keyboard input below it, even outside its
   widgets (pause menus, dialogs).
 - Layers are the only absolute positioning in v1. Inside a layer everything is flex layout.
@@ -95,6 +96,8 @@ pub struct Node {
     enabled: bool,                               // false = greyed, no signals
     key: Option<Arc<str>>,
     owner: Owner,
+    layer: Option<Layer>,                        // Some for a layer root
+    hover_signals: bool,                         // opt in to Hover signals
 }
 ```
 
@@ -117,7 +120,7 @@ fn setup_menu(engine: &mut Engine) {
 ```
 
 Builders return a small handle with chained setters (`.class`, `.key`, `.gap`, `.width`, ...) and
-`.id()`. Setters on an existing node: `ui.set_text(id, ..)`, `ui.set_value(id, ..)`,
+`.id()`. Reads: `ui.get(id)`, `children`, `parent`, `text_of`, `value`, `find(key)`. Setters on an existing node: `ui.set_text(id, ..)`, `ui.set_value(id, ..)`,
 `ui.set_visible(id, ..)`, `ui.set_enabled(id, ..)`, `ui.set_class(id, ..)`, `ui.style_mut(id)`,
 `ui.move_to(id, parent, index)`, `ui.remove(id)`. Each writes one journal entry.
 
@@ -216,8 +219,10 @@ pub enum UiSignalKind {
 pub enum UiValue { Bool(bool), F32(f32), Text(String) }
 ```
 
-- Delivered as `Events<UiSignal>`, readable in the **same frame** as the input: the UI plugin's
-  input system runs at `order::INPUT + 10` in `PreUpdate` and puts them in the readable buffer.
+- Delivered in the **same frame** as the input: the UI plugin's input system runs at
+  `order::INPUT + 10` in `PreUpdate` and fills the `UiSignals` resource (a readable-only
+  `Events<UiSignal>`; core's `Ctx::send` is only readable next frame). Read it with `cx.ui_signals()`
+  (trait `UiCtxExt`, returns a copy).
 - Disabled and invisible widgets send nothing.
 - Signals are data. The tree stores no callbacks (rule from the roadmap); helpers make matching short:
 
@@ -246,7 +251,7 @@ replaces what it shows (text inputs keep the cursor, clamped to the new length).
 ```rust
 ui.text(col, Bind::res(|s: &Score| format!("Score: {}", s.value)));
 ui.bind_visible(pause, Bind::res(|g: &GameState| g.paused));
-ui.bind_value(hp_bar, Bind::query::<&Health>(player, |h| h.hp / h.max));
+ui.bind_value(hp_bar, Bind::query::<Health>(player, |h| h.hp / h.max));
 ```
 
 - A binding is a read-only function from game state to one node property (text, value, visible,
@@ -337,7 +342,7 @@ pub trait UiBackend: 'static {
 pub enum UiChange {
     Created(WidgetId), Removed(WidgetId), Moved { id: WidgetId, parent: WidgetId, index: u32 },
     Kind(WidgetId), Style(WidgetId), Classes(WidgetId), Visible(WidgetId), Enabled(WidgetId),
-    Theme, Font(FontId),
+    Layer(WidgetId), Theme, Font(FontId),
 }
 ```
 

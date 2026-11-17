@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/core",
     "crates/core/macros",
+    "crates/ui",
     "crates/efescript",
     "crates/efescript/proc_macros",
     "crates/efescript/strtohx",
