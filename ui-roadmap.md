@@ -1,220 +1,194 @@
 # efeengine UI Roadmap
 
-> **Status:** Proposal / roadmap idea\
-> **Date:** 2026-11-15\
-> **Scope:** Engine editor UI and game-facing UI
->
-> This document records an architectural direction, not a commitment to
-> implement every item. Keep it in the project roadmap and revise it as
-> platform support and engine requirements become clearer.
+> **Status:** Accepted direction, not started\
+> **Date:** 2026-11-17 (replaces the 2026-11-15 egui + iced proposal)\
+> **Scope:** Game-facing UI (menus, settings, HUD panels, dialogs, inventory) and developer tools
 
 ## 1. Direction
 
-Use two complementary UI libraries for different audiences:
+Games describe their UI once through an engine-owned API. Each platform has its own backend:
 
--   **egui --- developer-facing UI:** engine editor, debugging,
-    inspection, profiling, and development tools.
--   **iced --- end-user/game-facing UI:** menus, settings, inventory,
-    dialogs, forms, HUD-adjacent interfaces, and other polished
-    application-style game interfaces.
+| Platform | Backend | Who does layout, text and input |
+|---|---|---|
+| Native (SDL3 + wgpu) | iced (`iced_wgpu` + `iced_runtime`), drawn on the engine's surface | iced |
+| Web (wasm) | HTML elements + predefined CSS, in a layer over the canvas | the browser |
 
-Do not make either library a mandatory dependency of the engine core.
-Keep the engine's public platform and rendering abstractions independent
-from the chosen UI toolkit.
+Both backends report user actions as the same `UiSignal` events, so game code, scripts and mods never
+know which backend runs. This is the same pattern as the io/window backends (SDL, web, headless
+behind one API).
 
-## 2. Intended responsibilities
+Developer tools (inspector, console, profiler) are separate: egui on both platforms, drawn into the
+canvas on the web too. They do not use the game UI API.
 
-### egui: developer environment
+### Why
 
-Potential uses:
+- **HTML on the web** gives text input, IME, clipboard, font shaping, accessibility, browser zoom and
+  real CSS for free, and keeps the wasm small (no font rasterizer or shaper shipped).
+- **iced on native** gives layout, text shaping, text editing and widget behaviour without writing
+  them. `iced_wgpu` 0.14 uses wgpu 27, the engine's version, so it can share the engine's device and
+  surface. It does not need winit (only `iced_winit` does, and we skip it).
+- **An engine-owned API** in between, because iced widgets are opaque (`Widget` trait objects) and
+  cannot be turned into HTML. iced itself had a DOM backend (`iced_web`, 0.1 to 0.3) and dropped it in
+  2022, so "write iced, get HTML" is not an option.
 
--   Scene, entity, and component inspectors.
--   Runtime variable and resource inspection.
--   Debug console and log viewer.
--   Profiler and performance overlays.
--   Asset browser and development utilities.
--   Engine/editor settings and quick prototypes.
+## 2. Architecture
 
-The editor may use egui directly. Game builds should not need to include
-egui unless a game explicitly opts into it.
-
-### iced: end-user interfaces
-
-Potential uses:
-
--   Main menus and pause menus.
--   Settings and configuration screens.
--   Inventory, lists, forms, and dialogs.
--   Notifications and other interactive panels.
--   Themeable, styleable game interfaces.
--   More application-like interfaces that benefit from a structured
-    widget and state model.
-
-Games should be able to opt into iced rather than inheriting it as an
-unavoidable engine dependency.
-
-## 3. Proposed crate and feature boundaries
-
-Illustrative structure; names can be adjusted to match the existing
-workspace:
-
-``` text
-efeengine
-├── efeengine-core
-├── efeengine-ui
-│   └── iced integration / game-facing UI support
-└── efeengine-editor
-    └── egui integration / developer tools
+```text
+game code / scripts / mods
+        │  build and update
+        ▼
+efeengine-ui: UiTree (nodes + Style subset + bindings)  ──►  Events<UiSignal>
+        │
+  ┌─────┴───────────────────────────┐
+native backend                    web backend
+  UiTree → iced Elements            UiTree → DOM elements + CSS classes
+  SDL events → iced events          DOM events → UiSignal
+  iced messages → UiSignal          patches only changed nodes
+  own render pass after the game    #ui layer above the canvas
 ```
 
-Keep dependencies optional and separated by crate or Cargo feature. For
-example:
+### Crates and features
 
-``` toml
-[features]
-ui-iced = ["dep:iced"]
-ui-egui = ["dep:egui"]
+```text
+crates/
+├── core          efeengine-core: no UI dependency
+├── ui            efeengine-ui: UiTree, Style, UiSignal, bindings, plugin
+│   ├── native    feature `iced` (default on native): iced_wgpu + iced_runtime
+│   └── web       wasm only: web-sys DOM backend
+└── editor        later: egui developer tools
 ```
 
-This is illustrative only: feature names and dependency wiring should
-follow the actual workspace design. Prefer putting editor-only
-dependencies in the editor crate instead of exposing them through the
-runtime crate.
+- `efeengine-core` stays toolkit-agnostic: no iced or egui types in its API.
+- Games opt in with a `UiPlugin`. A game without it pulls in neither iced nor the DOM backend.
+- iced types never appear in the `efeengine-ui` public API. That keeps the backend replaceable (see 6).
 
-## 4. Integration principles
+### Shared API (sketch)
 
-1.  **Keep the core toolkit-agnostic.** `efeengine-core` should not
-    expose iced- or egui-specific types in its fundamental APIs.
-2.  **Keep the two UI runtimes independent.** Do not force iced and egui
-    into one shared widget tree, state model, or event system.
-3.  **Share engine services, not widget implementations.** Both
-    integrations may consume common window, input, timing, asset, and
-    rendering services where appropriate.
-4.  **Avoid assuming that sharing wgpu objects is sufficient.**
-    Explicitly manage render-pass ordering, surface
-    acquisition/presentation, texture lifetime and registration,
-    clipping, DPI scaling, and input-coordinate conversion.
-5.  **Keep game UI optional.** A game should be able to use iced,
-    another UI solution, or its own UI without taking a dependency on
-    the editor.
-6.  **Preserve escape hatches.** Advanced games may need custom
-    rendering or UI systems outside the built-in integrations.
+```rust
+// Build: nodes are owned by the UiTree resource, addressed by WidgetId.
+let menu = ui.column(root, Style::new().gap(8.0).padding(16.0).align(Align::Center));
+let play = ui.button(menu, "Play");
+let volume = ui.slider(menu, 0.0..=1.0, 0.8);
+ui.text(menu, Bind::res(|s: &Score| format!("Best: {}", s.best)));
 
-## 5. Roadmap phases
+// React: the same events on both backends.
+fn menu_system(mut signals: EventReader<UiSignal>, ...) {
+    for s in signals.read() {
+        match (s.widget, &s.kind) {
+            (w, UiSignalKind::Click) if w == play => { /* start the game */ }
+            (w, UiSignalKind::Changed(Value::F32(v))) if w == volume => { /* set volume */ }
+            _ => {}
+        }
+    }
+}
+```
 
-### Phase 0 --- Validate requirements and platform support
+- **Nodes (first set):** panel/row/column, text, image, button, checkbox, slider, text input,
+  scroll area. Small on purpose: every widget is implemented twice.
+- **Style subset** (one Rust struct, rendered as CSS on the web and as iced layout/style on native):
+  direction, gap, padding, alignment, width/height (fill, shrink, fixed), colors, border, radius,
+  font size, visibility. Anything outside the subset is not offered rather than looking different
+  per platform.
+- **Themes:** named style classes. On the web they become predefined CSS classes, on native an iced
+  theme/style table.
+- **`UiSignal { widget: WidgetId, kind: Click | Changed(Value) | Submit | Focus(bool) }`**, delivered
+  as normal engine events in the frame after the input.
+- **Engine → UI:** bindings from resources/components to node properties. Backends only patch
+  changed nodes (DOM writes on the web, rebuilding iced `Element`s on native when the tree changed).
+- **Input ownership:** each frame the backend reports whether the UI consumed pointer/keyboard
+  input (iced event status on native, DOM focus/target on the web). `InputState` exposes it so game
+  systems skip clicks that hit the UI.
 
--   [ ] Define which targets the editor must support.
--   [ ] Define which targets game-facing UI must support: desktop,
-    WebAssembly, Android, and iOS as applicable.
--   [ ] Test the selected iced version and renderer on each intended
-    target; distinguish stable support from experimental or unavailable
-    support.
--   [ ] Test egui on the editor's intended targets.
--   [ ] Record minimum supported Rust, wgpu, and toolkit versions.
--   [ ] Build small proof-of-concept applications before committing to
-    public APIs.
+## 3. Phases
 
-**Exit criteria:** A platform compatibility matrix exists, and both
-libraries have been tested on the targets relevant to their
-responsibilities.
+### Phase 0: native spike (about a day)
 
-### Phase 1 --- egui developer tooling proof of concept
+- [ ] Draw one iced button and one text input over coin_dash with `iced_wgpu` on the engine's device,
+  queue and surface texture, in a pass after the sprite renderer.
+- [ ] Convert SDL events to iced events (mouse, keys, text, scale factor) and drive
+  `iced_runtime::UserInterface` from the engine loop.
+- [ ] Report whether iced consumed the input; the game ignores clicks on the button.
+- [ ] Measure binary size, compile time and frame time cost.
 
--   [ ] Render an egui panel inside the engine/editor window.
--   [ ] Route mouse, keyboard, text, focus, and resize events correctly.
--   [ ] Validate DPI scaling and high-resolution displays.
--   [ ] Add a minimal inspector or runtime statistics panel.
--   [ ] Verify rendering order and resource lifetime with the engine's
-    wgpu renderer.
+**Exit:** the button and text field work on native and the costs are written down. If iced cannot
+share the surface or the costs are unacceptable, switch the native plan to section 6 now.
 
-**Exit criteria:** A useful developer panel runs without coupling egui
-to the engine core.
+### Phase 1: shared API (`efeengine-ui`)
 
-### Phase 2 --- iced game UI proof of concept
+- [ ] `UiTree`, `WidgetId`, node types, `Style` subset, themes.
+- [ ] `UiSignal` events, bindings, input-ownership flag in `InputState`.
+- [ ] A headless backend for tests: signals injected by tests, the tree inspected directly.
 
--   [ ] Render a minimal iced interface through the intended
-    engine/window/rendering integration.
--   [ ] Validate widget input, focus, text input, clipboard needs, and
-    window resizing.
--   [ ] Prototype a menu/settings screen with a custom theme.
--   [ ] Evaluate fonts, images, scaling, clipping, and accessibility
-    needs.
--   [ ] Measure startup cost, binary size, memory use, and frame-time
-    impact.
+**Exit:** a settings menu can be built and driven in headless tests.
 
-**Exit criteria:** A representative game-facing interface works on the
-required target platforms with acceptable integration and performance.
+### Phase 2: web backend
 
-### Phase 3 --- Public integration APIs
+- [ ] `UiTree` → DOM under a `#ui` layer above the canvas (`templates/web` gets the layer and the
+  predefined CSS).
+- [ ] DOM events → `UiSignal`; patch only changed nodes.
+- [ ] Focus rules: a focused text input keeps keyboard input from the game; the focus-loss input
+  reset in `web_backend.rs` must not fire when focus moves from the canvas into the UI.
+- [ ] Theme classes in a stylesheet the game can override.
 
--   [ ] Define how games create, update, and render their UI runtime.
--   [ ] Define how UI receives platform input and emits
-    actions/messages.
--   [ ] Define how UI accesses engine assets and localization, if
-    needed.
--   [ ] Document threading and lifecycle rules.
--   [ ] Keep toolkit-specific APIs in their integration crates.
--   [ ] Add examples and API documentation.
+**Exit:** the Phase 1 settings menu works in the browser.
 
-**Exit criteria:** A game can opt into the iced integration without
-depending on editor tooling or leaking toolkit types into core engine
-APIs.
+### Phase 3: native backend (iced)
 
-### Phase 4 --- Editor and game workflow
+- [ ] `UiTree` → iced `Element`s, iced messages → `UiSignal`.
+- [ ] Style subset and themes mapped to iced styles; compare screenshots with the web backend.
+- [ ] Text input, IME and clipboard through SDL.
+- [ ] DPI and resize through the engine's scale factor.
 
--   [ ] Expand egui tooling: inspector, asset browser, console, and
-    profiler as needed.
--   [ ] Add examples of iced menus, settings, dialogs, and themed
-    widgets.
--   [ ] Document how to replace or bypass the built-in game UI.
--   [ ] Add integration tests and platform smoke tests.
--   [ ] Revisit the architecture based on real game and editor usage.
+**Exit:** the same settings menu, unchanged, works on native.
 
-**Exit criteria:** Developer tooling and game-facing UI have clear,
-independently maintainable workflows.
+### Phase 4: scripts, mods and examples
 
-## 6. Risks and open questions
+- [ ] UI signals as script events; scripts build nodes through host functions, under the existing
+  grant rules (a mod only sees and changes its own widgets).
+- [ ] Example: main menu + settings + pause menu in coin_dash.
+- [ ] Docs: building UI, themes, input ownership, replacing the backend.
 
--   **Platform compatibility:** iced's support and maturity may differ
-    across desktop, WebAssembly, Android, and iOS. Verify the exact
-    versions and renderer rather than assuming parity.
--   **Renderer integration:** both toolkits' wgpu integration must
-    coexist with the engine's render graph and surface lifecycle.
--   **Binary size and compile time:** optional dependencies and crate
-    boundaries should prevent unused UI systems from entering game
-    builds.
--   **Input ownership:** define how the engine decides whether game
-    input or UI input consumes an event.
--   **DPI and coordinate systems:** standardize logical pixels, physical
-    pixels, scaling, and pointer coordinates.
--   **Text and localization:** evaluate font loading, text shaping, IME,
-    clipboard, and localization requirements early.
--   **Editor versus runtime:** editor UI and shipped game UI have
-    different lifecycle, performance, and distribution requirements;
-    keep them separate.
+### Later
 
-## 7. Current architectural decision
+- World-space UI (labels and bars over entities): HTML cannot draw under the canvas, so either
+  position HTML elements from the camera each frame or draw these in the game renderer.
+- egui developer tools (`crates/editor`): inspector, console, profiler.
+- Accessibility on native (iced's support is limited; the web gets it from the DOM).
 
-  -----------------------------------------------------------------------
-  Area                                Preferred direction
-  ----------------------------------- -----------------------------------
-  Engine core                         UI-toolkit agnostic
+## 4. Rules
 
-  Developer environment / editor      egui
+1. Game code only uses `efeengine-ui` types. No iced or DOM types leak into the API.
+2. Every node type and style property exists on both backends, or it is not offered.
+3. UI changes are applied on the main thread during the frame (the DOM is only reachable there;
+   iced runs with the renderer). Systems on pool workers change the `UiTree`, not the backend.
+4. Signals are events, not callbacks: no closures stored in the tree.
+5. The UI stays optional: no `UiPlugin`, no UI dependencies.
 
-  End-user / game-facing UI           iced
+## 5. Risks
 
-  Rendering integration               Engine-owned integration boundary,
-                                      likely using the existing wgpu
-                                      stack
+| Risk | Plan |
+|---|---|
+| wgpu lock: the engine cannot move past the wgpu version iced uses (27 for iced 0.14), and iced releases slowly | Accept it; check before every wgpu upgrade. If it blocks, switch the native backend (section 6) |
+| Native and web look different | Small style subset, screenshot comparison in Phase 3 |
+| HTML is always above the canvas | World-space UI handled separately (see Later) |
+| Two implementations of every widget | Keep the widget set small; shared tests through the headless backend |
+| Input ownership and focus edge cases | Defined in Phase 1, tested on both backends |
+| iced needs a change we cannot make from outside | `[patch.crates-io]` with a small branch and an upstream PR. A full fork only if iced's design blocks us (iced is far larger than hecs, every upgrade would be a manual merge) |
 
-  Dependency policy                   Optional and separated; no
-                                      mandatory UI toolkit in core
+## 6. Fallback for native
 
-  Alternative/custom UI               Must remain possible
-  -----------------------------------------------------------------------
+Because the API is engine-owned, the native backend can be replaced without changing game code:
+**taffy** (flexbox layout, no wgpu dependency) + **glyphon** (text on wgpu) + our own widgets. The
+newest glyphon (0.12) uses wgpu 30, so this needs a wgpu upgrade or an older glyphon. The hard part
+to write ourselves would be text editing (cursor, selection, IME).
 
-**Guiding principle:** egui serves the people building and debugging
-games; iced serves the people playing them. The engine owns the boundary
-and lifecycle, while each toolkit keeps its own UI model.
+## 7. Decision summary
+
+| Area | Choice |
+|---|---|
+| Engine core | UI-toolkit agnostic |
+| Game UI API | Engine-owned `efeengine-ui` (UiTree, Style subset, UiSignal, bindings) |
+| Native game UI backend | iced 0.14 (`iced_wgpu` + `iced_runtime`), used as a dependency, not forked |
+| Web game UI backend | HTML + predefined CSS, layer above the canvas |
+| Native fallback | taffy + glyphon + own widgets |
+| Developer tools | egui, both platforms, separate from game UI |
