@@ -10,7 +10,9 @@
 use efeengine_core::prelude::*;
 use efeengine_core::render::Image;
 use efeengine_ui::view::*;
-use efeengine_ui::{ImageFit, Layer, Size, Style, UiPlugin, column, row};
+pub mod shape;
+
+use efeengine_ui::{EngineUiExt, ImageFit, PointerEvent, Layer, Size, Style, UiPlugin, column, row};
 
 /// The game state, read by both views and changed by the update system.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,11 +25,15 @@ pub struct Settings {
     /// The logo shown in the menu: a generated texture whose colours change on every Play, which
     /// exercises the texture refresh of the backends.
     pub logo: Option<TextureHandle>,
+    /// The GPU view's shape color (index into `shape::PALETTE`) and the buttons of the last
+    /// pointer signal, so one press is one step.
+    pub shape_color: u32,
+    pub shape_buttons: u8,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { volume: 0.8, fullscreen: false, name: String::new(), plays: 0, show_menu: true, logo: None }
+        Self { volume: 0.8, fullscreen: false, name: String::new(), plays: 0, show_menu: true, logo: None, shape_color: 0, shape_buttons: 0 }
     }
 }
 
@@ -39,6 +45,7 @@ pub enum Msg {
     Fullscreen(bool),
     Name(String),
     Submit(String),
+    Shape(PointerEvent),
 }
 
 fn percent(volume: f32) -> u32 {
@@ -72,6 +79,7 @@ fn menu_view(s: &Settings) -> El<Msg> {
         s.logo
             .map(|t| image(t, ImageFit::Contain).key("logo").style(Style::new().width(Size::Px(64.0)).height(Size::Px(64.0))))
             .unwrap_or_else(|| container().key("logo")),
+        gpu_view("demo_shape").key("shape").width(Size::Px(160.0)).height(Size::Px(120.0)).on_pointer(Msg::Shape),
         row![
             button("Play").key("play").on_click(Msg::Play),
             checkbox("Fullscreen", s.fullscreen).key("fullscreen").on_toggle(Msg::Fullscreen),
@@ -114,6 +122,18 @@ fn update(cx: &mut Ctx) {
             Msg::Fullscreen(f) => s.fullscreen = f,
             Msg::Name(n) => s.name = n,
             Msg::Submit(n) => global_info(&format!("[ui_demo] hello {n}")),
+            Msg::Shape(e) => {
+                let mut step = None;
+                if e.left() && s.shape_buttons & PointerEvent::LEFT == 0 {
+                    s.shape_color = (s.shape_color + 1) % shape::PALETTE.len() as u32;
+                    step = Some(s.shape_color);
+                }
+                s.shape_buttons = e.buttons;
+                if let (Some(v), Some(c)) = (step, cx.resources.get::<shape::ShapeColor>()) {
+                    c.0.store(v, std::sync::atomic::Ordering::Relaxed);
+                }
+                continue;
+            }
         }
     }
 
@@ -128,6 +148,9 @@ fn update(cx: &mut Ctx) {
 /// it; `UiTest::new` adds it before calling this).
 pub fn setup(engine: &mut Engine) {
     let logo = engine.textures_mut().add(logo_image(0));
+    let shape_color = shape::ShapeColor::default();
+    engine.add_ui_painter("demo_shape", shape::ShapePainter::new(shape_color.clone()));
+    engine.insert_resource(shape_color);
     engine.insert_resource(Settings { logo: Some(logo), ..Settings::default() });
     engine.add_plugin(UiView::new("menu", menu_view).layer(Layer::centered(10))).expect("menu view");
     engine.add_plugin(UiView::new("hud", hud_view).layer(Layer::top_left(20))).expect("hud view");
