@@ -18,7 +18,7 @@
 
 use efeengine_core::prelude::*;
 use efeengine_ui::view::*;
-use efeengine_ui::{Align, Color, Justify, Layer, Size, Style, UiPlugin, column};
+use efeengine_ui::{Align, Color, Justify, Layer, Size, Style, TextAlign, UiPlugin, column};
 
 /// Where the player is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,7 +81,7 @@ fn screen(title: &str, body: El<MenuMsg>) -> El<MenuMsg> {
         .justify(Justify::Center)
         .background(Color::rgba(0.0, 0.0, 0.0, 0.6))
         .child(
-            column![text(title).class("title").key("title"), body]
+            column![text(title).class("title").key("title").width(Size::Fill).text_align(TextAlign::Center), body]
                 .class("panel")
                 .gap(12.0)
                 .align(Align::Center)
