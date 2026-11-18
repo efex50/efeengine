@@ -25,3 +25,4 @@ efeengine-ui = { path = "../../crates/ui", default-features = false }
 default = ["iced"]
 # Native UI backend (iced); without it the native build runs headless (nothing drawn).
 iced = ["efeengine-ui/iced"]
+fallback = ["efeengine-ui/fallback"]

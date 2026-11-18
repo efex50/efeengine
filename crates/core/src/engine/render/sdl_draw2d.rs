@@ -381,7 +381,7 @@ impl SdlMode {
 
     /// Draw and present one frame. `custom`, `renderer_2d` (a user-installed wgpu renderer) and
     /// `overlays` say what the game installed that this mode cannot run (warned once each).
-    pub fn render(&mut self, frame: &super::RenderFrame, custom: bool, renderer_2d: bool, overlays: bool) {
+    pub fn render(&mut self, frame: &super::RenderFrame, custom: bool, renderer_2d: bool, overlays: bool, overlays_2d: &mut super::Overlays2D, scale: f32) {
         let w = &mut self.warned;
         let once = |flag: &mut bool, on: bool, msg: &str| {
             if on && !*flag {
@@ -392,9 +392,10 @@ impl SdlMode {
         once(&mut w.custom, custom, "SDL mode: the CustomRenderer (wgpu) is not used; drawing with the built-in SDL 2D renderer (3D and custom shaders need wgpu)");
         once(&mut w.renderer_2d, renderer_2d && !custom, "SDL mode: the installed Renderer2D (wgpu) is not used; drawing with the built-in SDL 2D renderer");
         once(&mut w.camera_3d, frame.d3.camera.is_some(), "SDL mode: a 3D camera is active, but 3D needs wgpu; 3D cameras are ignored");
-        once(&mut w.overlays, overlays, "SDL mode: render overlays (the iced UI) need wgpu and are not drawn; the fallback UI on Draw2D comes in Phase 4C.6");
+        once(&mut w.overlays, overlays, "SDL mode: render overlays (the iced UI) need wgpu and are not drawn; use the fallback UI (UiPlugin::fallback, feature `fallback`), which draws through Draw2D");
         self.draw.sync(&frame.textures);
         self.sprites.render(&mut self.draw, &frame.d2);
+        overlays_2d.render_sdl(&mut self.draw, scale);
         self.draw.present();
     }
 }

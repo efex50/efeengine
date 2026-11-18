@@ -105,6 +105,16 @@ pub trait UiBackend: 'static {
     /// overlay `init`, or the first `render` when the instance is created after the window).
     fn gpu_init(&mut self, _gpu: &Gpu) {}
 
+    /// `true` for a backend that draws through [`Draw2D`](efeengine_core::render::Draw2D) (the
+    /// fallback): the plugin then registers a Draw2D overlay that calls [`draw2d`](Self::draw2d)
+    /// (works in the wgpu and in the SDL mode) instead of relying on `render`.
+    fn draws_with_draw2d(&self) -> bool {
+        false
+    }
+
+    /// Native, Draw2D backends: draw this window's UI for this frame.
+    fn draw2d(&mut self, _cx: &mut efeengine_core::render::Overlay2D) {}
+
     /// Native: surface size or scale factor changed (overlay `resize`).
     fn gpu_resize(&mut self, _gpu: &Gpu) {}
 

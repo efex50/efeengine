@@ -57,6 +57,8 @@ pub use text::DEFAULT_FAMILY;
 const BLINK_MS: u128 = 530;
 
 pub struct FallbackBackend {
+    /// The window this instance draws (`UiBackendCx::window`).
+    window: u32,
     text: TextSystem,
     cells: HashMap<WidgetId, TextCell>,
     inputs: HashMap<WidgetId, InputState>,
@@ -101,6 +103,7 @@ impl FallbackBackend {
     /// slower start).
     pub fn with_system_fonts(system_fonts: bool) -> Self {
         Self {
+            window: 0,
             text: TextSystem::new(system_fonts),
             cells: HashMap::new(),
             inputs: HashMap::new(),
@@ -261,6 +264,7 @@ impl FallbackBackend {
 
 impl UiBackend for FallbackBackend {
     fn init(&mut self, cx: &mut UiBackendCx) {
+        self.window = cx.window;
         self.logical = cx.logical_size;
         self.scale = cx.scale_factor.max(0.01);
     }
@@ -284,7 +288,7 @@ impl UiBackend for FallbackBackend {
                 self.cells.clear();
             }
         }
-        self.model = Model::build(tree);
+        self.model = Model::build(tree, self.window);
         self.layout_dirty = true;
         self.dirty = true;
         // Forget state of nodes that are gone.
@@ -311,6 +315,24 @@ impl UiBackend for FallbackBackend {
         self.scale = scale.max(0.01);
         self.layout_dirty = true;
         self.dirty = true;
+    }
+
+    fn draws_with_draw2d(&self) -> bool {
+        true
+    }
+
+    fn draw2d(&mut self, cx: &mut efeengine_core::render::Overlay2D) {
+        if self.atlas_tex.is_none() {
+            self.set_atlas_texture(TextureHandle { id: efeengine_core::render::OVERLAY_TEXTURE_BASE + cx.window });
+        }
+        if cx.integer_vertices == self.mesh.feather {
+            self.set_antialias(!cx.integer_vertices);
+        }
+        self.prepare();
+        if let (Some(h), Some(img)) = (self.atlas_tex, self.take_atlas_image()) {
+            cx.textures.upload(h, &img);
+        }
+        self.draw(cx.draw);
     }
 
     fn take_text_input(&mut self) -> Option<Option<TextInputArea>> {

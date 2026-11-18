@@ -1,10 +1,8 @@
 # Fallback native UI backend: taffy + cosmic-text through Draw2D
 
-> **Status:** the backend is built and tested (`crates/ui/src/fallback`, feature `fallback`,
-> roadmap 4C.6 phases F1 to F3). It draws into any `Draw2D`, so it works in the wgpu and in the SDL
-> rendering mode. **Not wired into the engine yet:** the engine hook that hands a `Draw2D` to an
-> overlay, `UiPlugin::fallback()` and the automatic choice in SDL mode are Stage 2 (section 9),
-> waiting for the multi-window work in `crates/core` and `crates/ui/src/plugin.rs`.\
+> **Status:** built, tested and wired in (roadmap 4C.6 done). `crates/ui/src/fallback`, feature
+> `fallback`; it draws through `Draw2D` from the engine's Draw2D overlay hook, so it works in the wgpu
+> and in the SDL rendering mode (coin_dash menus checked in both). Open items are in F4.\
 > **Date:** 2026-11-18\
 > **Implements:** the common API in [`API.md`](API.md). Game code does not change when switching.\
 > **Feature:** `efeengine-ui/fallback` (native only; wasm uses the DOM backend)
@@ -187,35 +185,31 @@ Compared with the iced screenshot the layout, colours, rounded panel, checkbox, 
 input match closely; differences are a 1 to 3 px vertical drift of some rows (text metrics), the
 slider rail drawn the full width (as iced), and the GPU view shown as an outline.
 
-## 9. Stage 2: wiring it into the engine (plan)
+## 9. Engine wiring (as built)
 
-Waiting for the multi-window work (it owns `crates/core` window / render / input / `engine.rs` and
-`crates/ui/src/{plugin,backend,web,native}`).
-
-1. **Core hook, both modes.** A `RenderOverlay`-like trait that hands out a `Draw2D`:
-   `trait Draw2DOverlay { fn render(&mut self, cx: &mut Overlay2D); }` with `Overlay2D { window,
-   size, scale_factor, draw: &mut dyn Draw2D, textures: &mut dyn OverlayTextures }` and
-   `Engine::add_draw2d_overlay`. wgpu mode records a `DrawList` per window and draws it with a
-   `WgpuDraw2D` + `GpuTextures` after the renderers and the normal overlays, before present; SDL
-   mode passes the `SdlDraw2D` itself after the sprites, before `present` (and drops the
-   "overlays need wgpu" warning for these).
-2. **Textures of the overlay.** The glyph atlas is created once through `Textures::add` (so the
-   handle exists in the CPU store); later updates must not wait for the next frame's
-   `TextureChanges`, so `OverlayTextures::replace(handle, &Image)` uploads straight into the
-   active table (`GpuTextures::upload` / `SdlDraw2D` texture upload). Whole-texture replace is
-   enough for now; a sub-rect update (`Textures::update_rect`, `queue.write_texture`,
-   `SDL_UpdateTexture` with a rect) is the optimisation when the 4 MB re-upload shows up in
-   profiles.
-3. **Backend trait.** `UiBackend::draw2d(&mut self, cx: &mut Overlay2D)` next to the wgpu
-   `render`; the plugin registers the Draw2D overlay when the backend is the fallback (per window:
-   one backend instance per window already exists with the multi-window work).
-4. **`UiPlugin`.** Feature `fallback`, `UiPlugin::fallback()`, and `UiPlugin::new()` picks:
-   wgpu mode -> iced (if on) else fallback; SDL mode -> fallback (iced cannot draw there), with a
-   log line. `set_antialias(false)` when the SDL renderer name is `software`.
-5. **Input.** Already shaped like the iced backend (`input` from the core input filter, capture,
-   `take_text_input`, `take_cursor_icon`); nothing extra.
-6. **Verify.** coin_dash menus in `EFE_GPU_MODE=sdl` (pause menu, settings), a window screenshot,
-   `cargo xtask` run of ui_demo with `--features fallback`.
+1. **Core hook:** `Draw2DOverlay` / `Overlay2D { window, size, scale_factor, integer_vertices, draw,
+   textures }` / `OverlayTextures` in `efeengine_core::render`; `Engine::add_draw2d_overlay`. wgpu
+   mode records one `DrawList` per window, uploads what the overlays asked for, and draws it with
+   a `WgpuDraw2D` over the window's surface view after the `RenderOverlay`s (the overlay runner keeps
+   its own `GpuTextures`, fed from the frame's texture changes). SDL mode records the same way
+   and replays onto the `SdlDraw2D` after the sprites, before `present`. `integer_vertices` is true
+   for SDL's software renderer.
+2. **Overlay textures:** the overlay picks the handle itself, ids from `OVERLAY_TEXTURE_BASE`
+   (0xFFFF_0000) up (the fallback uses base + window), and `OverlayTextures::upload(handle, &Image)`
+   replaces the texture at once (whole texture; a sub-rect update is still the optimisation).
+3. **Backend trait:** `UiBackend::draws_with_draw2d()` and `UiBackend::draw2d(&mut Overlay2D)`. The
+   plugin registers a Draw2D overlay (instead of the wgpu `RenderOverlay`) when the main backend
+   draws with Draw2D, and routes it to the window's backend instance. The fallback reads
+   `cx.window` in `init` and shows `tree.layers_in(window)`.
+4. **`UiPlugin`:** `UiPlugin::fallback()` forces the fallback. `UiPlugin::new()` on native picks iced
+   when it is compiled in and the mode is not SDL, else the fallback when compiled in (with a log
+   line when iced is also compiled in). Limitation: `auto` mode finding no wgpu adapter only switches
+   to SDL at graphics init, after the choice, so use `UiPlugin::fallback()` or `EFE_GPU_MODE=sdl`
+   for UI there. SDL mode draws the main window only.
+5. **Examples:** `ui_demo`, `coin_dash`, `coin_dash_mods`, `multi_window` have a `fallback` feature
+   (`cargo build -p coin_dash --no-default-features --features fallback`).
+6. **Verified:** coin_dash menu and HUD in `EFE_GPU_MODE=sdl` and `wgpu` (window screenshots),
+   ui_demo in SDL mode, workspace check, wasm checks of core and ui.
 
 ## 10. Measurements
 
@@ -232,7 +226,7 @@ Waiting for the multi-window work (it owns `crates/core` window / render / input
 - [x] taffy mirror of the tree, journal-driven rebuild, style conversion.
 - [x] Rounded rect + border meshes, images, cosmic-text glyph atlas, DPI.
 - [x] Container, Text, Image; layers and anchors.
-- [ ] Overlay pass through the engine (Stage 2).
+- [x] Overlay pass through the engine (`Draw2DOverlay`).
 
 ### F2: interaction (done)
 

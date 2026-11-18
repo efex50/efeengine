@@ -70,11 +70,33 @@ impl UiPlugin {
     /// The default backend for this engine: the iced backend on native when the `iced` feature
     /// is on and the engine has a window (not a headless config), else as [`new`](Self::new).
     fn default_backend(engine: &Engine, headless: bool) -> Option<Box<dyn UiBackend>> {
-        #[cfg(all(feature = "iced", not(target_arch = "wasm32")))]
+        #[cfg(not(target_arch = "wasm32"))]
         if !headless && !engine.config().headless {
-            return Some(Box::new(crate::native::IcedBackend::new()));
+            return Self::native_backend(engine);
         }
         let _ = (engine, headless);
+        None
+    }
+
+    /// The native default: iced when it is compiled in and the rendering mode is not SDL (iced
+    /// needs wgpu), else the fallback backend when it is compiled in. Note the `auto` mode that
+    /// finds no wgpu adapter only switches to SDL at graphics init, after this choice: select
+    /// [`UiPlugin::fallback`] (or `EFE_GPU_MODE=sdl`) for UI there.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_backend(engine: &Engine) -> Option<Box<dyn UiBackend>> {
+        let _ = engine;
+        #[cfg(feature = "iced")]
+        if efeengine_core::engine::config::GpuMode::effective() != efeengine_core::engine::config::GpuMode::Sdl {
+            return Some(Box::new(crate::native::IcedBackend::new()));
+        }
+        #[cfg(feature = "fallback")]
+        {
+            if cfg!(feature = "iced") {
+                efeengine_core::prelude::global_info("[efeengine-ui] SDL rendering mode: using the fallback UI backend (iced needs wgpu)");
+            }
+            return Some(Box::new(crate::fallback::FallbackBackend::new()));
+        }
+        #[allow(unreachable_code)]
         None
     }
 
@@ -84,12 +106,35 @@ impl UiPlugin {
         if !headless && !engine.config().headless {
             return Some(Box::new(|_| Some(Box::new(crate::web::WebBackend::new()) as Box<dyn UiBackend>)));
         }
-        #[cfg(all(feature = "iced", not(target_arch = "wasm32")))]
-        if !headless && !engine.config().headless {
-            return Some(Box::new(|_| Some(Box::new(crate::native::IcedBackend::new()) as Box<dyn UiBackend>)));
+        #[cfg(not(target_arch = "wasm32"))]
+        if !headless && !engine.config().headless && Self::native_backend(engine).is_some() {
+            return Some(Box::new(|_| {
+                #[cfg(feature = "iced")]
+                if efeengine_core::engine::config::GpuMode::effective() != efeengine_core::engine::config::GpuMode::Sdl {
+                    return Some(Box::new(crate::native::IcedBackend::new()) as Box<dyn UiBackend>);
+                }
+                #[cfg(feature = "fallback")]
+                return Some(Box::new(crate::fallback::FallbackBackend::new()) as Box<dyn UiBackend>);
+                #[allow(unreachable_code)]
+                None
+            }));
         }
         let _ = (engine, headless);
         None
+    }
+
+    /// The fallback backend (taffy + cosmic-text through `Draw2D`): works in the wgpu and in the
+    /// SDL rendering mode. Needs the `fallback` feature and a native build; otherwise it is the
+    /// same as [`new`](Self::new).
+    pub fn fallback() -> Self {
+        #[cfg(all(feature = "fallback", not(target_arch = "wasm32")))]
+        {
+            let p = Self::with_backend(crate::fallback::FallbackBackend::new());
+            *p.factory.borrow_mut() = Some(Box::new(|_| Some(Box::new(crate::fallback::FallbackBackend::new()) as Box<dyn UiBackend>)));
+            return p;
+        }
+        #[allow(unreachable_code)]
+        Self::new()
     }
 
     /// Always the headless backend (and its `HeadlessHandle` resource), also on wasm32.
@@ -172,7 +217,13 @@ impl Plugin for UiPlugin {
         engine.add_input_filter(UiInputFilter { backends: backends.clone() });
 
         // Native overlay: GPU init / resize / draw, per window.
-        engine.add_render_overlay(UiOverlay { backends: backends.clone() });
+        // Draw2D backends (the fallback) draw through a Draw2D overlay instead, which also works
+        // in SDL mode.
+        if backends.borrow().slots[0].be.draws_with_draw2d() {
+            engine.add_draw2d_overlay(UiDraw2D { backends: backends.clone() });
+        } else {
+            engine.add_render_overlay(UiOverlay { backends: backends.clone() });
+        }
 
         // Window size changes (logical size and scale for each backend and its `UiBackendCx`).
         {
@@ -475,6 +526,18 @@ impl RenderOverlay for UiOverlay {
         if let Some(slot) = self.backends.borrow_mut().slot_mut(gpu.window) {
             Self::ready(slot, gpu);
             slot.be.render(gpu, target);
+        }
+    }
+}
+
+struct UiDraw2D {
+    backends: Shared,
+}
+
+impl efeengine_core::render::Draw2DOverlay for UiDraw2D {
+    fn render(&mut self, cx: &mut efeengine_core::render::Overlay2D) {
+        if let Some(slot) = self.backends.borrow_mut().slot_mut(cx.window) {
+            slot.be.draw2d(cx);
         }
     }
 }

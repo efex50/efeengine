@@ -232,7 +232,7 @@ Plan and design: [`docs/RENDERER_PLAN.md`](docs/RENDERER_PLAN.md). 2D and 3D bec
 - [x] 4C.3 `Draw2D` (shared 2D drawing API) with the wgpu implementation; 2D debug draw (4A.17) on it.
 - [x] 4C.4 SDL mode: `SDL_Renderer` 2D backend; coin_dash matches in both modes.
 - [x] 4C.5 `auto` mode falls back to SDL mode when no wgpu adapter exists.
-- [ ] 4C.6 Fallback UI drawn through `Draw2D` (works in both modes). Backend built and tested (`crates/ui/src/fallback`, F1 to F3, offscreen screenshots in both modes); still open: the engine hook that hands a `Draw2D` to an overlay, `UiPlugin::fallback()` and the automatic choice in SDL mode (`docs/ui/FALLBACK_NATIVE.md` section 9).
+- [x] 4C.6 Fallback UI drawn through `Draw2D` (works in both modes): `crates/ui/src/fallback`, `Draw2DOverlay` hook, `UiPlugin::fallback()`, coin_dash menus in SDL mode (`docs/ui/FALLBACK_NATIVE.md`).
 - [ ] 4C.7 PS Vita homebrew build of coin_dash (Vita3K, then hardware).
 
 ## Phase 5: Scripting with efescript (future)

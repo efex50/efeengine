@@ -73,9 +73,10 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn build(tree: &UiTree) -> Model {
+    /// The layers shown in `window`.
+    pub fn build(tree: &UiTree, window: u32) -> Model {
         let mut layers = Vec::new();
-        for root in tree.layers() {
+        for root in tree.layers_in(window) {
             if !tree.is_shown(root) {
                 continue;
             }

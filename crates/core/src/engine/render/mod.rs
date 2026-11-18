@@ -16,6 +16,7 @@ mod frame;
 pub(crate) mod gpu;
 #[cfg(not(target_arch = "wasm32"))]
 mod offscreen;
+mod overlay2d;
 mod png;
 mod renderers;
 #[cfg(not(target_arch = "wasm32"))]
@@ -32,6 +33,7 @@ pub use frame::{CameraView, Frame2D, Frame3D, MeshInstance, RenderFrame, RenderW
 #[cfg(not(target_arch = "wasm32"))]
 pub use offscreen::{encode_png, write_png, OffscreenGpu};
 pub use png::PngError;
+pub(crate) use overlay2d::Overlays2D;
 pub(crate) use renderers::Renderers;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sdl_draw2d::{SdlDraw2D, SdlSpriteRenderer};
@@ -150,6 +152,40 @@ pub trait RenderOverlay: 'static {
     /// never clear). Called for every rendered window (`gpu.window`) after the renderers and
     /// before present, in the order the overlays were added.
     fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView);
+}
+
+/// Where an overlay puts textures it owns (a glyph atlas, ...). The handle is chosen by the overlay
+/// and must not collide with the engine's `Textures` store, whose ids count up from 1: use ids from
+/// [`OVERLAY_TEXTURE_BASE`] up. The upload takes effect at once for the draws of this call, in both
+/// rendering modes. Calling it again with the same handle replaces the texture.
+pub trait OverlayTextures {
+    fn upload(&mut self, handle: crate::engine::components::TextureHandle, image: &Image);
+}
+
+/// First texture id an overlay may use for its own textures.
+pub const OVERLAY_TEXTURE_BASE: u32 = 0xFFFF_0000;
+
+/// What a [`Draw2DOverlay`] gets for one window and frame.
+pub struct Overlay2D<'a> {
+    /// The window (0 = main).
+    pub window: u32,
+    /// Target size in physical pixels.
+    pub size: (u32, u32),
+    pub scale_factor: f32,
+    /// The target rasterises on integer vertices (SDL's software renderer): feathered edges do
+    /// not work there.
+    pub integer_vertices: bool,
+    /// Draw here (physical pixels, origin top-left). The textures are those of the engine's
+    /// `Textures` store plus the overlay's own (see [`OverlayTextures`]).
+    pub draw: &'a mut dyn Draw2D,
+    pub textures: &'a mut dyn OverlayTextures,
+}
+
+/// Extra 2D drawing on top of the frame that works in the wgpu and in the SDL rendering mode (the
+/// fallback UI is one). Added with `Engine::add_draw2d_overlay`; called for every rendered window
+/// after the renderers and the [`RenderOverlay`]s, in add order.
+pub trait Draw2DOverlay: 'static {
+    fn render(&mut self, cx: &mut Overlay2D);
 }
 
 /// A 2D renderer that only clears to the 2D camera's colour (black without a camera) and

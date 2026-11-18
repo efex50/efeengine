@@ -109,6 +109,8 @@ pub struct Engine{
     renderer: Renderers,
     /// Drawn after the renderers, before present, in add order.
     overlays: Vec<Box<dyn RenderOverlay>>,
+    /// Draw2D overlays (work in both rendering modes), drawn after `overlays`.
+    overlays_2d: rendering::Overlays2D,
     /// Run for every raw input event before `InputState::apply`, in add order.
     input_filters: Vec<Box<dyn InputFilter>>,
     gpu: Option<GpuContext>,
@@ -227,6 +229,7 @@ impl Engine {
         let mut engine = Self {
             renderer: Renderers::new(),
             overlays: Vec::new(),
+            overlays_2d: Default::default(),
             input_filters: Vec::new(),
             gpu: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -969,6 +972,15 @@ impl Engine {
         self
     }
 
+    /// Add a [`Draw2DOverlay`]: extra 2D drawing over the frame through [`Draw2D`](rendering::Draw2D),
+    /// in the wgpu and in the SDL mode, for every rendered window (SDL mode: the main one). Drawn after
+    /// the [`RenderOverlay`]s, in add order. Never called without a window (headless). Texture
+    /// changes from before the first rendered frame are visible to it; add overlays during setup.
+    pub fn add_draw2d_overlay(&mut self, overlay: impl rendering::Draw2DOverlay) -> &mut Self {
+        self.overlays_2d.add(Box::new(overlay));
+        self
+    }
+
     /// Add an [`InputFilter`]: asked about every raw input event (also in headless mode and for
     /// injected events) before `InputState::apply`, in add order; any `Captured` marks the
     /// event (`InputEvent::captured`).
@@ -1341,13 +1353,14 @@ impl Engine {
             let (w, h) = self.windows.size(WindowId::MAIN);
             if w > 0 && h > 0 && self.state.resources.contains::<RenderFrame>() {
                 let frame = self.state.resources.get::<RenderFrame>().expect("RenderFrame resource");
-                sdl.render(&frame, self.renderer.has_custom(), self.renderer.has_installed_2d(), !self.overlays.is_empty());
+                let scale = self.windows.scale_factor(WindowId::MAIN) as f32;
+                sdl.render(&frame, self.renderer.has_custom(), self.renderer.has_installed_2d(), !self.overlays.is_empty(), &mut self.overlays_2d, scale);
             } else if let (Some(f), Some(t)) = (self.state.resources.get_mut::<RenderFrame>().map(|f| std::mem::take(&mut f.textures)), self.state.resources.get_mut::<Textures>()) {
                 t.requeue(f);
             }
             return;
         }
-        let Engine { renderer, overlays, gpu, state, logger, .. } = self;
+        let Engine { renderer, overlays, overlays_2d, gpu, state, logger, .. } = self;
         let Some(gpu) = gpu else { return };
         if !state.resources.contains::<RenderFrame>() {
             return;
@@ -1386,6 +1399,11 @@ impl Engine {
                 for o in overlays.iter_mut() {
                     o.render(&gpu.gpu(), &view);
                 }
+                {
+                    let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
+                    overlays_2d.sync_textures(&gpu.gpu(), &frame.textures);
+                }
+                overlays_2d.render_wgpu(&gpu.gpu(), &view);
                 delivered = true;
                 gpu.queue.present(output);
                 if suboptimal {
@@ -1412,11 +1430,13 @@ impl Engine {
                     let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
                     let tex = if delivered { &empty } else { &frame.textures };
                     renderer.render(&g, &sf.view, &frame, tex, &mut warnings);
+                    overlays_2d.sync_textures(&g, tex);
                 }
                 delivered = true;
                 for o in overlays.iter_mut() {
                     o.render(&g, &sf.view);
                 }
+                overlays_2d.render_wgpu(&g, &sf.view);
                 w.surface.present(&g, sf);
             }
             drop(g);
