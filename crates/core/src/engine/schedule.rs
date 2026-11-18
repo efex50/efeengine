@@ -5,7 +5,7 @@ use std::sync::Arc;
 use hecs::{Component, DynamicBundle, Entity, Query, QueryBorrow, Tick, World};
 
 use crate::engine::{
-    WindowState,
+    WindowState, Windows,
     events::{EventRegistry, Events},
     input::{GamepadState, InputState},
     resources::{Res, Resources},
@@ -52,7 +52,10 @@ pub struct Ctx<'a> {
     pub time: &'a Time,
     pub input: &'a InputState,
     pub gamepads: &'a GamepadState,
+    /// The main window's state (same as `windows.main()`).
     pub window: &'a WindowState,
+    /// Every window's state.
+    pub windows: &'a Windows,
     pub commands: &'a mut Commands,
     /// The scripting runtime (host registry, loaded modules). Systems may register host
     /// functions or load modules; the script system itself runs first in `Stage::Update`.
@@ -72,7 +75,7 @@ impl<'a> Ctx<'a> {
         time: &'a Time,
         input: &'a InputState,
         gamepads: &'a GamepadState,
-        window: &'a WindowState,
+        windows: &'a Windows,
         commands: &'a mut Commands,
         scripting: &'a mut Scripting,
         events: &'a mut EventRegistry,
@@ -85,7 +88,8 @@ impl<'a> Ctx<'a> {
             time,
             input,
             gamepads,
-            window,
+            window: windows.main(),
+            windows,
             commands,
             scripting,
             events,
@@ -223,6 +227,7 @@ pub struct RunCtx<'a> {
     pub input: &'a InputState,
     pub gamepads: &'a GamepadState,
     pub window: &'a WindowState,
+    pub windows: &'a Windows,
 }
 
 impl RunCtx<'_> {
@@ -611,6 +616,7 @@ impl Schedule {
                 input: cx.input,
                 gamepads: cx.gamepads,
                 window: cx.window,
+                windows: cx.windows,
             };
             st.entries.iter().map(|e| e.enabled && e.run_if.as_ref().is_none_or(|c| c(&rc))).collect()
         };
@@ -640,7 +646,7 @@ impl Schedule {
                 let world: &World = &*cx.world;
                 let resources: &Resources = &*cx.resources;
                 let events: &EventRegistry = &*cx.events;
-                let (types, time, input, gamepads, window) = (cx.types, cx.time, cx.input, cx.gamepads, cx.window);
+                let (types, time, input, gamepads, window) = (cx.types, cx.time, cx.input, cx.gamepads, cx.windows);
                 let mut tasks: Vec<_> = members
                     .iter_mut()
                     .zip(outs.iter_mut())

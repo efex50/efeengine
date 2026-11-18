@@ -3,8 +3,8 @@
 use wgpu::{Adapter, Device, Instance, Queue, Surface, SurfaceConfiguration};
 
 use crate::engine::window::GameWindowManager;
-use crate::window::WindowManager;
-use super::Gpu;
+use crate::engine::input::WindowId;
+use super::{ExtraSurface, Gpu};
 
 /// Everything the engine needs to render to the main window. Declared in `Engine` BEFORE the
 /// window so the surface drops before the window it was created from.
@@ -20,6 +20,15 @@ pub(crate) struct GpuContext {
     /// reconfigured until a non-zero size arrives.
     suspended: bool,
     /// Window scale factor (physical per logical pixel).
+    pub scale_factor: f32,
+    /// Surfaces of the secondary windows, on the same device (`docs/MULTI_WINDOW.md`).
+    pub windows: std::collections::BTreeMap<u32, WindowSurface>,
+}
+
+/// A secondary window's surface and the size / scale the engine last gave it.
+pub(crate) struct WindowSurface {
+    pub surface: ExtraSurface,
+    pub size: (u32, u32),
     pub scale_factor: f32,
 }
 
@@ -80,7 +89,7 @@ impl GpuContext {
         let caps = surface.get_capabilities(&adapter);
         let format = caps.formats.iter().copied().find(|f| f.is_srgb()).or_else(|| caps.formats.first().copied())
             .ok_or_else(|| "the surface supports no texture format".to_string())?;
-        let size = window.size();
+        let size = window.size(WindowId::MAIN);
         let config = SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -94,7 +103,7 @@ impl GpuContext {
         };
         surface.configure(&device, &config);
         let backend = info.backend;
-        Ok(Self { instance, adapter, backend, device, queue, surface, config, suspended: false, scale_factor: sanitize_scale(window.scale_factor()) })
+        Ok(Self { instance, adapter, backend, device, queue, surface, config, suspended: false, scale_factor: sanitize_scale(window.scale_factor(WindowId::MAIN)), windows: Default::default() })
     }
 
     /// The borrowed view handed to the renderer.
@@ -108,7 +117,58 @@ impl GpuContext {
             surface_format: self.config.format,
             size: (self.config.width, self.config.height),
             scale_factor: self.scale_factor,
+            window: 0,
         }
+    }
+
+    /// The handles for drawing into secondary window `id`: its size and scale, the format of
+    /// its surface. `None` if it has no surface.
+    pub fn gpu_for(&self, id: u32) -> Option<Gpu<'_>> {
+        if id == 0 {
+            return Some(self.gpu());
+        }
+        let w = self.windows.get(&id)?;
+        Some(Gpu { surface_format: w.surface.format(), size: w.size, scale_factor: w.scale_factor, window: id, ..self.gpu() })
+    }
+
+    /// Give secondary window `id` a surface (native: from its raw handles; web: its canvas).
+    /// `size` / `scale` are what the engine knows now.
+    pub fn add_window(&mut self, windows: &GameWindowManager, id: WindowId, size: (u32, u32), scale: f64) -> Result<(), String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let surface = {
+            let (rw, rd) = windows.raw_handles(id).ok_or_else(|| format!("window {} has no native handles", id.0))?;
+            // SAFETY: the surface lives in `self.windows`, which `Engine` drops before the
+            // window manager (declared earlier in `Engine`); a closed window's surface is
+            // removed (`remove_window`) before the window is destroyed.
+            let target = wgpu::SurfaceTargetUnsafe::RawHandle { raw_display_handle: Some(rd), raw_window_handle: rw };
+            let s = unsafe { self.instance.create_surface_unsafe(target) }.map_err(|e| format!("could not create surface: {e}"))?;
+            let mut es = ExtraSurface::from_surface(&self.gpu(), s)?;
+            es.resize(&self.gpu(), size);
+            es
+        };
+        #[cfg(target_arch = "wasm32")]
+        let surface = {
+            let canvas = windows.canvas(id).ok_or_else(|| format!("window {} has no canvas", id.0))?;
+            let mut es = ExtraSurface::for_canvas(&self.gpu(), canvas)?;
+            es.resize(&self.gpu(), size);
+            es
+        };
+        self.windows.insert(id.0, WindowSurface { surface, size, scale_factor: sanitize_scale(scale) });
+        Ok(())
+    }
+
+    /// Drop the surface of a closed window (before the window itself goes away).
+    pub fn remove_window(&mut self, id: WindowId) {
+        self.windows.remove(&id.0);
+    }
+
+    /// A secondary window's size changed.
+    pub fn resize_window(&mut self, id: WindowId, size: (u32, u32)) -> bool {
+        let Some(mut w) = self.windows.remove(&id.0) else { return false };
+        w.size = size;
+        w.surface.resize(&self.gpu(), size);
+        self.windows.insert(id.0, w);
+        true
     }
 
     /// Reconfigure the surface for `size`. A zero side (minimized) suspends the context

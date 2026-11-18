@@ -9,7 +9,8 @@ use hecs::{Component, DynamicBundle, Entity, EntityBuilder, World};
 
 use crate::engine::schedule::{ScheduleCommands, ScheduleOp};
 use crate::engine::types::TypeRegistry;
-use crate::engine::window::CursorIcon;
+use crate::engine::input::WindowId;
+use crate::engine::window::{CursorIcon, WindowDesc};
 
 /// A control request a system makes of the engine; applied after the stage ends.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +31,13 @@ pub enum EngineCommand {
     ReloadMods,
     /// `Engine::unload_mods`, the report is logged.
     UnloadMods,
+    /// Open a secondary window under the id `Commands::create_window` handed out. On failure
+    /// the error is logged and a `WindowEvent::Closed` for that id is delivered next frame.
+    CreateWindow { id: WindowId, desc: WindowDesc },
+    /// Close a secondary window (a `Closed` event follows). Ignored for the main window.
+    CloseWindow(WindowId),
+    SetWindowTitle(WindowId, String),
+    SetWindowFullscreen(WindowId, bool),
 }
 
 /// A queued structural change of the world.
@@ -70,6 +78,8 @@ pub struct Commands {
     ops: Vec<WorldOp>,
     /// Deferred schedule edits (`Ctx::schedule`), applied after the world ops.
     sched: Vec<ScheduleOp>,
+    /// Last window id handed out (secondary windows count from 1; 0 is the main window).
+    last_window: u32,
 }
 
 /// The old name of [`Commands`].
@@ -94,8 +104,34 @@ impl Commands {
     pub fn quit(&mut self) {
         self.list.push(EngineCommand::Quit);
     }
+    /// Title of the MAIN window (see `set_window_title`).
     pub fn set_title(&mut self, t: impl Into<String>) {
         self.list.push(EngineCommand::SetTitle(t.into()));
+    }
+    /// Open a secondary window after the stage. The id is reserved now, so a camera or UI layer
+    /// can target it at once; the window gets a `WindowEvent::Created` event (or `Closed` if
+    /// opening failed, the error is logged) next frame. Cameras and layers aimed at a window
+    /// that does not exist yet simply draw nowhere until it does.
+    pub fn create_window(&mut self, desc: WindowDesc) -> WindowId {
+        self.last_window += 1;
+        let id = WindowId(self.last_window);
+        self.list.push(EngineCommand::CreateWindow { id, desc });
+        id
+    }
+    /// Close a secondary window after the stage (ignored for the main window and unknown ids).
+    pub fn close_window(&mut self, id: WindowId) {
+        self.list.push(EngineCommand::CloseWindow(id));
+    }
+    pub fn set_window_title(&mut self, id: WindowId, t: impl Into<String>) {
+        self.list.push(EngineCommand::SetWindowTitle(id, t.into()));
+    }
+    pub fn set_window_fullscreen(&mut self, id: WindowId, on: bool) {
+        self.list.push(EngineCommand::SetWindowFullscreen(id, on));
+    }
+    /// Hand out the next window id (`Engine::create_window` uses the same counter).
+    pub(crate) fn alloc_window(&mut self) -> WindowId {
+        self.last_window += 1;
+        WindowId(self.last_window)
     }
     /// `fps <= 0` (or non-finite) removes the frame-rate cap.
     pub fn set_frame_rate(&mut self, fps: f32) {
@@ -322,6 +358,15 @@ impl ParCommands {
     }
     pub fn quit(&mut self) {
         self.inner.quit();
+    }
+    pub fn close_window(&mut self, id: WindowId) {
+        self.inner.close_window(id);
+    }
+    pub fn set_window_title(&mut self, id: WindowId, t: impl Into<String>) {
+        self.inner.set_window_title(id, t);
+    }
+    pub fn set_window_fullscreen(&mut self, id: WindowId, on: bool) {
+        self.inner.set_window_fullscreen(id, on);
     }
     pub fn set_title(&mut self, t: impl Into<String>) {
         self.inner.set_title(t);

@@ -119,6 +119,7 @@ fn render(
         surface_format: format,
         size,
         scale_factor: scale,
+        window: 0,
     };
     ViewPainter::default().paint(&views, painters, &gpu);
 

@@ -5,7 +5,8 @@ use hecs::Entity;
 
 use crate::engine::components::{Camera, GlobalTransform, MeshHandle, Sprite, TextureHandle, Transform, Visibility};
 use crate::engine::schedule::Ctx;
-use super::frame::{CameraView, MeshInstance, RenderFrame, RenderWarnings, SpriteInstance};
+use super::frame::{CameraView, MeshInstance, RenderFrame, RenderWarnings, SpriteInstance, WindowFrame};
+use crate::engine::input::WindowId;
 use super::textures::Textures;
 
 fn mat(m: Mat4) -> [[f32; 4]; 4] {
@@ -74,36 +75,37 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
     frame.frame = cx.time.frame();
     frame.time = cx.time.elapsed();
 
-    // ---- cameras: per kind, the active one with the lowest entity id ----
-    let mut chosen: [Option<(Entity, Camera, Affine2)>; 2] = [None, None];
-    let mut active = [0usize; 2];
+    // ---- cameras: per window and kind, the active one with the lowest entity id ----
+    // Index 0 = the main window, then the secondary windows in id order.
+    let ids: Vec<WindowId> = cx.windows.iter().map(|(id, _)| id).collect();
+    let mut chosen: Vec<[Option<(Entity, Camera, Affine2)>; 2]> = ids.iter().map(|_| [None, None]).collect();
+    let mut active: Vec<[usize; 2]> = ids.iter().map(|_| [0, 0]).collect();
     for (e, cam, g, t) in cx.world.query::<(Entity, &Camera, Option<&GlobalTransform>, Option<&Transform>)>().iter() {
         if cam.active == 0 {
             continue;
         }
+        // A camera aimed at a window that does not exist draws nowhere.
+        let Some(w) = ids.iter().position(|id| id.0 == cam.target) else { continue };
         let k = usize::from(cam.kind == Camera::PERSPECTIVE);
-        active[k] += 1;
-        if chosen[k].as_ref().is_none_or(|(c, _, _)| e.id() < c.id()) {
-            chosen[k] = Some((e, *cam, world_affine(g, t)));
+        active[w][k] += 1;
+        if chosen[w][k].as_ref().is_none_or(|(c, _, _)| e.id() < c.id()) {
+            chosen[w][k] = Some((e, *cam, world_affine(g, t)));
         }
     }
-    frame.d2.ignored_cameras = active[0].saturating_sub(1);
-    frame.d3.ignored_cameras = active[1].saturating_sub(1);
-    if active[0] > 1 && !warnings.multiple_cameras {
-        warnings.multiple_cameras = true;
-        crate::global_warn(&format!(
-            "{} 2D cameras are active; only the one with the lowest entity id is used (the rest are ignored)", active[0]
-        ));
+    for (w, a) in active.iter().enumerate() {
+        for (k, n) in a.iter().enumerate() {
+            let flag = if k == 0 { &mut warnings.multiple_cameras } else { &mut warnings.multiple_cameras_3d };
+            if *n > 1 && !*flag {
+                *flag = true;
+                crate::global_warn(&format!(
+                    "{n} {} cameras are active for window {}; only the one with the lowest entity id is used (the rest are ignored)",
+                    if k == 0 { "2D" } else { "3D" },
+                    ids[w].0
+                ));
+            }
+        }
     }
-    if active[1] > 1 && !warnings.multiple_cameras_3d {
-        warnings.multiple_cameras_3d = true;
-        crate::global_warn(&format!(
-            "{} 3D cameras are active; only the one with the lowest entity id is used (the rest are ignored)", active[1]
-        ));
-    }
-    let viewport = cx.window.size;
-    let [c2, c3] = chosen;
-    let view_of = |(entity, cam, a): (Entity, Camera, Affine2)| {
+    let view_of = |viewport: (u32, u32), (entity, cam, a): (Entity, Camera, Affine2)| {
         let g = GlobalTransform::from_affine(a);
         let (position, rotation) = (g.position(), g.rotation());
         let (view, projection) = camera_matrices(&cam, position, rotation, viewport);
@@ -124,8 +126,28 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
             view_projection: mat(projection * view),
         }
     };
-    frame.d2.camera = c2.map(view_of);
-    frame.d3.camera = c3.map(view_of);
+    let mut per_window: Vec<(Option<CameraView>, usize, Option<CameraView>, usize)> = Vec::with_capacity(ids.len());
+    for (w, [c2, c3]) in chosen.into_iter().enumerate() {
+        let viewport = cx.windows.get(ids[w]).map_or((0, 0), |s| s.size);
+        per_window.push((c2.map(|c| view_of(viewport, c)), active[w][0].saturating_sub(1), c3.map(|c| view_of(viewport, c)), active[w][1].saturating_sub(1)));
+    }
+    {
+        let (c2, i2, c3, i3) = per_window.remove(0);
+        frame.d2.camera = c2;
+        frame.d2.ignored_cameras = i2;
+        frame.d3.camera = c3;
+        frame.d3.ignored_cameras = i3;
+    }
+    // One entry per open secondary window, in id order (rebuilt every frame).
+    frame.windows.clear();
+    for (id, (c2, i2, c3, i3)) in ids.iter().skip(1).zip(per_window) {
+        let mut wf = WindowFrame { window: id.0, ..Default::default() };
+        wf.d2.camera = c2;
+        wf.d2.ignored_cameras = i2;
+        wf.d3.camera = c3;
+        wf.d3.ignored_cameras = i3;
+        frame.windows.push(wf);
+    }
 
     // ---- sprites ----
     {
@@ -158,6 +180,11 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
     }
     }
     frame.d2.sprites.sort_by_key(|s| (s.layer, s.entity.id()));
+    for w in &mut frame.windows {
+        if w.d2.camera.is_some() {
+            w.d2.sprites.clone_from(&frame.d2.sprites);
+        }
+    }
 
     // ---- debug draw: queued shapes -> screen pixels (one frame of life) ----
     if let Some(dd) = cx.resources.get_mut::<super::DebugDraw2D>() {
@@ -176,6 +203,11 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
         frame.d3.meshes.push(MeshInstance { entity: e, mesh: *m, world: lift(world_affine(g, t)) });
     }
     frame.d3.meshes.sort_by_key(|m| m.entity.id());
+    for w in &mut frame.windows {
+        if w.d3.camera.is_some() {
+            w.d3.meshes.clone_from(&frame.d3.meshes);
+        }
+    }
 
     // ---- textures: drained, delivered once ----
     frame.textures = match cx.resources.get_mut::<Textures>() {

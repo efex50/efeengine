@@ -99,14 +99,27 @@ pub struct Frame3D {
     pub meshes: Vec<MeshInstance>,
 }
 
+/// The 2D and 3D parts of one SECONDARY window (see [`RenderFrame::windows`]).
+#[derive(Clone, Debug, Default)]
+pub struct WindowFrame {
+    /// The window id (never 0; the main window's parts are `RenderFrame::d2` / `d3`).
+    pub window: u32,
+    pub d2: Frame2D,
+    pub d3: Frame3D,
+}
+
 /// Everything a renderer needs for one frame. A resource, rebuilt every frame in
 /// `Stage::RenderExtract`.
 #[derive(Clone, Debug, Default)]
 pub struct RenderFrame {
-    /// The 2D part: drawn after the 3D part.
+    /// The 2D part of the MAIN window: drawn after the 3D part.
     pub d2: Frame2D,
-    /// The 3D part: drawn first.
+    /// The 3D part of the MAIN window: drawn first.
     pub d3: Frame3D,
+    /// One entry per open secondary window, by window id. Each has its own camera (an active
+    /// `Camera` whose `target` is that window; none = the window is cleared) and shares the
+    /// sprites / meshes of the world. No debug draw in these (it belongs to the main window).
+    pub windows: Vec<WindowFrame>,
     /// Texture store changes since the previous frame; delivered once. Every renderer of the
     /// frame gets the same list.
     pub textures: TextureChanges,
@@ -114,6 +127,17 @@ pub struct RenderFrame {
     pub frame: u64,
     /// `Time::elapsed` in seconds.
     pub time: f64,
+}
+
+impl RenderFrame {
+    /// The 2D and 3D parts of a window (`0` = the main window).
+    pub fn window(&self, window: u32) -> Option<(&Frame2D, &Frame3D)> {
+        if window == 0 {
+            Some((&self.d2, &self.d3))
+        } else {
+            self.windows.iter().find(|w| w.window == window).map(|w| (&w.d2, &w.d3))
+        }
+    }
 }
 
 /// Latched "already warned" flags: each problem is logged once, not every frame.
@@ -127,4 +151,6 @@ pub struct RenderWarnings {
     pub no_renderer_3d: bool,
     /// A `Parent` cycle was found (and broken).
     pub hierarchy_cycle: bool,
+    /// A secondary window's surface format differs from the main window's (it is not drawn).
+    pub window_format_mismatch: bool,
 }

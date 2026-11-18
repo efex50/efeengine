@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use hecs::{Component, ComponentError, ComponentId, ComponentRef, Entity, Query, QueryBorrow, QueryOne, Tick, World};
 
 use crate::engine::{
-    WindowState,
+    WindowState, Windows,
     commands::ParCommands,
     events::{EventRegistry, Events},
     input::{GamepadState, InputState},
@@ -329,7 +329,10 @@ pub struct ParCtx<'a> {
     pub time: &'a Time,
     pub input: &'a InputState,
     pub gamepads: &'a GamepadState,
+    /// The main window's state (same as `windows.main()`).
     pub window: &'a WindowState,
+    /// Every window's state.
+    pub windows: &'a Windows,
     resources: &'a Resources,
     events: &'a EventRegistry,
     access: &'a Access,
@@ -348,7 +351,7 @@ impl<'a> ParCtx<'a> {
         time: &'a Time,
         input: &'a InputState,
         gamepads: &'a GamepadState,
-        window: &'a WindowState,
+        windows: &'a Windows,
         resources: &'a Resources,
         events: &'a EventRegistry,
         access: &'a Access,
@@ -362,7 +365,8 @@ impl<'a> ParCtx<'a> {
             time,
             input,
             gamepads,
-            window,
+            window: windows.main(),
+            windows,
             resources,
             events,
             access,

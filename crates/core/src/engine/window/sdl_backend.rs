@@ -8,7 +8,7 @@ use crate::engine::{
         axis_from_i16, trigger_from_i16, ElementState, GamepadAxis, GamepadButton, GamepadId, GamepadState, InputEvent, InputEventKind, TouchPhase, WheelUnit, WindowEvent as EngineWindowEvent,
         WindowId,
     },
-    window::{CursorIcon, InnerWindow},
+    window::{CursorIcon, InnerWindow, WindowDesc},
 };
 
 /// SDL window + event pump. Neither is `Send`/`Sync`: SDL requires windows and
@@ -22,16 +22,37 @@ pub struct SdlWindowManager{
     cursors: std::collections::HashMap<CursorIcon, sdl3::mouse::Cursor>,
     open_pads: Vec<(sdl3::joystick::JoystickId, sdl3::gamepad::Gamepad)>,
     gamepad_subsystem: Option<sdl3::GamepadSubsystem>,
-    main_window:sdl3::video::Window,
+    /// Every open window by engine id (0 = main). Dropped before the SDL subsystems below.
+    windows: std::collections::BTreeMap<u32, SdlWin>,
+    /// SDL window id -> engine window id.
+    by_sdl: std::collections::HashMap<u32, u32>,
     event_pump:EventPump,
     video: sdl3::VideoSubsystem,
     mouse: sdl3::mouse::MouseUtil,
     /// Keeps the SDL context alive for as long as the window exists.
     _sdl:sdl3::Sdl,
+}
+
+/// One SDL window and what was reported for it.
+struct SdlWin {
+    window: sdl3::video::Window,
     /// Set once the initial Resized/ScaleFactorChanged have been sent.
     sent_initial_state: bool,
     /// Last display scale reported, to emit `ScaleFactorChanged` only on change.
     last_scale: f64,
+}
+
+impl SdlWin {
+    fn new(window: sdl3::video::Window) -> Self {
+        Self { window, sent_initial_state: false, last_scale: 0.0 }
+    }
+
+    /// Display scale. `SDL_GetWindowDisplayScale` returns 0.0 on failure, which would collapse
+    /// the UI, so anything not finite and positive is 1.0.
+    fn scale(&self) -> f64 {
+        let s = self.window.display_scale() as f64;
+        if s.is_finite() && s > 0.0 { s } else { 1.0 }
+    }
 }
 
 fn now_ns() -> u64 {
@@ -40,11 +61,14 @@ fn now_ns() -> u64 {
 }
 
 impl SdlWindowManager {
-    /// Display scale of the main window. `SDL_GetWindowDisplayScale` returns 0.0 on
-    /// failure, which would collapse the UI, so anything not finite and positive is 1.0.
-    fn current_scale(&self) -> f64 {
-        let s = self.main_window.display_scale() as f64;
-        if s.is_finite() && s > 0.0 { s } else { 1.0 }
+    /// The window `id`, or the main one for an unknown id.
+    fn win(&self, id: WindowId) -> &SdlWin {
+        self.windows.get(&id.0).unwrap_or_else(|| &self.windows[&0])
+    }
+
+    fn win_mut(&mut self, id: WindowId) -> &mut SdlWin {
+        let key = if self.windows.contains_key(&id.0) { id.0 } else { 0 };
+        self.windows.get_mut(&key).expect("main window exists")
     }
 
     /// `size` is the logical window size.
@@ -95,59 +119,87 @@ impl SdlWindowManager {
             cursors: std::collections::HashMap::new(),
             open_pads,
             gamepad_subsystem,
-            main_window: window,
+            by_sdl: std::collections::HashMap::from([(window.id(), 0)]),
+            windows: std::collections::BTreeMap::from([(0, SdlWin::new(window))]),
             event_pump: pump,
             video,
             mouse,
             _sdl: s,
-            sent_initial_state: false,
-            last_scale: 0.0,
         })
     }
 }
 
 impl InnerWindow for SdlWindowManager {
-    fn sdl_window_ptr(&self) -> *mut sdl3::sys::video::SDL_Window {
-        self.main_window.raw()
+    fn create_window(&mut self, id: WindowId, desc: &WindowDesc) -> Result<(), EngineError> {
+        let werr = |e: &dyn std::fmt::Display| EngineError::Window(e.to_string());
+        let mut b = self.video.window(&desc.title, desc.size.0.max(1), desc.size.1.max(1));
+        if desc.resizable {
+            b.resizable();
+        }
+        let window = b.build().map_err(|e| werr(&e))?;
+        self.video.text_input().start(&window);
+        self.by_sdl.insert(window.id(), id.0);
+        self.windows.insert(id.0, SdlWin::new(window));
+        Ok(())
     }
-    fn set_title(&mut self,title:String) {
-        if let Err(e) = self.main_window.set_title(&title) {
+
+    fn close_window(&mut self, id: WindowId) {
+        if id.is_main() {
+            return;
+        }
+        if let Some(w) = self.windows.remove(&id.0) {
+            self.by_sdl.remove(&w.window.id());
+        }
+    }
+
+    fn sdl_window_ptr(&self, window: WindowId) -> *mut sdl3::sys::video::SDL_Window {
+        self.windows.get(&window.0).map_or(std::ptr::null_mut(), |w| w.window.raw())
+    }
+
+    fn raw_handles(&self, window: WindowId) -> Option<(raw_window_handle::RawWindowHandle, raw_window_handle::RawDisplayHandle)> {
+        let w = &self.windows.get(&window.0)?.window;
+        Some((w.window_handle().ok()?.as_raw(), w.display_handle().ok()?.as_raw()))
+    }
+
+    fn set_title(&mut self, window: WindowId, title:String) {
+        if let Err(e) = self.win_mut(window).window.set_title(&title) {
             log::warn!("failed to set window title: {e}");
         }
     }
     /// Drawable size in physical pixels (matches the wgpu surface on HiDPI).
-    fn size(&self) -> (u32, u32) {
-        self.main_window.size_in_pixels()
+    fn size(&self, window: WindowId) -> (u32, u32) {
+        self.win(window).window.size_in_pixels()
     }
 
     /// Window display scale (SDL_GetWindowDisplayScale).
-    fn scale_factor(&self) -> f64 {
-        self.current_scale()
+    fn scale_factor(&self, window: WindowId) -> f64 {
+        self.win(window).scale()
     }
 
-    fn logical_size(&self) -> (u32, u32) {
-        self.main_window.size()
+    fn logical_size(&self, window: WindowId) -> (u32, u32) {
+        self.win(window).window.size()
     }
 
-    fn set_text_input(&mut self, enabled: bool) {
+    fn set_text_input(&mut self, window: WindowId, enabled: bool) {
         let ti = self.video.text_input();
+        let w = &self.win(window).window;
         if enabled {
-            ti.start(&self.main_window);
+            ti.start(w);
         } else {
-            ti.stop(&self.main_window);
+            ti.stop(w);
         }
     }
 
-    fn set_text_input_area(&mut self, x: i32, y: i32, w: i32, h: i32, cursor: i32) {
+    fn set_text_input_area(&mut self, window: WindowId, x: i32, y: i32, w: i32, h: i32, cursor: i32) {
         let rect = sdl3::rect::Rect::new(x, y, w.max(0) as u32, h.max(0) as u32);
-        self.video.text_input().set_rect(&self.main_window, rect, cursor);
+        self.video.text_input().set_rect(&self.win(window).window, rect, cursor);
     }
 
-    fn set_cursor_visible(&mut self, visible: bool) {
+    fn set_cursor_visible(&mut self, _window: WindowId, visible: bool) {
         self.mouse.show_cursor(visible);
     }
 
-    fn set_cursor_icon(&mut self, icon: CursorIcon) {
+    fn set_cursor_icon(&mut self, _window: WindowId, icon: CursorIcon) {
         use sdl3::mouse::{Cursor, SystemCursor as S};
         if !self.cursors.contains_key(&icon) {
             let sys = match icon {
@@ -173,12 +225,12 @@ impl InnerWindow for SdlWindowManager {
         }
     }
 
-    fn set_cursor_grab(&mut self, grab: bool) {
-        self.mouse.set_relative_mouse_mode(&self.main_window, grab);
+    fn set_cursor_grab(&mut self, window: WindowId, grab: bool) {
+        self.mouse.set_relative_mouse_mode(&self.win(window).window, grab);
     }
 
-    fn set_fullscreen(&mut self, on: bool) {
-        if let Err(e) = self.main_window.set_fullscreen(on) {
+    fn set_fullscreen(&mut self, window: WindowId, on: bool) {
+        if let Err(e) = self.win_mut(window).window.set_fullscreen(on) {
             crate::engine::log::global_warn(&format!("set_fullscreen({on}) failed: {e}"));
         }
     }
@@ -186,28 +238,33 @@ impl InnerWindow for SdlWindowManager {
     fn poll_events(&mut self, out: &mut Vec<InputEvent>) {
         use sdl3::event::{DisplayEvent, WindowEvent};
 
-        if !self.sent_initial_state {
-            self.sent_initial_state = true;
-            let ts = now_ns();
-            let (width, height) = self.main_window.size_in_pixels();
+        // Windows that have not reported their size and scale yet (the main one on the first
+        // poll, a new window on the poll after its creation).
+        let ts = now_ns();
+        for (id, w) in self.windows.iter_mut() {
+            if w.sent_initial_state {
+                continue;
+            }
+            w.sent_initial_state = true;
+            let (width, height) = w.window.size_in_pixels();
             out.push(InputEvent::with_time(
                 InputEventKind::Window(EngineWindowEvent::Resized { width, height }),
                 ts,
-                WindowId::MAIN,
+                WindowId(*id),
             ));
-            self.last_scale = self.current_scale();
+            w.last_scale = w.scale();
             out.push(InputEvent::with_time(
-                InputEventKind::Window(EngineWindowEvent::ScaleFactorChanged { scale: self.last_scale }),
+                InputEventKind::Window(EngineWindowEvent::ScaleFactorChanged { scale: w.last_scale }),
                 ts,
-                WindowId::MAIN,
+                WindowId(*id),
             ));
         }
 
         let mut close_sent = false;
-        // Set on pixel-size changes: fractional-scale changes on the same display are not
+        // Windows whose pixel size changed: fractional-scale changes on the same display are not
         // reported by sdl3 0.14.42 as DISPLAY_SCALE_CHANGED, so the scale is re-read once
         // at the end of the poll.
-        let mut scale_dirty = false;
+        let mut scale_dirty: Vec<WindowId> = Vec::new();
         // Drain the pump (also keeps the OS from deeming the window frozen).
         // Collected first: handling needs `&self` while the pump borrows `&mut self`.
         let events: Vec<SdlEvent> = self.event_pump.poll_iter().collect();
@@ -223,13 +280,12 @@ impl InnerWindow for SdlWindowManager {
                     }
                 }
                 SdlEvent::Window { timestamp, window_id, win_event } => {
-                    let window = win_id(&self.main_window, window_id);
+                    let window = self.win_id(window_id);
                     match win_event {
                         WindowEvent::CloseRequested => {
-                            if !close_sent {
-                                close_sent = true;
-                                push(timestamp, window, InputEventKind::Window(EngineWindowEvent::CloseRequested));
-                            }
+                            // One close per window per poll (a main close ends the run anyway).
+                            push(timestamp, window, InputEventKind::Window(EngineWindowEvent::CloseRequested));
+                            close_sent |= window.is_main();
                         }
                         WindowEvent::FocusGained => {
                             push(timestamp, window, InputEventKind::Window(EngineWindowEvent::Focused(true)));
@@ -237,29 +293,39 @@ impl InnerWindow for SdlWindowManager {
                         WindowEvent::FocusLost => {
                             push(timestamp, window, InputEventKind::Window(EngineWindowEvent::Focused(false)));
                         }
+                        WindowEvent::EnterFullscreen => {
+                            push(timestamp, window, InputEventKind::Window(EngineWindowEvent::FullscreenChanged(true)));
+                        }
+                        WindowEvent::LeaveFullscreen => {
+                            push(timestamp, window, InputEventKind::Window(EngineWindowEvent::FullscreenChanged(false)));
+                        }
                         // Pixel size (not logical size) so the surface matches the drawable on HiDPI.
                         WindowEvent::PixelSizeChanged(w, h) => {
                             push(timestamp, window, InputEventKind::Window(EngineWindowEvent::Resized {
                                 width: w.max(0) as u32,
                                 height: h.max(0) as u32,
                             }));
-                            scale_dirty = true;
+                            scale_dirty.push(window);
                         }
                         WindowEvent::DisplayChanged(_) => {
-                            let scale = self.current_scale();
-                            if scale != self.last_scale {
-                                self.last_scale = scale;
-                                push(timestamp, window, InputEventKind::Window(EngineWindowEvent::ScaleFactorChanged { scale }));
+                            if let Some(sw) = self.windows.get_mut(&window.0) {
+                                let scale = sw.scale();
+                                if scale != sw.last_scale {
+                                    sw.last_scale = scale;
+                                    push(timestamp, window, InputEventKind::Window(EngineWindowEvent::ScaleFactorChanged { scale }));
+                                }
                             }
                         }
                         _ => {}
                     }
                 }
                 SdlEvent::Display { timestamp, display_event: DisplayEvent::ContentScaleChanged, .. } => {
-                    let scale = self.current_scale();
-                    if scale != self.last_scale {
-                        self.last_scale = scale;
-                        push(timestamp, WindowId::MAIN, InputEventKind::Window(EngineWindowEvent::ScaleFactorChanged { scale }));
+                    for (id, sw) in self.windows.iter_mut() {
+                        let scale = sw.scale();
+                        if scale != sw.last_scale {
+                            sw.last_scale = scale;
+                            push(timestamp, WindowId(*id), InputEventKind::Window(EngineWindowEvent::ScaleFactorChanged { scale }));
+                        }
                     }
                 }
                 SdlEvent::KeyDown { timestamp, window_id, keycode, scancode, keymod, repeat, .. } => {
@@ -270,7 +336,7 @@ impl InnerWindow for SdlWindowManager {
                         repeat,
                         mods: modifiers(keymod),
                     };
-                    push(timestamp, win_id(&self.main_window, window_id), kind);
+                    push(timestamp, self.win_id(window_id), kind);
                 }
                 SdlEvent::KeyUp { timestamp, window_id, keycode, scancode, keymod, .. } => {
                     let kind = InputEventKind::Key {
@@ -280,28 +346,28 @@ impl InnerWindow for SdlWindowManager {
                         repeat: false,
                         mods: modifiers(keymod),
                     };
-                    push(timestamp, win_id(&self.main_window, window_id), kind);
+                    push(timestamp, self.win_id(window_id), kind);
                 }
                 SdlEvent::TextInput { timestamp, window_id, text } => {
                     if !text.is_empty() {
-                        push(timestamp, win_id(&self.main_window, window_id), InputEventKind::Text(text));
+                        push(timestamp, self.win_id(window_id), InputEventKind::Text(text));
                     }
                 }
                 SdlEvent::TextEditing { timestamp, window_id, text, start, length } => {
-                    push(timestamp, win_id(&self.main_window, window_id), InputEventKind::TextEditing { text, cursor: start, len: length });
+                    push(timestamp, self.win_id(window_id), InputEventKind::TextEditing { text, cursor: start, len: length });
                 }
                 SdlEvent::MouseMotion { timestamp, window_id, which, x, y, xrel, yrel, .. } => {
                     if which == sdl3::sys::touch::SDL_TOUCH_MOUSEID { continue; }
-                    let (sx, sy) = pixel_ratio_of(&self.main_window);
-                    push(timestamp, win_id(&self.main_window, window_id), InputEventKind::MouseMotion {
+                    let (sx, sy) = pixel_ratio_of(&self.win(self.win_id(window_id)).window);
+                    push(timestamp, self.win_id(window_id), InputEventKind::MouseMotion {
                         pos: (x * sx, y * sy),
                         delta: (xrel * sx, yrel * sy),
                     });
                 }
                 SdlEvent::MouseButtonDown { timestamp, window_id, which, mouse_btn, x, y, .. } => {
                     if which == sdl3::sys::touch::SDL_TOUCH_MOUSEID { continue; }
-                    let (sx, sy) = pixel_ratio_of(&self.main_window);
-                    push(timestamp, win_id(&self.main_window, window_id), InputEventKind::MouseButton {
+                    let (sx, sy) = pixel_ratio_of(&self.win(self.win_id(window_id)).window);
+                    push(timestamp, self.win_id(window_id), InputEventKind::MouseButton {
                         button: mouse_button(mouse_btn),
                         state: ElementState::Pressed,
                         pos: (x * sx, y * sy),
@@ -309,8 +375,8 @@ impl InnerWindow for SdlWindowManager {
                 }
                 SdlEvent::MouseButtonUp { timestamp, window_id, which, mouse_btn, x, y, .. } => {
                     if which == sdl3::sys::touch::SDL_TOUCH_MOUSEID { continue; }
-                    let (sx, sy) = pixel_ratio_of(&self.main_window);
-                    push(timestamp, win_id(&self.main_window, window_id), InputEventKind::MouseButton {
+                    let (sx, sy) = pixel_ratio_of(&self.win(self.win_id(window_id)).window);
+                    push(timestamp, self.win_id(window_id), InputEventKind::MouseButton {
                         button: mouse_button(mouse_btn),
                         state: ElementState::Released,
                         pos: (x * sx, y * sy),
@@ -319,7 +385,7 @@ impl InnerWindow for SdlWindowManager {
                 SdlEvent::MouseWheel { timestamp, window_id, which, x, y, direction, .. } => {
                     if which == sdl3::sys::touch::SDL_TOUCH_MOUSEID { continue; }
                     let sign = if matches!(direction, sdl3::mouse::MouseWheelDirection::Flipped) { -1.0 } else { 1.0 };
-                    push(timestamp, win_id(&self.main_window, window_id), InputEventKind::MouseWheel {
+                    push(timestamp, self.win_id(window_id), InputEventKind::MouseWheel {
                         delta: (x * sign, y * sign),
                         unit: WheelUnit::Line,
                     });
@@ -328,19 +394,19 @@ impl InnerWindow for SdlWindowManager {
                 // SDL_EVENT_FINGER_CANCELED arrives as `Event::Unknown` without finger id,
                 // so `TouchPhase::Cancelled` is never produced natively.
                 SdlEvent::FingerDown { timestamp, finger_id, x, y, .. } => {
-                    let (pw, ph) = self.main_window.size_in_pixels();
+                    let (pw, ph) = self.main_window().size_in_pixels();
                     push(timestamp, WindowId::MAIN, InputEventKind::Touch {
                         id: finger_id, phase: TouchPhase::Started, pos: (x * pw as f32, y * ph as f32),
                     });
                 }
                 SdlEvent::FingerMotion { timestamp, finger_id, x, y, .. } => {
-                    let (pw, ph) = self.main_window.size_in_pixels();
+                    let (pw, ph) = self.main_window().size_in_pixels();
                     push(timestamp, WindowId::MAIN, InputEventKind::Touch {
                         id: finger_id, phase: TouchPhase::Moved, pos: (x * pw as f32, y * ph as f32),
                     });
                 }
                 SdlEvent::FingerUp { timestamp, finger_id, x, y, .. } => {
-                    let (pw, ph) = self.main_window.size_in_pixels();
+                    let (pw, ph) = self.main_window().size_in_pixels();
                     push(timestamp, WindowId::MAIN, InputEventKind::Touch {
                         id: finger_id, phase: TouchPhase::Ended, pos: (x * pw as f32, y * ph as f32),
                     });
@@ -364,15 +430,17 @@ impl InnerWindow for SdlWindowManager {
             }
         }
 
-        if scale_dirty {
-            let scale = self.current_scale();
-            if scale != self.last_scale {
-                self.last_scale = scale;
-                out.push(InputEvent::with_time(
-                    InputEventKind::Window(EngineWindowEvent::ScaleFactorChanged { scale }),
-                    now_ns(),
-                    WindowId::MAIN,
-                ));
+        for window in scale_dirty {
+            if let Some(sw) = self.windows.get_mut(&window.0) {
+                let scale = sw.scale();
+                if scale != sw.last_scale {
+                    sw.last_scale = scale;
+                    out.push(InputEvent::with_time(
+                        InputEventKind::Window(EngineWindowEvent::ScaleFactorChanged { scale }),
+                        now_ns(),
+                        window,
+                    ));
+                }
             }
         }
     }
@@ -422,8 +490,15 @@ impl InnerWindow for SdlWindowManager {
     }
 }
 
-fn win_id(main: &sdl3::video::Window, id: u32) -> WindowId {
-    if id == main.id() { WindowId::MAIN } else { WindowId(id) }
+impl SdlWindowManager {
+    /// The engine id of the SDL window `id` (events for windows already closed count as main).
+    fn win_id(&self, id: u32) -> WindowId {
+        WindowId(self.by_sdl.get(&id).copied().unwrap_or(0))
+    }
+
+    fn main_window(&self) -> &sdl3::video::Window {
+        &self.windows[&0].window
+    }
 }
 
 /// Physical pixels per logical window unit, per axis (1.0 when a size is 0).
@@ -436,12 +511,12 @@ fn pixel_ratio_of(w: &sdl3::video::Window) -> (f32, f32) {
 
 impl HasDisplayHandle for SdlWindowManager {
     fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-        self.main_window.display_handle()
+        self.main_window().display_handle()
     }
 }
 
 impl HasWindowHandle for SdlWindowManager {
     fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-        self.main_window.window_handle()
+        self.main_window().window_handle()
     }
 }

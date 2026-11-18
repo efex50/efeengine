@@ -66,6 +66,7 @@ impl OffscreenGpu {
     /// The borrowed handles a renderer gets (scale factor 1).
     pub fn gpu(&self) -> Gpu<'_> {
         Gpu {
+            window: 0,
             adapter: &self.adapter,
             instance: &self.instance,
             backend: self.adapter.get_info().backend,

@@ -112,13 +112,15 @@ fn rotated_camera_view() {
 fn cameras_are_chosen_per_kind() {
     let mut e = engine();
     let c2 = e.world_mut().spawn((Transform::default(), Camera::orthographic_2d()));
-    let c3 = e.world_mut().spawn((Transform::default(), Camera { target: 7, ..Camera::perspective_3d() }));
+    // a camera aimed at a window that does not exist is not a candidate
+    e.world_mut().spawn((Transform::default(), Camera { target: 7, ..Camera::perspective_3d() }));
+    let c3 = e.world_mut().spawn((Transform::default(), Camera::perspective_3d()));
     e.world_mut().spawn((Transform::default(), Camera::perspective_3d()));
     let f = frame_of(&mut e);
     assert_eq!(f.d2.camera.as_ref().unwrap().entity, c2);
     assert_eq!(f.d2.ignored_cameras, 0);
     let c = f.d3.camera.as_ref().unwrap();
-    assert_eq!((c.entity, c.target, c.kind), (c3, 7, Camera::PERSPECTIVE));
+    assert_eq!((c.entity, c.target, c.kind), (c3, 0, Camera::PERSPECTIVE));
     assert_eq!(f.d3.ignored_cameras, 1);
 }
 

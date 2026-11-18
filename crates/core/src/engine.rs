@@ -4,11 +4,13 @@ use once_cell::sync::{Lazy, OnceCell};
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::{debug_info, engine::{config::{EngineConfig, Threads}, error::EngineError, events::EventRegistry, parallel::Executor, input::{Filter, InputFilter, GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::{Res, Resources}, schedule::{Access, Ctx, EngineCommand, Commands, ParCtx, Schedule, ScheduleError, Stage, SystemEntry}, plugin::{Plugin, PluginError}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, window::WindowManager};
+use crate::{debug_info, engine::{config::{EngineConfig, Threads}, error::EngineError, events::EventRegistry, parallel::Executor, input::{Filter, InputFilter, GamepadState, InputEvent, InputEventKind, InputState, WindowEvent, WindowId}, messages::Message, resources::{Res, Resources}, schedule::{Access, Ctx, EngineCommand, Commands, ParCtx, Schedule, ScheduleError, Stage, SystemEntry}, plugin::{Plugin, PluginError}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::{GameWindowManager, WindowDesc}}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages};
 use crate::engine::components::{Camera, GlobalTransform, MeshHandle, Parent, Sprite, TextureHandle, Transform, Velocity, Visibility};
 use crate::engine::render::{self as rendering, gpu::GpuContext, CustomRenderer, RenderFrame, RenderOverlay, RenderWarnings, Renderer2D, Renderer3D, Renderers, Textures};
 use crate::{global_info, thread_pool::{init_global_pool, init_global_pool_auto}};
 pub mod window;
+pub mod windows;
+pub use windows::{WindowState, Windows};
 pub mod messages;
 pub mod log;
 pub mod render;
@@ -72,21 +74,6 @@ pub enum Lifecycle{
 
 
 
-/// Last known state of the main window, kept up to date from window events.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct WindowState{
-    /// Drawable size in physical pixels.
-    pub size: (u32, u32),
-    pub scale_factor: f64,
-    pub focused: bool,
-}
-
-impl Default for WindowState {
-    fn default() -> Self {
-        Self { size: (0, 0), scale_factor: 1.0, focused: true }
-    }
-}
-
 /// How many participants the scheduler uses for `threads`. `Auto` is the pool size (from the
 /// core count or `EFE_THREADS`), and `Single` headless.
 fn resolve_threads(threads: Threads, headless: bool) -> usize {
@@ -105,7 +92,8 @@ pub struct EngineState{
     /// `Engine::register_component` / `register_struct` add to it (and to the API index); the
     /// registry's `register*` methods are crate-private, so a public `&mut` here cannot bypass them.
     pub types: TypeRegistry,
-    pub window: WindowState,
+    /// Per-window state (size, scale, focus, fullscreen); the main window is also `Ctx::window`.
+    pub windows: Windows,
     pub input: InputState,
     pub gamepads: GamepadState,
     pub time: Time,
@@ -214,7 +202,7 @@ impl Engine {
         let state = EngineState{
             world: hecs::World::new(),
             types: TypeRegistry::new(),
-            window: WindowState::default(),
+            windows: Windows::new(),
             input: InputState::new(),
             gamepads: GamepadState::new(),
             time: Time::new(cfg.fixed_dt),
@@ -1092,7 +1080,7 @@ impl Engine {
                 self.logger.info(&format!("threads: {}, pool size: {size}", self.threads()));
             },
             Message::ChangeTitle(tit) => {
-                self.windows.set_title(tit.to_string());
+                self.windows.set_title(WindowId::MAIN, tit.to_string());
             },
             Message::Log(log_msg) => {
                 self.logger.log(log_msg);
@@ -1130,14 +1118,27 @@ impl Engine {
         for c in cmds {
             match c {
                 EngineCommand::Quit => self.request_shutdown(),
-                EngineCommand::SetTitle(t) => self.windows.set_title(t),
+                EngineCommand::SetTitle(t) => self.windows.set_title(WindowId::MAIN, t),
                 EngineCommand::SetFrameRate(f) => self.set_frame_rate(f),
-                EngineCommand::SetCursorVisible(v) => self.windows.set_cursor_visible(v),
-                EngineCommand::SetCursorIcon(i) => self.windows.set_cursor_icon(i),
-                EngineCommand::SetCursorGrab(g) => self.windows.set_cursor_grab(g),
-                EngineCommand::SetFullscreen(on) => self.windows.set_fullscreen(on),
-                EngineCommand::SetTextInput(on) => self.windows.set_text_input(on),
-                EngineCommand::SetTextInputArea { x, y, w, h, cursor } => self.windows.set_text_input_area(x, y, w, h, cursor),
+                // Cursor, grab and text input follow the window that has focus.
+                EngineCommand::SetCursorVisible(v) => self.windows.set_cursor_visible(self.state.windows.focused(), v),
+                EngineCommand::SetCursorIcon(i) => self.windows.set_cursor_icon(self.state.windows.focused(), i),
+                EngineCommand::SetCursorGrab(g) => self.windows.set_cursor_grab(self.state.windows.focused(), g),
+                EngineCommand::SetFullscreen(on) => self.windows.set_fullscreen(WindowId::MAIN, on),
+                EngineCommand::SetTextInput(on) => self.windows.set_text_input(self.state.windows.focused(), on),
+                EngineCommand::SetTextInputArea { x, y, w, h, cursor } => {
+                    self.windows.set_text_input_area(self.state.windows.focused(), x, y, w, h, cursor)
+                }
+                EngineCommand::CreateWindow { id, desc } => {
+                    if let Err(e) = self.open_window(id, desc) {
+                        self.logger.error(&format!("create_window: {e}"));
+                        // The id was handed out already: tell the game it will never exist.
+                        self.windows.inject(InputEvent::with_time(InputEventKind::Window(WindowEvent::Closed), 0, id));
+                    }
+                }
+                EngineCommand::CloseWindow(id) => self.close_window(id),
+                EngineCommand::SetWindowTitle(id, t) => self.windows.set_title(id, t),
+                EngineCommand::SetWindowFullscreen(id, on) => self.windows.set_fullscreen(id, on),
                 EngineCommand::ReloadMods => {
                     let report = self.reload_mods();
                     self.log_load_report(&report);
@@ -1160,8 +1161,8 @@ impl Engine {
     fn run_stage(&mut self, stage: Stage) {
         {
             let Engine { schedule, state, events, commands, exec, .. } = self;
-            let EngineState { world, types, window, input, gamepads, time, resources, scripting } = state;
-            let mut cx = Ctx::new(world, &*types, resources, &*time, &*input, &*gamepads, &*window, commands, scripting, events, exec);
+            let EngineState { world, types, windows, input, gamepads, time, resources, scripting } = state;
+            let mut cx = Ctx::new(world, &*types, resources, &*time, &*input, &*gamepads, &*windows, commands, scripting, events, exec);
             schedule.run(stage, &mut cx, exec);
         }
         self.apply_commands();
@@ -1200,6 +1201,7 @@ impl Engine {
                     o.init(&gpu.gpu());
                 }
                 self.gpu = Some(gpu);
+                self.sync_window_surfaces();
                 self.logger.info("Graphics Context Initialized!");
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -1217,7 +1219,19 @@ impl Engine {
     /// Create the window's `SDL_Renderer` (SDL mode).
     #[cfg(not(target_arch = "wasm32"))]
     fn init_sdl_mode(&mut self) -> Result<(), String> {
-        let window = self.windows.sdl_window_ptr();
+        // SDL mode draws the main window only (an `SDL_Renderer` owns its textures, so every window
+        // would need its own texture table): close secondary windows opened before graphics came up.
+        let extra: Vec<WindowId> = self.windows.secondary().to_vec();
+        if !extra.is_empty() {
+            self.logger.error(&format!(
+                "SDL mode (SDL_Renderer) draws the main window only; closing {} secondary window(s). Use the wgpu modes for multiple windows",
+                extra.len()
+            ));
+            for id in extra {
+                self.close_window(id);
+            }
+        }
+        let window = self.windows.sdl_window_ptr(WindowId::MAIN);
         // SAFETY: the pointer is the main SDL window owned by `self.windows`; `self.sdl` is
         // declared before `windows` in `Engine`, so the renderer is destroyed first.
         let draw = unsafe { rendering::SdlDraw2D::for_window(window) }?;
@@ -1226,25 +1240,100 @@ impl Engine {
         Ok(())
     }
 
-    /// Reconfigure the surface and tell the renderer.
-    fn resize_surface(&mut self, size: (u32, u32)) {
+    /// Open a secondary window (`WindowDesc`): the id is returned at once; the window gets its
+    /// first `Resized` / `ScaleFactorChanged` and a `Created` event in the next frame. The GPU
+    /// surface is made now when graphics is up, else when it comes up. Fails when the platform
+    /// cannot open the window, or in SDL mode (`docs/MULTI_WINDOW.md`).
+    ///
+    /// ```no_run
+    /// use efeengine_core::prelude::*;
+    /// use efeengine_core::window::WindowDesc;
+    /// let mut engine = Engine::new("game")?;
+    /// let map = engine.create_window(WindowDesc::new("Map").web_element("#sidebar").size(320, 240))?;
+    /// engine.world_mut().spawn((Camera::new_2d().target(map), Transform::default()));
+    /// # Ok::<(), efeengine_core::engine::error::EngineError>(())
+    /// ```
+    pub fn create_window(&mut self, desc: WindowDesc) -> Result<WindowId, EngineError> {
+        let id = self.commands.alloc_window();
+        self.open_window(id, desc)?;
+        Ok(id)
+    }
+
+    fn open_window(&mut self, id: WindowId, desc: WindowDesc) -> Result<(), EngineError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.sdl.is_some() {
+            return Err(EngineError::Window("SDL mode (SDL_Renderer) draws the main window only; use a wgpu GPU mode for more windows".into()));
+        }
+        self.windows.create_window(id, &desc)?;
+        self.state.windows.insert(id, desc.size);
+        self.windows.inject(InputEvent::with_time(InputEventKind::Window(WindowEvent::Created), 0, id));
+        self.sync_window_surfaces();
+        Ok(())
+    }
+
+    /// Close a secondary window: its surface, camera targets and UI go away; a `Closed` event is
+    /// delivered next frame. Ignored for the main window (use `commands.quit()`) and unknown ids.
+    pub fn close_window(&mut self, id: WindowId) {
+        if id.is_main() || !self.windows.exists(id) {
+            return;
+        }
+        // The surface must go before the window it was created from.
         if let Some(gpu) = &mut self.gpu {
+            gpu.remove_window(id);
+        }
+        self.windows.close_window(id);
+        self.state.windows.remove(id);
+        self.windows.inject(InputEvent::with_time(InputEventKind::Window(WindowEvent::Closed), 0, id));
+    }
+
+    /// Give every open secondary window a GPU surface (and the overlays their `init` for it).
+    fn sync_window_surfaces(&mut self) {
+        let Some(gpu) = &mut self.gpu else { return };
+        for &id in self.windows.secondary() {
+            if gpu.windows.contains_key(&id.0) {
+                continue;
+            }
+            let size = self.windows.size(id);
+            let scale = self.windows.scale_factor(id);
+            match gpu.add_window(&self.windows, id, size, scale) {
+                Ok(()) => {
+                    if let Some(g) = gpu.gpu_for(id.0) {
+                        for o in &mut self.overlays {
+                            o.init(&g);
+                        }
+                    }
+                }
+                Err(e) => self.logger.error(&format!("window {}: no GPU surface ({e}); it will stay blank", id.0)),
+            }
+        }
+    }
+
+    /// Reconfigure the surface of `window` and tell the renderer / overlays.
+    fn resize_surface(&mut self, window: WindowId, size: (u32, u32)) {
+        let Some(gpu) = &mut self.gpu else { return };
+        if window.is_main() {
             if gpu.resize(size) {
                 self.renderer.resize(&gpu.gpu());
                 for o in &mut self.overlays {
                     o.resize(&gpu.gpu());
                 }
             }
+        } else if gpu.resize_window(window, size) {
+            if let Some(g) = gpu.gpu_for(window.0) {
+                for o in &mut self.overlays {
+                    o.resize(&g);
+                }
+            }
         }
     }
 
-    /// Acquire the surface, let the renderer draw the frame, present. Skipped without a GPU
-    /// (headless, failed init). If the frame could not be drawn, its texture changes are put
-    /// back so the renderer still sees them once.
+    /// Acquire each window's surface, let the renderer draw its part of the frame, present. Skipped
+    /// without a GPU (headless, failed init). If no window could be drawn, the frame's texture
+    /// changes are put back so the renderer still sees them once.
     fn render_frame_to_surface(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(sdl) = &mut self.sdl {
-            let (w, h) = self.windows.size();
+            let (w, h) = self.windows.size(WindowId::MAIN);
             if w > 0 && h > 0 && self.state.resources.contains::<RenderFrame>() {
                 let frame = self.state.resources.get::<RenderFrame>().expect("RenderFrame resource");
                 sdl.render(&frame, self.renderer.has_custom(), self.renderer.has_installed_2d(), !self.overlays.is_empty());
@@ -1258,7 +1347,9 @@ impl Engine {
         if !state.resources.contains::<RenderFrame>() {
             return;
         }
-        let mut drawn = false;
+        // The frame's texture changes go to the first window that gets drawn; later windows get none.
+        let mut delivered = false;
+        let mut warnings = state.resources.remove::<RenderWarnings>().unwrap_or_default();
         let size = (gpu.config.width, gpu.config.height);
         if !gpu.is_suspended() && size.0 > 0 && size.1 > 0 {
             use wgpu::CurrentSurfaceTexture as Cst;
@@ -1283,23 +1374,51 @@ impl Engine {
             };
             if let Some(output) = output {
                 let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let mut warnings = state.resources.remove::<RenderWarnings>().unwrap_or_default();
                 {
                     let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
-                    renderer.render(&gpu.gpu(), &view, &frame, &mut warnings);
+                    renderer.render(&gpu.gpu(), &view, &frame, &frame.textures, &mut warnings);
                 }
-                state.resources.insert(warnings);
                 for o in overlays.iter_mut() {
                     o.render(&gpu.gpu(), &view);
                 }
-                drawn = true;
+                delivered = true;
                 gpu.queue.present(output);
                 if suboptimal {
                     gpu.reconfigure();
                 }
             }
         }
-        if !drawn {
+        // Secondary windows (same device, one surface each).
+        let ids: Vec<u32> = gpu.windows.keys().copied().collect();
+        let empty = rendering::TextureChanges::default();
+        for id in ids {
+            let Some(mut w) = gpu.windows.remove(&id) else { continue };
+            let g = rendering::Gpu { surface_format: w.surface.format(), size: w.size, scale_factor: w.scale_factor, window: id, ..gpu.gpu() };
+            if g.surface_format != gpu.config.format {
+                if !warnings.window_format_mismatch {
+                    warnings.window_format_mismatch = true;
+                    logger.error(&format!(
+                        "window {id}: surface format {:?} differs from the main window's {:?}; secondary windows are not drawn",
+                        g.surface_format, gpu.config.format
+                    ));
+                }
+            } else if let Some(sf) = w.surface.acquire(&g) {
+                {
+                    let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
+                    let tex = if delivered { &empty } else { &frame.textures };
+                    renderer.render(&g, &sf.view, &frame, tex, &mut warnings);
+                }
+                delivered = true;
+                for o in overlays.iter_mut() {
+                    o.render(&g, &sf.view);
+                }
+                w.surface.present(&g, sf);
+            }
+            drop(g);
+            gpu.windows.insert(id, w);
+        }
+        state.resources.insert(warnings);
+        if !delivered {
             let changes = state.resources.get_mut::<RenderFrame>().map(|f| std::mem::take(&mut f.textures));
             if let (Some(changes), Some(t)) = (changes, state.resources.get_mut::<Textures>()) {
                 t.requeue(changes);
@@ -1309,29 +1428,43 @@ impl Engine {
 
     fn handle_window_event(&mut self, ev: &InputEvent) {
         let InputEventKind::Window(w) = &ev.kind else { return };
+        let id = ev.window;
+        self.state.windows.apply(id, w);
         match *w {
             WindowEvent::Resized { width, height } => {
-                self.state.window.size = (width, height);
-                self.resize_surface((width, height));
+                self.resize_surface(id, (width, height));
             }
             WindowEvent::ScaleFactorChanged { scale } => {
-                self.state.window.scale_factor = scale;
                 if let Some(gpu) = &mut self.gpu {
                     let s = crate::engine::render::gpu::sanitize_scale(scale);
-                    if gpu.scale_factor != s {
-                        gpu.scale_factor = s;
-                        for o in &mut self.overlays {
-                            o.resize(&gpu.gpu());
+                    if id.is_main() {
+                        if gpu.scale_factor != s {
+                            gpu.scale_factor = s;
+                            for o in &mut self.overlays {
+                                o.resize(&gpu.gpu());
+                            }
+                        }
+                    } else if let Some(sw) = gpu.windows.get_mut(&id.0) {
+                        if sw.scale_factor != s {
+                            sw.scale_factor = s;
+                            if let Some(g) = gpu.gpu_for(id.0) {
+                                for o in &mut self.overlays {
+                                    o.resize(&g);
+                                }
+                            }
                         }
                     }
                 }
             }
-            WindowEvent::Focused(f) => {
-                self.state.window.focused = f;
-            }
+            WindowEvent::Focused(_) | WindowEvent::FullscreenChanged(_) | WindowEvent::Created | WindowEvent::Closed => {}
             WindowEvent::CloseRequested => {
-                self.logger.info("close requested");
-                self.request_shutdown();
+                if id.is_main() {
+                    self.logger.info("close requested");
+                    self.request_shutdown();
+                } else {
+                    // The event is delivered to the game this frame; the window goes now.
+                    self.close_window(id);
+                }
             }
         }
     }

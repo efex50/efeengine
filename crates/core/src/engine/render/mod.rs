@@ -28,7 +28,7 @@ pub use draw2d::{Blend, Draw2D, DrawCommand, DrawList, DrawState, Filter, Rect, 
 pub use draw2d_wgpu::{GpuTextures, WgpuDraw2D};
 pub use extra_surface::{ExtraSurface, SurfaceFrame};
 pub use extract::{camera_matrices, render_extract};
-pub use frame::{CameraView, Frame2D, Frame3D, MeshInstance, RenderFrame, RenderWarnings, SpriteInstance};
+pub use frame::{CameraView, Frame2D, Frame3D, MeshInstance, RenderFrame, RenderWarnings, SpriteInstance, WindowFrame};
 #[cfg(not(target_arch = "wasm32"))]
 pub use offscreen::{encode_png, write_png, OffscreenGpu};
 pub use png::PngError;
@@ -56,6 +56,10 @@ pub struct Gpu<'a> {
     pub size: (u32, u32),
     /// Window scale factor (physical pixels per logical pixel): logical = physical / scale.
     pub scale_factor: f32,
+    /// The window this call draws to: 0 = the main window. Size, scale and `surface_format` above are
+    /// that window's. A renderer with size-dependent resources (depth buffer, ...) keys them by this
+    /// and checks `size` on every `render`.
+    pub window: u32,
 }
 
 /// The surface view a [`Renderer2D`] / [`Renderer3D`] draws into.
@@ -87,11 +91,14 @@ pub trait Renderer2D: 'static {
     /// pipelines, buffers, samplers.
     fn init(&mut self, _gpu: &Gpu) {}
 
-    /// The surface was resized (`gpu.size` is the new size): recreate size-dependent
-    /// resources. Not called for the initial size (see `init`).
+    /// The MAIN window's surface was resized (`gpu.size` is the new size): recreate
+    /// size-dependent resources. Not called for the initial size (see `init`), nor for secondary
+    /// windows: those draw through the same `render` with their own `gpu.window` / `gpu.size`,
+    /// so keep size-dependent resources per `gpu.window` and check `gpu.size` in `render`.
     fn resize(&mut self, _gpu: &Gpu) {}
 
-    /// Record and submit the 2D drawing into `target`. `textures` lists what to create,
+    /// Record and submit the 2D drawing into `target` (the window `gpu.window`; `frame` is that
+    /// window's part of the frame). `textures` lists what to create,
     /// replace and drop in your GPU texture table; it is delivered once, so process it every
     /// call.
     fn render(&mut self, gpu: &Gpu, target: &Target, frame: &Frame2D, textures: &TextureChanges);
@@ -133,13 +140,14 @@ pub trait CustomRenderer: 'static {
 /// Extra drawing on top of what the renderers drew (a UI layer, debug HUD, ...).
 /// Added with `Engine::add_render_overlay`; main thread only (no `Send` needed).
 pub trait RenderOverlay: 'static {
-    /// Once when the GPU is ready (or when added, if it already is).
+    /// Once per window when its surface is ready (or when added, if it already is): `gpu.window`
+    /// is the window (0 = main). Secondary windows call it when they are created.
     fn init(&mut self, _gpu: &Gpu) {}
-    /// The surface was resized or the scale factor changed (`gpu.size` / `gpu.scale_factor`
-    /// are the new values).
+    /// The window's surface was resized or its scale factor changed (`gpu.window`, `gpu.size`,
+    /// `gpu.scale_factor` are the new values).
     fn resize(&mut self, _gpu: &Gpu) {}
-    /// Draw on top of what the main renderer drew into `target` this frame (use
-    /// `LoadOp::Load`, never clear). Called every rendered frame after the renderers and
+    /// Draw on top of what the renderers drew into `target` this frame (use `LoadOp::Load`,
+    /// never clear). Called for every rendered window (`gpu.window`) after the renderers and
     /// before present, in the order the overlays were added.
     fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView);
 }

@@ -44,6 +44,7 @@ impl Rig {
         let mut cx = UiBackendCx::new((SIZE.0 as f32, SIZE.1 as f32), 1.0);
         be.init(&mut cx);
         let gpu = Gpu {
+            window: 0,
             device: &device,
             queue: &queue,
             adapter: &adapter,
@@ -68,6 +69,7 @@ impl Rig {
 
     fn frame(&mut self) {
         let gpu = Gpu {
+            window: 0,
             device: &self.device,
             queue: &self.queue,
             adapter: &self.adapter,

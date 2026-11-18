@@ -1,9 +1,9 @@
 //! Per-frame input state folded from [`InputEvent`]s.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::capture::{CaptureCell, GameInput, InputCapture};
-use super::events::{InputEvent, InputEventKind, TouchPhase, WheelUnit, WindowEvent};
+use super::events::{InputEvent, InputEventKind, TouchPhase, WheelUnit, WindowEvent, WindowId};
 use super::keys::{ElementState, KeyCode, Modifiers, MouseButton};
 
 /// Pixels per wheel line (`Pixel` units are divided by this).
@@ -19,13 +19,19 @@ pub struct InputState {
     mouse_held: HashSet<MouseButton>,
     mouse_just_pressed: HashSet<MouseButton>,
     mouse_just_released: HashSet<MouseButton>,
-    mouse_pos: Option<(f32, f32)>,
+    /// Last pointer position per window (physical px, that window's origin).
+    pointers: HashMap<u32, (f32, f32)>,
+    /// The window the pointer was last seen in.
+    pointer_window: Option<WindowId>,
     mouse_delta: (f32, f32),
     wheel: (f32, f32),
     touches: Vec<(u64, (f32, f32))>,
     text: String,
     modifiers: Modifiers,
-    focused: bool,
+    /// Windows that have focus (initially the main window, as before the first event).
+    focused: HashSet<u32>,
+    /// The window that had focus last (where the keyboard goes).
+    focus_window: WindowId,
     events: Vec<InputEvent>,
     capture: CaptureCell,
     // Game view (what `game_input()` reads): events flagged `captured` are left out. A key /
@@ -57,13 +63,15 @@ impl InputState {
             mouse_held: HashSet::new(),
             mouse_just_pressed: HashSet::new(),
             mouse_just_released: HashSet::new(),
-            mouse_pos: None,
+            pointers: HashMap::new(),
+            pointer_window: None,
             mouse_delta: (0.0, 0.0),
             wheel: (0.0, 0.0),
             touches: Vec::new(),
             text: String::new(),
             modifiers: Modifiers::NONE,
-            focused: true,
+            focused: HashSet::from([0]),
+            focus_window: WindowId::MAIN,
             events: Vec::new(),
             capture: CaptureCell::default(),
             captured_keys: HashSet::new(),
@@ -143,7 +151,8 @@ impl InputState {
             // IME composition is only reported in `events()`; the committed text is a `Text`.
             InputEventKind::TextEditing { .. } => {}
             InputEventKind::MouseMotion { pos, delta } => {
-                self.mouse_pos = Some(*pos);
+                self.pointers.insert(ev.window.0, *pos);
+                self.pointer_window = Some(ev.window);
                 self.mouse_delta.0 += delta.0;
                 self.mouse_delta.1 += delta.1;
                 if !ev.captured {
@@ -152,7 +161,8 @@ impl InputState {
                 }
             }
             InputEventKind::MouseButton { button, state, pos } => {
-                self.mouse_pos = Some(*pos);
+                self.pointers.insert(ev.window.0, *pos);
+                self.pointer_window = Some(ev.window);
                 match state {
                     ElementState::Pressed => {
                         if self.mouse_held.insert(*button) {
@@ -201,9 +211,16 @@ impl InputState {
                 }
             },
             InputEventKind::Window(w) => match w {
-                WindowEvent::Focused(true) => self.focused = true,
+                WindowEvent::Focused(true) => {
+                    self.focused.insert(ev.window.0);
+                    self.focus_window = ev.window;
+                }
                 WindowEvent::Focused(false) => {
-                    self.focused = false;
+                    self.focused.remove(&ev.window.0);
+                    // Another window of the game still has focus: keys and buttons stay held.
+                    if !self.focused.is_empty() {
+                        return;
+                    }
                     for k in self.held.iter() {
                         if !self.captured_keys.contains(k) {
                             self.game_just_released.insert(*k);
@@ -221,9 +238,21 @@ impl InputState {
                     self.modifiers = Modifiers::NONE;
                     self.touches.clear();
                 }
+                WindowEvent::Closed => {
+                    self.focused.remove(&ev.window.0);
+                    self.pointers.remove(&ev.window.0);
+                    if self.pointer_window == Some(ev.window) {
+                        self.pointer_window = None;
+                    }
+                    if self.focus_window == ev.window {
+                        self.focus_window = WindowId::MAIN;
+                    }
+                }
                 WindowEvent::Resized { .. }
                 | WindowEvent::ScaleFactorChanged { .. }
-                | WindowEvent::CloseRequested => {}
+                | WindowEvent::CloseRequested
+                | WindowEvent::Created
+                | WindowEvent::FullscreenChanged(_) => {}
             },
         }
     }
@@ -263,8 +292,19 @@ impl InputState {
     pub fn mouse_pressed(&self, b: MouseButton) -> bool { self.mouse_held.contains(&b) }
     pub fn mouse_just_pressed(&self, b: MouseButton) -> bool { self.mouse_just_pressed.contains(&b) }
     pub fn mouse_just_released(&self, b: MouseButton) -> bool { self.mouse_just_released.contains(&b) }
-    /// `None` until the first motion/button event.
-    pub fn mouse_pos(&self) -> Option<(f32, f32)> { self.mouse_pos }
+    /// Pointer position in the MAIN window (physical px); `None` until its first motion/button
+    /// event. It keeps the last position when the pointer is in another window: use
+    /// [`mouse_pos_in`](Self::mouse_pos_in) / [`pointer_window`](Self::pointer_window) there.
+    pub fn mouse_pos(&self) -> Option<(f32, f32)> { self.mouse_pos_in(WindowId::MAIN) }
+    /// Last pointer position in `window` (physical px, origin top-left of that window).
+    pub fn mouse_pos_in(&self, window: WindowId) -> Option<(f32, f32)> { self.pointers.get(&window.0).copied() }
+    /// The window the pointer was last seen in (`None` before any pointer event, or after that
+    /// window closed).
+    pub fn pointer_window(&self) -> Option<WindowId> { self.pointer_window }
+    /// The window that had keyboard focus last (key and text events come from it).
+    pub fn focus_window(&self) -> WindowId { self.focus_window }
+    /// Whether `window` has focus now.
+    pub fn focused_in(&self, window: WindowId) -> bool { self.focused.contains(&window.0) }
     /// Summed over the frame.
     pub fn mouse_delta(&self) -> (f32, f32) { self.mouse_delta }
     /// Summed over the frame, in lines.
@@ -276,7 +316,8 @@ impl InputState {
     /// All `Text` events of the frame, concatenated.
     pub fn text(&self) -> &str { &self.text }
     pub fn modifiers(&self) -> Modifiers { self.modifiers }
-    pub fn focused(&self) -> bool { self.focused }
+    /// Whether any window of the game has focus.
+    pub fn focused(&self) -> bool { !self.focused.is_empty() }
     /// Raw events applied since `begin_frame`, in order.
     pub fn events(&self) -> &[InputEvent] { &self.events }
 }

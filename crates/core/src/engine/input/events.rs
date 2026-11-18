@@ -10,12 +10,31 @@
 
 use super::keys::{ElementState, Key, KeyCode, Modifiers, MouseButton};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Identifies a window of the engine. `WindowId::MAIN` (0) is the window the engine was created
+/// with; others come from `Engine::create_window` / `Commands::create_window` (1, 2, ...,
+/// never reused).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct WindowId(pub u32);
 
 impl WindowId {
     /// The main window. Events without a window (touch) use this.
     pub const MAIN: WindowId = WindowId(0);
+
+    pub fn is_main(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl From<WindowId> for u32 {
+    fn from(w: WindowId) -> u32 {
+        w.0
+    }
+}
+
+impl From<u32> for WindowId {
+    fn from(w: u32) -> WindowId {
+        WindowId(w)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,7 +108,18 @@ pub enum WindowEvent {
     Resized { width: u32, height: u32 },
     ScaleFactorChanged { scale: f64 },
     Focused(bool),
+    /// The user asked to close the window. For the main window the engine shuts down; a
+    /// secondary window is removed by the engine right after (a `Closed` event follows).
     CloseRequested,
+    /// A window was opened (`Engine::create_window` / `Commands::create_window`). The event's
+    /// `window` is the new id; `Resized` and `ScaleFactorChanged` follow on the first poll.
+    Created,
+    /// A secondary window was removed (closed by the user or by `close_window`). Its camera
+    /// and UI layers no longer render anywhere.
+    Closed,
+    /// The window entered or left fullscreen (also when the user left it with the browser's Esc
+    /// or the window manager, not only through `set_fullscreen`).
+    FullscreenChanged(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

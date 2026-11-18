@@ -94,8 +94,9 @@ pub struct Camera {
     pub clear_color: [f32; 4],
     /// Non-zero: a candidate for the one camera of its kind the frame uses.
     pub active: u32,
-    /// Where this camera renders: a window id, 0 = the main window. Reserved for the
-    /// multi-window phase; ignored today (carried into `CameraView::target`).
+    /// Where this camera renders: a window id (`WindowId`), 0 = the main window. The active camera
+    /// of each kind with the lowest entity id is used per window; a camera aimed at a window that
+    /// does not exist draws nowhere. Set it with [`Camera::target`].
     pub target: u32,
 }
 
@@ -121,6 +122,29 @@ impl Camera {
     /// An active orthographic 2D camera at zoom 1 (same as `Camera::default()`).
     pub fn orthographic_2d() -> Self {
         Self::default()
+    }
+
+    /// Same as [`Camera::orthographic_2d`].
+    pub fn new_2d() -> Self {
+        Self::default()
+    }
+
+    /// Render to `window` (a `WindowId` or its raw `u32`): `Camera::new_2d().target(map)`.
+    pub fn target(mut self, window: impl Into<u32>) -> Self {
+        self.target = window.into();
+        self
+    }
+
+    /// Set the orthographic zoom (pixels per world unit).
+    pub fn zoom(mut self, zoom: f32) -> Self {
+        self.zoom = zoom;
+        self
+    }
+
+    /// Set the colour the target is cleared to (linear RGBA).
+    pub fn clear_color(mut self, rgba: [f32; 4]) -> Self {
+        self.clear_color = rgba;
+        self
     }
 
     /// An active perspective 3D camera (default near 0.1, far 1000), drawn by the `Renderer3D`.

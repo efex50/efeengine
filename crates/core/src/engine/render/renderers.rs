@@ -1,7 +1,7 @@
 //! The engine's renderer slots and the pass order.
 
 use super::frame::RenderWarnings;
-use super::{CustomRenderer, Gpu, RenderFrame, Renderer2D, Renderer3D, SpriteRenderer, Target};
+use super::{CustomRenderer, Gpu, RenderFrame, Renderer2D, Renderer3D, SpriteRenderer, Target, TextureChanges};
 
 /// The installed renderers. A [`CustomRenderer`], when set, replaces the 2D and 3D ones.
 pub(crate) struct Renderers {
@@ -10,11 +10,14 @@ pub(crate) struct Renderers {
     custom: Option<Box<dyn CustomRenderer>>,
     /// A 2D renderer other than the default was installed (SDL mode cannot run it).
     r2_installed: bool,
+    /// Clears secondary windows while a `CustomRenderer` (main window only) is installed.
+    window_clear: super::ClearRenderer,
+    warned_custom_windows: bool,
 }
 
 impl Renderers {
     pub fn new() -> Self {
-        Self { r2: Box::new(SpriteRenderer::new()), r3: None, custom: None, r2_installed: false }
+        Self { r2: Box::new(SpriteRenderer::new()), r3: None, custom: None, r2_installed: false, window_clear: super::ClearRenderer, warned_custom_windows: false }
     }
 
     /// Install a 2D renderer (drops a custom renderer). `builtin` is true for `SpriteRenderer` (SDL mode
@@ -75,18 +78,31 @@ impl Renderers {
         }
     }
 
-    /// Draw one frame into `view`: custom renderer alone, or 3D (if there is a 3D camera),
-    /// then 2D.
-    pub fn render(&mut self, gpu: &Gpu, view: &wgpu::TextureView, frame: &RenderFrame, warnings: &mut RenderWarnings) {
+    /// Draw `window` of the frame into `view`: custom renderer alone (main window only), or 3D
+    /// (if the window has a 3D camera), then 2D. `textures` is what the renderers get as the
+    /// texture changes (the frame's list for the first window drawn, empty for later ones; a
+    /// custom renderer reads `frame.textures` itself).
+    pub fn render(&mut self, gpu: &Gpu, view: &wgpu::TextureView, frame: &RenderFrame, textures: &TextureChanges, warnings: &mut RenderWarnings) {
+        let window = gpu.window;
+        let Some((d2, d3)) = frame.window(window) else { return };
         if let Some(c) = &mut self.custom {
-            c.render(gpu, view, frame);
+            if window == 0 {
+                c.render(gpu, view, frame);
+                return;
+            }
+            // A custom renderer draws the main window only: the others are just cleared.
+            if !self.warned_custom_windows {
+                self.warned_custom_windows = true;
+                crate::global_warn("a CustomRenderer draws the main window only; secondary windows are cleared and nothing else");
+            }
+            self.window_clear.render(gpu, &Target { view, clear: true }, d2, textures);
             return;
         }
         let mut clear = true;
-        if frame.d3.camera.is_some() {
+        if d3.camera.is_some() {
             match &mut self.r3 {
                 Some(r3) => {
-                    r3.render(gpu, &Target { view, clear }, &frame.d3, &frame.textures);
+                    r3.render(gpu, &Target { view, clear }, d3, textures);
                     clear = false;
                 }
                 None if !warnings.no_renderer_3d => {
@@ -96,6 +112,6 @@ impl Renderers {
                 None => {}
             }
         }
-        self.r2.render(gpu, &Target { view, clear }, &frame.d2, &frame.textures);
+        self.r2.render(gpu, &Target { view, clear }, d2, textures);
     }
 }
