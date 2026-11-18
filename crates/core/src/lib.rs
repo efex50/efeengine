@@ -18,8 +18,8 @@ pub mod math {
 }
 
 pub mod render {
-    //! Writing a renderer or touching the GPU: `Renderer`, `Gpu`, the `RenderFrame` and its parts, textures, plus the `wgpu` and `bytemuck` crates.
-    pub use crate::engine::render::{Renderer, RenderOverlay, Gpu, ExtraSurface, SurfaceFrame, ClearRenderer, PngError, RenderFrame, CameraView, SpriteInstance, MeshInstance, TextureChanges, Textures, Image, TextureError, RenderWarnings, SpriteRenderer};
+    //! Writing a renderer or touching the GPU: `Renderer2D`, `Renderer3D`, `CustomRenderer`, `Gpu`, `Target`, the `RenderFrame` and its parts, textures, plus the `wgpu` and `bytemuck` crates.
+    pub use crate::engine::render::{Renderer2D, Renderer3D, CustomRenderer, Target, Frame2D, Frame3D, RenderOverlay, Gpu, ExtraSurface, SurfaceFrame, ClearRenderer, PngError, RenderFrame, CameraView, SpriteInstance, MeshInstance, TextureChanges, Textures, Image, TextureError, RenderWarnings, SpriteRenderer};
     pub use bytemuck;
     pub use wgpu;
 }
@@ -91,7 +91,7 @@ pub mod log {
 pub use hecs;
 /// Math types used by components, re-exported as-is.
 pub use glam;
-/// The GPU API the `Renderer` trait is written against (re-exported so versions always match).
+/// The GPU API the renderer traits is written against (re-exported so versions always match).
 pub use wgpu;
 /// Re-exported so `#[script_component]` and renderers need no direct dependency.
 pub use bytemuck;

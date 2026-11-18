@@ -83,7 +83,7 @@ fn the_scripts_compile_and_spawn_the_first_round_through_the_cache() {
     e.run_frames(120, DT);
     assert!(errors(&e).is_empty(), "{:?}", errors(&e));
     // 1200 ground tiles + 5 coins + 3 enemies + player + shadow
-    assert_eq!(e.render_frame().sprites.len(), 1200 + 5 + 3 + 2);
+    assert_eq!(e.render_frame().d2.sprites.len(), 1200 + 5 + 3 + 2);
     // coins spawned by the script have the 16 x 16 size it wrote at the field offset
     assert!(e.world().query::<(&Coin, &Sprite)>().iter().all(|(_, s)| s.size == Vec2::splat(16.0)));
     // the coins got their Script from `engine.script.attach` inside the script

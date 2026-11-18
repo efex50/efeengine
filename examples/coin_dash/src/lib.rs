@@ -425,7 +425,7 @@ fn main() {
     match Engine::new("coin dash") {
         Ok(mut engine) => {
             setup(&mut engine);
-            engine.set_renderer(SpriteRenderer::new());
+            engine.set_renderer_2d(SpriteRenderer::new());
             global_info("[coin_dash] WASD / arrows to move: collect the coins, avoid the red enemies");
             engine.game_loop();
         }

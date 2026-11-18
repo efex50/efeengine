@@ -386,7 +386,7 @@ fn main() {
             #[cfg(target_family = "wasm")]
             let module = load_embedded(&mut engine);
             spawn_actors(&mut engine, &game, module);
-            engine.set_renderer(SpriteRenderer::new());
+            engine.set_renderer_2d(SpriteRenderer::new());
             global_info(&format!("[{GAME}] WASD / arrows to move: collect the coins, avoid the red enemies"));
             engine.game_loop();
         }

@@ -367,6 +367,12 @@ impl ScriptHost {
         self.current
     }
 
+    /// Whether module `id` is a mod, that is, limited to the namespaces of its grant (a game
+    /// module may import anything). Host functions of plugins use this for their own access rules.
+    pub fn is_mod(&self, id: ModuleId) -> bool {
+        self.slot(id).is_some_and(|s| s.allowed.is_some())
+    }
+
     /// Name of module `id`.
     pub fn module_name(&self, id: ModuleId) -> Option<&str> {
         self.frame.module_names.get(id.0 as usize).map(String::as_str)

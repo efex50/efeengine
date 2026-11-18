@@ -75,12 +75,12 @@ impl ScriptField for TextureHandle {
 }
 
 /// A camera. Its position and rotation are those of its entity's `Transform` (or
-/// `GlobalTransform`, once propagated); its scale is ignored. Exactly one camera is used per
+/// `GlobalTransform`, once propagated); its scale is ignored. One camera of each kind (2D, 3D) is used per
 /// frame: the active one with the lowest entity id (see `RenderFrame`).
 #[script_component]
 #[derive(Debug, PartialEq)]
 pub struct Camera {
-    /// 0 = orthographic 2D, 1 = perspective (reserved for the 3D phase).
+    /// 0 = orthographic 2D (drawn by the `Renderer2D`), 1 = perspective 3D (drawn by the `Renderer3D`).
     pub kind: u32,
     /// Orthographic magnification: pixels per world unit. 1 = one world unit is one pixel.
     pub zoom: f32,
@@ -92,10 +92,10 @@ pub struct Camera {
     pub fov_y: f32,
     /// Colour the target is cleared to (linear RGBA).
     pub clear_color: [f32; 4],
-    /// Non-zero: a candidate for the one camera the frame uses.
+    /// Non-zero: a candidate for the one camera of its kind the frame uses.
     pub active: u32,
-    /// Where this camera renders: 0 = the main window. Reserved for later (screen panels,
-    /// other windows); ignored today.
+    /// Where this camera renders: a window id, 0 = the main window. Reserved for the
+    /// multi-window phase; ignored today (carried into `CameraView::target`).
     pub target: u32,
 }
 
@@ -121,6 +121,11 @@ impl Camera {
     /// An active orthographic 2D camera at zoom 1 (same as `Camera::default()`).
     pub fn orthographic_2d() -> Self {
         Self::default()
+    }
+
+    /// An active perspective 3D camera (default near 0.1, far 1000), drawn by the `Renderer3D`.
+    pub fn perspective_3d() -> Self {
+        Self { kind: Self::PERSPECTIVE, near: 0.1, far: 1000.0, ..Self::default() }
     }
 }
 

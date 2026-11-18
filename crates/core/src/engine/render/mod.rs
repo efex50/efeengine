@@ -1,26 +1,30 @@
 //! Rendering: the engine side of it.
 //!
 //! The engine owns the GPU (instance, adapter, device, surface, configure, resize, acquire,
-//! present) and builds a plain-data [`RenderFrame`] each frame in `Stage::RenderExtract`. A
-//! game supplies the drawing as a [`Renderer`] (`Engine::set_renderer`); the default is
-//! [`ClearRenderer`], which only clears. See `docs/RENDERING.md`.
+//! present) and builds a plain-data [`RenderFrame`] each frame in `Stage::RenderExtract`. The
+//! frame is split into [`Frame2D`] and [`Frame3D`], drawn by a [`Renderer2D`] (default:
+//! [`SpriteRenderer`]) and an optional [`Renderer3D`]; pass order is 3D, then 2D, then the
+//! [`RenderOverlay`]s. A game that wants the whole frame and the whole surface installs a
+//! [`CustomRenderer`] instead. See `docs/RENDERER_PLAN.md` and `docs/RENDERING.md`.
 
 mod extra_surface;
 mod extract;
 mod frame;
 pub(crate) mod gpu;
 mod png;
+mod renderers;
 mod sprite_renderer;
 mod textures;
 
 pub use extra_surface::{ExtraSurface, SurfaceFrame};
 pub use extract::{camera_matrices, render_extract};
-pub use frame::{CameraView, MeshInstance, RenderFrame, RenderWarnings, SpriteInstance};
+pub use frame::{CameraView, Frame2D, Frame3D, MeshInstance, RenderFrame, RenderWarnings, SpriteInstance};
 pub use png::PngError;
+pub(crate) use renderers::Renderers;
 pub use sprite_renderer::SpriteRenderer;
 pub use textures::{Image, TextureChanges, TextureError, Textures};
 
-/// Borrowed GPU handles for a [`Renderer`] call.
+/// Borrowed GPU handles for a renderer call.
 pub struct Gpu<'a> {
     /// The adapter the device was created from (renderers like `iced_wgpu` need it).
     pub adapter: &'a wgpu::Adapter,
@@ -38,9 +42,64 @@ pub struct Gpu<'a> {
     pub scale_factor: f32,
 }
 
-/// The game's drawing code. The engine calls it on the main thread only (no `Send` needed;
-/// on the web there is one thread anyway).
-pub trait Renderer: 'static {
+/// The surface view a [`Renderer2D`] / [`Renderer3D`] draws into.
+pub struct Target<'a> {
+    /// The acquired surface view.
+    pub view: &'a wgpu::TextureView,
+    /// `true` for the first pass of the frame: clear to the camera's colour. `false` when an
+    /// earlier pass already drew (a 3D background under 2D sprites): use `LoadOp::Load`.
+    pub clear: bool,
+}
+
+impl Target<'_> {
+    /// The colour attachment load op for this pass (`clear_color` is linear RGBA).
+    pub fn load_op(&self, clear_color: [f32; 4]) -> wgpu::LoadOp<wgpu::Color> {
+        if self.clear {
+            let [r, g, b, a] = clear_color;
+            wgpu::LoadOp::Clear(wgpu::Color { r: r as f64, g: g as f64, b: b as f64, a: a as f64 })
+        } else {
+            wgpu::LoadOp::Load
+        }
+    }
+}
+
+/// Draws [`Frame2D`]. The engine calls it on the main thread only (no `Send` needed; on the
+/// web there is one thread anyway), every rendered frame, also without a 2D camera (then it
+/// should clear and draw nothing). Install with `Engine::set_renderer_2d`.
+pub trait Renderer2D: 'static {
+    /// Once, when the GPU is ready (or at `set_renderer_2d` if it already is): create
+    /// pipelines, buffers, samplers.
+    fn init(&mut self, _gpu: &Gpu) {}
+
+    /// The surface was resized (`gpu.size` is the new size): recreate size-dependent
+    /// resources. Not called for the initial size (see `init`).
+    fn resize(&mut self, _gpu: &Gpu) {}
+
+    /// Record and submit the 2D drawing into `target`. `textures` lists what to create,
+    /// replace and drop in your GPU texture table; it is delivered once, so process it every
+    /// call.
+    fn render(&mut self, gpu: &Gpu, target: &Target, frame: &Frame2D, textures: &TextureChanges);
+}
+
+/// Draws [`Frame3D`] (wgpu only). Called before the 2D pass, only on frames that have an
+/// active 3D camera. Install with `Engine::set_renderer_3d`; without one, 3D cameras log a
+/// warning once and draw nothing.
+pub trait Renderer3D: 'static {
+    /// Once, when the GPU is ready (or at `set_renderer_3d` if it already is).
+    fn init(&mut self, _gpu: &Gpu) {}
+
+    /// The surface was resized: recreate size-dependent resources (depth buffer, ...).
+    fn resize(&mut self, _gpu: &Gpu) {}
+
+    /// Record and submit the 3D drawing into `target` (it is the first pass, so `target.clear`
+    /// is set). `textures` as in [`Renderer2D::render`].
+    fn render(&mut self, gpu: &Gpu, target: &Target, frame: &Frame3D, textures: &TextureChanges);
+}
+
+/// A full wgpu renderer: gets the whole [`RenderFrame`] and the whole surface and replaces
+/// both the 2D and the 3D renderer (`Engine::set_renderer`). Unavailable in the planned SDL
+/// mode. `examples/custom_renderer` is one.
+pub trait CustomRenderer: 'static {
     /// Once, when the GPU is ready (or at `set_renderer` if it already is): create pipelines,
     /// buffers, samplers.
     fn init(&mut self, _gpu: &Gpu) {}
@@ -55,7 +114,7 @@ pub trait Renderer: 'static {
     fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView, frame: &RenderFrame);
 }
 
-/// Extra drawing on top of what the main [`Renderer`] drew (a UI layer, debug HUD, ...).
+/// Extra drawing on top of what the renderers drew (a UI layer, debug HUD, ...).
 /// Added with `Engine::add_render_overlay`; main thread only (no `Send` needed).
 pub trait RenderOverlay: 'static {
     /// Once when the GPU is ready (or when added, if it already is).
@@ -64,30 +123,28 @@ pub trait RenderOverlay: 'static {
     /// are the new values).
     fn resize(&mut self, _gpu: &Gpu) {}
     /// Draw on top of what the main renderer drew into `target` this frame (use
-    /// `LoadOp::Load`, never clear). Called every rendered frame after `Renderer::render` and
+    /// `LoadOp::Load`, never clear). Called every rendered frame after the renderers and
     /// before present, in the order the overlays were added.
     fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView);
 }
 
-/// The default renderer: clears to the camera's clear colour (black without a camera) and
-/// draws nothing else.
+/// A 2D renderer that only clears to the 2D camera's colour (black without a camera) and
+/// draws nothing else. [`SpriteRenderer`] is the default; this is for games that draw
+/// everything in an overlay or a 3D renderer.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ClearRenderer;
 
-impl Renderer for ClearRenderer {
-    fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView, frame: &RenderFrame) {
-        let [r, g, b, a] = frame.camera.as_ref().map_or([0.0, 0.0, 0.0, 1.0], |c| c.clear_color);
+impl Renderer2D for ClearRenderer {
+    fn render(&mut self, gpu: &Gpu, target: &Target, frame: &Frame2D, _textures: &TextureChanges) {
+        let clear = frame.camera.as_ref().map_or([0.0, 0.0, 0.0, 1.0], |c| c.clear_color);
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("clear") });
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
+                    view: target.view,
                     resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: r as f64, g: g as f64, b: b as f64, a: a as f64 }),
-                        store: wgpu::StoreOp::Store,
-                    },
+                    ops: wgpu::Operations { load: target.load_op(clear), store: wgpu::StoreOp::Store },
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,

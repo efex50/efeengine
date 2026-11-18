@@ -30,8 +30,8 @@ fn close(a: f32, b: f32) -> bool {
 fn no_camera_gives_none() {
     let mut e = engine();
     let f = frame_of(&mut e);
-    assert!(f.camera.is_none());
-    assert_eq!(f.ignored_cameras, 0);
+    assert!(f.d2.camera.is_none());
+    assert_eq!(f.d2.ignored_cameras, 0);
 }
 
 #[test]
@@ -39,11 +39,11 @@ fn one_camera_is_used() {
     let mut e = engine();
     let cam = e.world_mut().spawn((Camera { clear_color: [1.0, 0.5, 0.25, 1.0], ..Camera::default() }, Transform::from_position(Vec2::new(3.0, 4.0))));
     let f = frame_of(&mut e);
-    let c = f.camera.expect("camera");
+    let c = f.d2.camera.expect("camera");
     assert_eq!(c.entity, cam);
     assert_eq!(c.position, Vec2::new(3.0, 4.0));
     assert_eq!(c.clear_color, [1.0, 0.5, 0.25, 1.0]);
-    assert_eq!(f.ignored_cameras, 0);
+    assert_eq!(f.d2.ignored_cameras, 0);
     assert!(!e.resources().get::<RenderWarnings>().unwrap().multiple_cameras);
 }
 
@@ -52,10 +52,10 @@ fn inactive_cameras_are_ignored() {
     let mut e = engine();
     e.world_mut().spawn((Camera { active: 0, ..Camera::default() }, Transform::default()));
     let f = frame_of(&mut e);
-    assert!(f.camera.is_none());
+    assert!(f.d2.camera.is_none());
     let on = e.world_mut().spawn((Camera::default(), Transform::default()));
     // spawned after the inactive one but the only active one
-    assert_eq!(frame_of(&mut e).camera.unwrap().entity, on);
+    assert_eq!(frame_of(&mut e).d2.camera.unwrap().entity, on);
 }
 
 #[test]
@@ -64,19 +64,19 @@ fn two_active_cameras_use_the_lowest_id_and_warn_once() {
     let first = e.world_mut().spawn((Camera::default(), Transform::from_position(Vec2::new(1.0, 0.0))));
     let _second = e.world_mut().spawn((Camera::default(), Transform::from_position(Vec2::new(2.0, 0.0))));
     let f = frame_of(&mut e);
-    assert_eq!(f.camera.as_ref().unwrap().entity, first);
-    assert_eq!(f.camera.unwrap().position.x, 1.0);
-    assert_eq!(f.ignored_cameras, 1);
+    assert_eq!(f.d2.camera.as_ref().unwrap().entity, first);
+    assert_eq!(f.d2.camera.unwrap().position.x, 1.0);
+    assert_eq!(f.d2.ignored_cameras, 1);
     assert!(e.resources().get::<RenderWarnings>().unwrap().multiple_cameras, "the warning was latched");
     // still one camera per frame afterwards
-    assert_eq!(frame_of(&mut e).ignored_cameras, 1);
+    assert_eq!(frame_of(&mut e).d2.ignored_cameras, 1);
 }
 
 #[test]
 fn orthographic_view_and_projection() {
     let mut e = engine();
     e.world_mut().spawn((Camera { zoom: 2.0, ..Camera::default() }, Transform { position: Vec2::new(100.0, 50.0), rotation: 0.0, scale: Vec2::ONE }));
-    let c = frame_of(&mut e).camera.unwrap();
+    let c = frame_of(&mut e).d2.camera.unwrap();
     let (w, h) = c.viewport;
     assert_eq!((w, h), (800, 600), "headless window size");
     let (view, proj, vp) = (m4(c.view), m4(c.projection), m4(c.view_projection));
@@ -100,10 +100,26 @@ fn orthographic_view_and_projection() {
 fn rotated_camera_view() {
     let mut e = engine();
     e.world_mut().spawn((Camera::default(), Transform { position: Vec2::ZERO, rotation: std::f32::consts::FRAC_PI_2, scale: Vec2::ONE }));
-    let c = frame_of(&mut e).camera.unwrap();
+    let c = frame_of(&mut e).d2.camera.unwrap();
     // a camera turned 90 degrees counter-clockwise sees world +y along its own +x
     let p = m4(c.view) * Vec4::new(0.0, 10.0, 0.0, 1.0);
     assert!(close(p.x, 10.0) && close(p.y, 0.0), "{p:?}");
+}
+
+// ---- 2D / 3D split ----
+
+#[test]
+fn cameras_are_chosen_per_kind() {
+    let mut e = engine();
+    let c2 = e.world_mut().spawn((Transform::default(), Camera::orthographic_2d()));
+    let c3 = e.world_mut().spawn((Transform::default(), Camera { target: 7, ..Camera::perspective_3d() }));
+    e.world_mut().spawn((Transform::default(), Camera::perspective_3d()));
+    let f = frame_of(&mut e);
+    assert_eq!(f.d2.camera.as_ref().unwrap().entity, c2);
+    assert_eq!(f.d2.ignored_cameras, 0);
+    let c = f.d3.camera.as_ref().unwrap();
+    assert_eq!((c.entity, c.target, c.kind), (c3, 7, Camera::PERSPECTIVE));
+    assert_eq!(f.d3.ignored_cameras, 1);
 }
 
 // ---- sprites ----
@@ -118,17 +134,17 @@ fn sprites_are_gathered_sorted_and_filtered() {
     let mid = e.world_mut().spawn((Transform::from_position(Vec2::new(7.0, 9.0)), Sprite { layer: 2, ..Sprite::new(tex) }, Visibility::VISIBLE));
     let hidden = e.world_mut().spawn((Transform::default(), Sprite::default(), Visibility::HIDDEN));
     let f = frame_of(&mut e);
-    let order: Vec<_> = f.sprites.iter().map(|s| s.entity).collect();
+    let order: Vec<_> = f.d2.sprites.iter().map(|s| s.entity).collect();
     assert_eq!(order, [low_a, low_b, mid, high], "by layer, ties by entity id");
     assert!(!order.contains(&hidden));
     // auto size -> the texture's pixels, or 1x1 without a texture
-    assert_eq!(f.sprites[0].size, [1.0, 1.0]);
-    assert_eq!(f.sprites[1].size, [3.0, 4.0]);
-    assert_eq!(f.sprites[2].size, [16.0, 8.0]);
-    assert_eq!(f.sprites[2].texture, tex);
+    assert_eq!(f.d2.sprites[0].size, [1.0, 1.0]);
+    assert_eq!(f.d2.sprites[1].size, [3.0, 4.0]);
+    assert_eq!(f.d2.sprites[2].size, [16.0, 8.0]);
+    assert_eq!(f.d2.sprites[2].texture, tex);
     // world matrix, column-major: translation in the last column
-    assert_eq!(f.sprites[2].world[3], [7.0, 9.0, 0.0, 1.0]);
-    assert_eq!((f.sprites[0].uv_min, f.sprites[0].uv_max), ([0.0, 0.0], [1.0, 1.0]));
+    assert_eq!(f.d2.sprites[2].world[3], [7.0, 9.0, 0.0, 1.0]);
+    assert_eq!((f.d2.sprites[0].uv_min, f.d2.sprites[0].uv_max), ([0.0, 0.0], [1.0, 1.0]));
 }
 
 #[test]
@@ -138,7 +154,7 @@ fn sprite_size_zero_is_literal_unless_auto_size() {
     let zero = e.world_mut().spawn((Transform::default(), Sprite { layer: 0, ..Sprite::new(tex) }.with_size(Vec2::ZERO)));
     let auto = e.world_mut().spawn((Transform::default(), Sprite { layer: 1, size: Vec2::ZERO, ..Sprite::new(tex) }));
     let f = frame_of(&mut e);
-    let size_of_entity = |en| f.sprites.iter().find(|s| s.entity == en).unwrap().size;
+    let size_of_entity = |en| f.d2.sprites.iter().find(|s| s.entity == en).unwrap().size;
     assert_eq!(size_of_entity(zero), [0.0, 0.0]);
     assert_eq!(size_of_entity(auto), [16.0, 8.0]);
 }
@@ -149,11 +165,11 @@ fn sprite_uses_global_transform_and_meshes_are_listed() {
     let parent = e.world_mut().spawn((Transform::from_position(Vec2::new(10.0, 0.0)),));
     let kid = e.world_mut().spawn((Transform::from_position(Vec2::new(0.0, 5.0)), Parent::new(parent), Sprite::default(), MeshHandle { id: 3 }));
     let f = frame_of(&mut e);
-    assert_eq!(f.sprites[0].entity, kid);
-    assert_eq!(f.sprites[0].world[3], [10.0, 5.0, 0.0, 1.0]);
-    assert_eq!(f.meshes.len(), 1);
-    assert_eq!(f.meshes[0].mesh.id, 3);
-    assert_eq!(f.meshes[0].world[3], [10.0, 5.0, 0.0, 1.0]);
+    assert_eq!(f.d2.sprites[0].entity, kid);
+    assert_eq!(f.d2.sprites[0].world[3], [10.0, 5.0, 0.0, 1.0]);
+    assert_eq!(f.d3.meshes.len(), 1);
+    assert_eq!(f.d3.meshes[0].mesh.id, 3);
+    assert_eq!(f.d3.meshes[0].world[3], [10.0, 5.0, 0.0, 1.0]);
 }
 
 // ---- hierarchy ----

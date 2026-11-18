@@ -6,7 +6,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::{debug_info, engine::{config::{EngineConfig, Threads}, error::EngineError, events::EventRegistry, parallel::Executor, input::{Filter, InputFilter, GamepadState, InputEvent, InputEventKind, InputState, WindowEvent}, messages::Message, resources::{Res, Resources}, schedule::{Access, Ctx, EngineCommand, Commands, ParCtx, Schedule, ScheduleError, Stage, SystemEntry}, plugin::{Plugin, PluginError}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::GameWindowManager}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages, window::WindowManager};
 use crate::engine::components::{Camera, GlobalTransform, MeshHandle, Parent, Sprite, TextureHandle, Transform, Velocity, Visibility};
-use crate::engine::render::{self as rendering, gpu::GpuContext, ClearRenderer, RenderFrame, RenderOverlay, Renderer, Textures};
+use crate::engine::render::{self as rendering, gpu::GpuContext, CustomRenderer, RenderFrame, RenderOverlay, RenderWarnings, Renderer2D, Renderer3D, Renderers, Textures};
 use crate::{global_info, thread_pool::{init_global_pool, init_global_pool_auto}};
 pub mod window;
 pub mod messages;
@@ -118,8 +118,8 @@ pub struct Engine{
     // NOTE: field order matters. Fields drop in declaration order, and the surface inside
     // `gpu` was created from `windows`' raw window handle, so `renderer` and `gpu` must be
     // declared (and so dropped) before `windows`.
-    renderer: Box<dyn Renderer>,
-    /// Drawn after the renderer, before present, in add order.
+    renderer: Renderers,
+    /// Drawn after the renderers, before present, in add order.
     overlays: Vec<Box<dyn RenderOverlay>>,
     /// Run for every raw input event before `InputState::apply`, in add order.
     input_filters: Vec<Box<dyn InputFilter>>,
@@ -232,7 +232,7 @@ impl Engine {
         schedule.add(Stage::RenderExtract, Box::new(rendering::render_extract), "render_extract").order(order::USER);
 
         let mut engine = Self {
-            renderer: Box::new(ClearRenderer),
+            renderer: Renderers::new(),
             overlays: Vec::new(),
             input_filters: Vec::new(),
             gpu: None,
@@ -933,13 +933,27 @@ impl Engine {
         self.state.resources.get::<RenderFrame>().expect("RenderFrame resource")
     }
 
-    /// Install the game's renderer (replaces the default [`ClearRenderer`]). If the GPU is
-    /// already up, `init` runs at once; otherwise when it comes up.
-    pub fn set_renderer(&mut self, renderer: impl Renderer) {
-        self.renderer = Box::new(renderer);
-        if let Some(gpu) = &self.gpu {
-            self.renderer.init(&gpu.gpu());
-        }
+    /// Install the 2D renderer (replaces the default [`SpriteRenderer`](rendering::SpriteRenderer)
+    /// and any [`CustomRenderer`]). If the GPU is already up, `init` runs at once; otherwise
+    /// when it comes up.
+    pub fn set_renderer_2d(&mut self, renderer: impl Renderer2D) {
+        let gpu = self.gpu.as_ref().map(|g| g.gpu());
+        self.renderer.set_2d(Box::new(renderer), gpu.as_ref());
+    }
+
+    /// Install the 3D renderer (replaces any [`CustomRenderer`]). It runs before the 2D one on
+    /// frames with an active perspective camera. `init` as in [`Engine::set_renderer_2d`].
+    pub fn set_renderer_3d(&mut self, renderer: impl Renderer3D) {
+        let gpu = self.gpu.as_ref().map(|g| g.gpu());
+        self.renderer.set_3d(Box::new(renderer), gpu.as_ref());
+    }
+
+    /// Install a [`CustomRenderer`]: it gets the whole frame and surface and replaces both the
+    /// 2D and the 3D renderer until one of those is set again. `init` as in
+    /// [`Engine::set_renderer_2d`].
+    pub fn set_renderer(&mut self, renderer: impl CustomRenderer) {
+        let gpu = self.gpu.as_ref().map(|g| g.gpu());
+        self.renderer.set_custom(Box::new(renderer), gpu.as_ref());
     }
 
     /// Add a [`RenderOverlay`]: drawn on top of the renderer's output every rendered frame, in
@@ -1215,9 +1229,12 @@ impl Engine {
             };
             if let Some(output) = output {
                 let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
-                renderer.render(&gpu.gpu(), &view, &frame);
-                drop(frame);
+                let mut warnings = state.resources.remove::<RenderWarnings>().unwrap_or_default();
+                {
+                    let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
+                    renderer.render(&gpu.gpu(), &view, &frame, &mut warnings);
+                }
+                state.resources.insert(warnings);
                 for o in overlays.iter_mut() {
                     o.render(&gpu.gpu(), &view);
                 }

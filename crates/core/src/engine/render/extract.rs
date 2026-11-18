@@ -68,32 +68,41 @@ pub fn camera_matrices(cam: &Camera, position: Vec2, rotation: f32, viewport: (u
 pub fn render_extract(cx: &mut Ctx<'_>) {
     let mut frame = cx.resources.remove::<RenderFrame>().unwrap_or_default();
     let mut warnings = cx.resources.remove::<RenderWarnings>().unwrap_or_default();
-    frame.sprites.clear();
-    frame.meshes.clear();
+    frame.d2.sprites.clear();
+    frame.d3.meshes.clear();
     frame.frame = cx.time.frame();
     frame.time = cx.time.elapsed();
 
-    // ---- camera: the active one with the lowest entity id ----
-    let mut chosen: Option<(Entity, Camera, Affine2)> = None;
-    let mut active = 0usize;
+    // ---- cameras: per kind, the active one with the lowest entity id ----
+    let mut chosen: [Option<(Entity, Camera, Affine2)>; 2] = [None, None];
+    let mut active = [0usize; 2];
     for (e, cam, g, t) in cx.world.query::<(Entity, &Camera, Option<&GlobalTransform>, Option<&Transform>)>().iter() {
         if cam.active == 0 {
             continue;
         }
-        active += 1;
-        if chosen.as_ref().is_none_or(|(c, _, _)| e.id() < c.id()) {
-            chosen = Some((e, *cam, world_affine(g, t)));
+        let k = usize::from(cam.kind == Camera::PERSPECTIVE);
+        active[k] += 1;
+        if chosen[k].as_ref().is_none_or(|(c, _, _)| e.id() < c.id()) {
+            chosen[k] = Some((e, *cam, world_affine(g, t)));
         }
     }
-    frame.ignored_cameras = active.saturating_sub(1);
-    if active > 1 && !warnings.multiple_cameras {
+    frame.d2.ignored_cameras = active[0].saturating_sub(1);
+    frame.d3.ignored_cameras = active[1].saturating_sub(1);
+    if active[0] > 1 && !warnings.multiple_cameras {
         warnings.multiple_cameras = true;
         crate::global_warn(&format!(
-            "{active} cameras are active; only the one with the lowest entity id is used (the rest are ignored)"
+            "{} 2D cameras are active; only the one with the lowest entity id is used (the rest are ignored)", active[0]
+        ));
+    }
+    if active[1] > 1 && !warnings.multiple_cameras_3d {
+        warnings.multiple_cameras_3d = true;
+        crate::global_warn(&format!(
+            "{} 3D cameras are active; only the one with the lowest entity id is used (the rest are ignored)", active[1]
         ));
     }
     let viewport = cx.window.size;
-    frame.camera = chosen.map(|(entity, cam, a)| {
+    let [c2, c3] = chosen;
+    let view_of = |(entity, cam, a): (Entity, Camera, Affine2)| {
         let g = GlobalTransform::from_affine(a);
         let (position, rotation) = (g.position(), g.rotation());
         let (view, projection) = camera_matrices(&cam, position, rotation, viewport);
@@ -103,6 +112,7 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
             rotation,
             zoom: cam.zoom,
             kind: cam.kind,
+            target: cam.target,
             near: cam.near,
             far: cam.far,
             fov_y: cam.fov_y,
@@ -112,7 +122,9 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
             projection: mat(projection),
             view_projection: mat(projection * view),
         }
-    });
+    };
+    frame.d2.camera = c2.map(view_of);
+    frame.d3.camera = c3.map(view_of);
 
     // ---- sprites ----
     {
@@ -131,7 +143,7 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
         } else {
             s.size
         };
-        frame.sprites.push(SpriteInstance {
+        frame.d2.sprites.push(SpriteInstance {
             entity: e,
             world: lift(world_affine(g, t)),
             size: size.to_array(),
@@ -144,7 +156,7 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
         });
     }
     }
-    frame.sprites.sort_by_key(|s| (s.layer, s.entity.id()));
+    frame.d2.sprites.sort_by_key(|s| (s.layer, s.entity.id()));
 
     // ---- meshes ----
     for (e, m, g, t, v) in cx
@@ -155,9 +167,9 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
         if v.is_some_and(|v| v.visible == 0) {
             continue;
         }
-        frame.meshes.push(MeshInstance { entity: e, mesh: *m, world: lift(world_affine(g, t)) });
+        frame.d3.meshes.push(MeshInstance { entity: e, mesh: *m, world: lift(world_affine(g, t)) });
     }
-    frame.meshes.sort_by_key(|m| m.entity.id());
+    frame.d3.meshes.sort_by_key(|m| m.entity.id());
 
     // ---- textures: drained, delivered once ----
     frame.textures = match cx.resources.get_mut::<Textures>() {

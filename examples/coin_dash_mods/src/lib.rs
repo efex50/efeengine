@@ -377,7 +377,7 @@ fn main() {
             #[cfg(target_family = "wasm")]
             global_warn(&format!("[{GAME}] the web build has no package download yet: feed `BytesSource` with fetched .efmod files"));
             add_mod_keys(&mut engine);
-            engine.set_renderer(SpriteRenderer::new());
+            engine.set_renderer_2d(SpriteRenderer::new());
             global_info(&format!("[{GAME}] WASD / arrows to move, R reloads the mods, U unloads them"));
             engine.game_loop();
         }

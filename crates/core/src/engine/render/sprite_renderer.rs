@@ -1,9 +1,10 @@
-//! `SpriteRenderer`: a small built-in [`Renderer`] that draws `frame.sprites`.
+//! `SpriteRenderer`: the built-in wgpu [`Renderer2D`] (and the engine's default): draws `frame.sprites`.
 //!
-//! Install it with `engine.set_renderer(SpriteRenderer::new())`. It is meant to be read: the
+//! Install a different one with `engine.set_renderer_2d(SpriteRenderer::new())` (it is already the default, so this is only
+//! needed for another filter mode). It is meant to be read: the
 //! same steps are what a hand-written renderer (`examples/custom_renderer`) has to do.
 //!
-//! * Textures: `frame.textures` (added / updated / removed) is mirrored into GPU textures, each
+//! * Textures: `textures` (added / updated / removed) is mirrored into GPU textures, each
 //!   with a bind group (texture + sampler). `TextureHandle { id: 0 }` is a 1x1 white texture.
 //! * Camera: `frame.camera.view_projection` goes into a uniform; the target is cleared to
 //!   the camera's `clear_color` (black, and nothing drawn, without a camera).
@@ -22,8 +23,9 @@ use std::ops::Range;
 use wgpu::util::DeviceExt;
 
 use crate::engine::components::TextureHandle;
-use super::frame::{RenderFrame, SpriteInstance};
-use super::{Gpu, Renderer};
+use super::frame::{Frame2D, SpriteInstance};
+use super::textures::TextureChanges;
+use super::{Gpu, Renderer2D, Target};
 
 /// Per-instance vertex data; must match `Instance` in `sprite.wgsl` (location order).
 #[repr(C)]
@@ -278,19 +280,19 @@ impl State {
     }
 
     /// Mirror this frame's texture changes. (They are delivered once, so this runs every frame.)
-    fn sync_textures(&mut self, gpu: &Gpu, frame: &RenderFrame) {
-        for (h, img) in frame.textures.added.iter().chain(&frame.textures.updated) {
+    fn sync_textures(&mut self, gpu: &Gpu, textures: &TextureChanges) {
+        for (h, img) in textures.added.iter().chain(&textures.updated) {
             self.upload_texture(gpu, h.id, img.width(), img.height(), img.rgba8());
         }
-        for h in &frame.textures.removed {
+        for h in &textures.removed {
             self.textures.remove(&h.id);
         }
     }
 
-    fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView, frame: &RenderFrame) {
-        self.sync_textures(gpu, frame);
+    fn render(&mut self, gpu: &Gpu, target: &Target, frame: &Frame2D, textures: &TextureChanges) {
+        self.sync_textures(gpu, textures);
 
-        let clear = frame.camera.as_ref().map_or([0.0, 0.0, 0.0, 1.0], |c| c.clear_color);
+        let clear_color = frame.camera.as_ref().map_or([0.0, 0.0, 0.0, 1.0], |c| c.clear_color);
         // Without a camera there is no projection: clear and draw nothing.
         let sprites: &[SpriteInstance] = if frame.camera.is_some() { &frame.sprites } else { &[] };
 
@@ -319,12 +321,9 @@ impl State {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("sprite pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
+                    view: target.view,
                     resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: clear[0] as f64, g: clear[1] as f64, b: clear[2] as f64, a: clear[3] as f64 }),
-                        store: wgpu::StoreOp::Store,
-                    },
+                    ops: wgpu::Operations { load: target.load_op(clear_color), store: wgpu::StoreOp::Store },
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
@@ -349,14 +348,14 @@ impl State {
     }
 }
 
-impl Renderer for SpriteRenderer {
+impl Renderer2D for SpriteRenderer {
     fn init(&mut self, gpu: &Gpu) {
         self.state = Some(State::new(gpu, self.linear));
     }
 
-    fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView, frame: &RenderFrame) {
+    fn render(&mut self, gpu: &Gpu, target: &Target, frame: &Frame2D, textures: &TextureChanges) {
         let linear = self.linear;
-        self.state.get_or_insert_with(|| State::new(gpu, linear)).render(gpu, target, frame);
+        self.state.get_or_insert_with(|| State::new(gpu, linear)).render(gpu, target, frame, textures);
     }
 }
 

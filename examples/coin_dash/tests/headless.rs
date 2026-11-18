@@ -16,7 +16,7 @@ fn engine() -> Engine {
 }
 
 fn sprites_with(e: &Engine, tex: u32) -> Vec<SpriteInstance> {
-    e.render_frame().sprites.iter().filter(|s| s.texture.id == tex).cloned().collect()
+    e.render_frame().d2.sprites.iter().filter(|s| s.texture.id == tex).cloned().collect()
 }
 
 #[test]
@@ -24,12 +24,12 @@ fn world_builds_and_runs() {
     let mut e = engine();
     e.run_frames(120, DT);
     let f = e.render_frame();
-    assert!(f.camera.is_some());
+    assert!(f.d2.camera.is_some());
     // 1200 ground tiles + 5 coins + 3 enemies + player + shadow
-    assert_eq!(f.sprites.len(), 1200 + 5 + 3 + 2);
+    assert_eq!(f.d2.sprites.len(), 1200 + 5 + 3 + 2);
     assert_eq!(sprites_with(&e, COIN_TEX).len(), 5);
     // the ground is drawn first
-    assert!(f.sprites[0].layer < f.sprites.last().unwrap().layer);
+    assert!(f.d2.sprites[0].layer < f.d2.sprites.last().unwrap().layer);
 }
 
 #[test]

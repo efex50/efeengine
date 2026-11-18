@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use efeengine_core::render::{Gpu, RenderFrame, Renderer, TextureChanges};
+use efeengine_core::render::{CustomRenderer, Gpu, RenderFrame, TextureChanges};
 use efeengine_core::wgpu::{self, util::DeviceExt};
 
 /// What the camera uniform buffer holds (matches `struct Camera` in `sprite.wgsl`).
@@ -25,7 +25,7 @@ struct CameraUniform {
     view_projection: [[f32; 4]; 4],
 }
 
-/// Per-sprite GPU data: one of these per `SpriteInstance`, in `frame.sprites` order.
+/// Per-sprite GPU data: one of these per `SpriteInstance`, in `frame.d2.sprites` order.
 ///
 /// TODO: decide the exact layout together with the vertex buffer layout in the pipeline and
 /// the instance attributes in `sprite.wgsl` (the field list there mirrors this struct).
@@ -56,7 +56,7 @@ pub struct MyRenderer {
     textures: HashMap<u32, GpuTexture>,
     camera_buffer: Option<wgpu::Buffer>,
     // TODO: the pipeline, bind group layouts, sampler, the 1x1 white texture for id 0, the
-    // instance buffer (grow it when `frame.sprites.len()` exceeds its capacity), a depth
+    // instance buffer (grow it when `frame.d2.sprites.len()` exceeds its capacity), a depth
     // texture if you want one (recreate it in `resize`).
 }
 
@@ -99,14 +99,14 @@ impl MyRenderer {
     /// Upload the camera. With no camera in the frame (nothing is active) there is nothing to
     /// draw with; this keeps the previous contents.
     fn upload_camera(&mut self, gpu: &Gpu, frame: &RenderFrame) {
-        let (Some(camera), Some(buffer)) = (&frame.camera, &self.camera_buffer) else { return };
+        let (Some(camera), Some(buffer)) = (&frame.d2.camera, &self.camera_buffer) else { return };
         let uniform = CameraUniform { view_projection: camera.view_projection };
         gpu.queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
-    /// TODO: turn `frame.sprites` into instance data and batches.
+    /// TODO: turn `frame.d2.sprites` into instance data and batches.
     ///
-    /// `frame.sprites` is already sorted back to front (layer, then entity id), so:
+    /// `frame.d2.sprites` is already sorted back to front (layer, then entity id), so:
     ///   1. map every `SpriteInstance` to a `SpriteGpu` (same order) and `queue.write_buffer`
     ///      them into the instance buffer;
     ///   2. walk the list and cut it into runs of consecutive sprites with the same
@@ -118,7 +118,7 @@ impl MyRenderer {
     fn build_instances(&mut self, _gpu: &Gpu, _frame: &RenderFrame) {}
 }
 
-impl Renderer for MyRenderer {
+impl CustomRenderer for MyRenderer {
     fn init(&mut self, gpu: &Gpu) {
         self.camera_buffer = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera uniform"),
@@ -142,7 +142,7 @@ impl Renderer for MyRenderer {
         self.sync_textures(gpu, &frame.textures);
         self.upload_camera(gpu, frame);
 
-        let [r, g, b, a] = frame.camera.as_ref().map_or([0.0, 0.0, 0.0, 1.0], |c| c.clear_color);
+        let [r, g, b, a] = frame.d2.camera.as_ref().map_or([0.0, 0.0, 0.0, 1.0], |c| c.clear_color);
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("my renderer") });
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -164,7 +164,7 @@ impl Renderer for MyRenderer {
             // TODO: draw the sprites here:
             //   pass.set_pipeline(..); pass.set_bind_group(0, camera, ..);
             //   for each batch: set_bind_group(1, texture of the batch, ..); pass.draw(..)
-            // TODO: draw `frame.meshes` the same way once you have meshes.
+            // TODO: draw `frame.d3.meshes` the same way once you have meshes.
         }
         gpu.queue.submit(std::iter::once(encoder.finish()));
         // The engine presents the frame after this returns.

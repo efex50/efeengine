@@ -1,5 +1,5 @@
 //! `RenderFrame`: the plain-data description of one frame, built by the render extract
-//! (`Stage::RenderExtract`) and handed to the game's [`Renderer`](super::Renderer).
+//! (`Stage::RenderExtract`) and handed to the renderers ([`Renderer2D`](super::Renderer2D) with `d2`, [`Renderer3D`](super::Renderer3D) with `d3`, or a [`CustomRenderer`](super::CustomRenderer) with the whole frame).
 //!
 //! Matrix convention (everywhere in this module): a 4x4 matrix is `[[f32; 4]; 4]` in
 //! COLUMN-MAJOR order, `m[column][row]`, exactly the memory layout of a WGSL `mat4x4<f32>`,
@@ -12,7 +12,7 @@ use hecs::Entity;
 use crate::engine::components::{MeshHandle, TextureHandle};
 use super::textures::TextureChanges;
 
-/// The one camera of the frame, ready to use.
+/// One camera of the frame, ready to use (the active one of its kind).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CameraView {
     /// The camera entity.
@@ -22,8 +22,11 @@ pub struct CameraView {
     /// World rotation in radians, counter-clockwise.
     pub rotation: f32,
     pub zoom: f32,
-    /// `Camera::kind`: 0 = orthographic 2D, 1 = perspective.
+    /// `Camera::kind`: 0 = orthographic 2D, 1 = perspective. A 2D camera lands in
+    /// [`Frame2D::camera`], a perspective one in [`Frame3D::camera`].
     pub kind: u32,
+    /// `Camera::target`: which window the camera renders to (0 = the main window).
+    pub target: u32,
     pub near: f32,
     pub far: f32,
     pub fov_y: f32,
@@ -68,19 +71,40 @@ pub struct MeshInstance {
     pub world: [[f32; 4]; 4],
 }
 
+/// What a [`Renderer2D`](super::Renderer2D) draws: the active 2D (orthographic) camera and the
+/// sprites. Later also shapes, text runs and tilemap chunks in the same layer-sorted list.
+#[derive(Clone, Debug, Default)]
+pub struct Frame2D {
+    /// The 2D camera used, or `None` when no entity has an active orthographic `Camera`.
+    pub camera: Option<CameraView>,
+    /// How many further active 2D cameras were ignored this frame.
+    pub ignored_cameras: usize,
+    /// Visible sprites ordered by `layer` (ascending: first drawn first), ties by entity id.
+    pub sprites: Vec<SpriteInstance>,
+}
+
+/// What a [`Renderer3D`](super::Renderer3D) draws: the active perspective camera and the meshes.
+/// Later also lights and materials.
+#[derive(Clone, Debug, Default)]
+pub struct Frame3D {
+    /// The 3D camera used, or `None` when no entity has an active perspective `Camera`.
+    pub camera: Option<CameraView>,
+    /// How many further active 3D cameras were ignored this frame.
+    pub ignored_cameras: usize,
+    /// Mesh entities, by entity id.
+    pub meshes: Vec<MeshInstance>,
+}
+
 /// Everything a renderer needs for one frame. A resource, rebuilt every frame in
 /// `Stage::RenderExtract`.
 #[derive(Clone, Debug, Default)]
 pub struct RenderFrame {
-    /// The camera used, or `None` when no entity has an active `Camera`.
-    pub camera: Option<CameraView>,
-    /// How many further active cameras were ignored this frame (see [`RenderFrame::camera`]).
-    pub ignored_cameras: usize,
-    /// Visible sprites ordered by `layer` (ascending: first drawn first), ties by entity id.
-    pub sprites: Vec<SpriteInstance>,
-    /// Mesh entities, by entity id.
-    pub meshes: Vec<MeshInstance>,
-    /// Texture store changes since the previous frame; delivered once.
+    /// The 2D part: drawn after the 3D part.
+    pub d2: Frame2D,
+    /// The 3D part: drawn first.
+    pub d3: Frame3D,
+    /// Texture store changes since the previous frame; delivered once. Every renderer of the
+    /// frame gets the same list.
     pub textures: TextureChanges,
     /// `Time::frame` of this frame.
     pub frame: u64,
@@ -91,8 +115,12 @@ pub struct RenderFrame {
 /// Latched "already warned" flags: each problem is logged once, not every frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderWarnings {
-    /// More than one active camera was found.
+    /// More than one active 2D camera was found.
     pub multiple_cameras: bool,
+    /// More than one active 3D camera was found.
+    pub multiple_cameras_3d: bool,
+    /// A 3D camera is active but no `Renderer3D` is installed.
+    pub no_renderer_3d: bool,
     /// A `Parent` cycle was found (and broken).
     pub hierarchy_cycle: bool,
 }

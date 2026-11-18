@@ -88,17 +88,17 @@ fn log_frame_summary(engine: &mut Engine) {
             return;
         }
         next += 1.0;
-        let cam = match &frame.camera {
+        let cam = match &frame.d2.camera {
             Some(c) => format!("camera at ({:.1}, {:.1}) zoom {} viewport {}x{}", c.position.x, c.position.y, c.zoom, c.viewport.0, c.viewport.1),
             None => "no camera".to_string(),
         };
-        let first = frame.sprites.first().map(|s| format!(", first sprite layer {} size {:?}", s.layer, s.size)).unwrap_or_default();
+        let first = frame.d2.sprites.first().map(|s| format!(", first sprite layer {} size {:?}", s.layer, s.size)).unwrap_or_default();
         global_info(&format!(
             "[custom_renderer] t={:.0}s frame {}: {cam}, {} sprites, {} meshes{first}",
             frame.time,
             frame.frame,
-            frame.sprites.len(),
-            frame.meshes.len()
+            frame.d2.sprites.len(),
+            frame.d3.meshes.len()
         ));
     });
 }
