@@ -18,6 +18,8 @@ pub(crate) mod gpu;
 mod offscreen;
 mod png;
 mod renderers;
+#[cfg(not(target_arch = "wasm32"))]
+mod sdl_draw2d;
 mod sprite_renderer;
 mod textures;
 
@@ -31,6 +33,10 @@ pub use frame::{CameraView, Frame2D, Frame3D, MeshInstance, RenderFrame, RenderW
 pub use offscreen::{encode_png, write_png, OffscreenGpu};
 pub use png::PngError;
 pub(crate) use renderers::Renderers;
+#[cfg(not(target_arch = "wasm32"))]
+pub use sdl_draw2d::{SdlDraw2D, SdlSpriteRenderer};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use sdl_draw2d::SdlMode;
 pub use sprite_renderer::SpriteRenderer;
 pub use textures::{Image, TextureChanges, TextureError, Textures};
 

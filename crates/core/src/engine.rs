@@ -124,6 +124,10 @@ pub struct Engine{
     /// Run for every raw input event before `InputState::apply`, in add order.
     input_filters: Vec<Box<dyn InputFilter>>,
     gpu: Option<GpuContext>,
+    /// SDL mode (native only): the window's `SDL_Renderer` instead of `gpu`. Exactly one of the
+    /// two is set once graphics is up. Declared before `windows` (the renderer needs the window).
+    #[cfg(not(target_arch = "wasm32"))]
+    sdl: Option<rendering::SdlMode>,
     pub windows:GameWindowManager,
     lifecycle: Lifecycle,
     pub logger:Box<dyn Logger>,
@@ -237,6 +241,8 @@ impl Engine {
             overlays: Vec::new(),
             input_filters: Vec::new(),
             gpu: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            sdl: None,
             windows: w,
             lifecycle: Lifecycle::Created,
             logger,
@@ -1171,7 +1177,21 @@ impl Engine {
     /// (headless) there is nothing to do; a failure is logged and the engine keeps ticking
     /// without rendering.
     pub async fn init_graphics(&mut self) {
+        use crate::config::GpuMode;
         self.logger.info("Initializing Graphics Context...");
+        let mode = GpuMode::effective();
+        #[cfg(not(target_arch = "wasm32"))]
+        if mode == GpuMode::Sdl {
+            match self.init_sdl_mode() {
+                Ok(()) => self.logger.info("Graphics Context Initialized (SDL mode)!"),
+                Err(e) => self.logger.error(&format!("graphics init failed: {e}")),
+            }
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if mode == GpuMode::Sdl {
+            self.logger.warn("gpu mode \"sdl\" does not exist on the web (SDL_Renderer is native only); using wgpu");
+        }
         match GpuContext::new(&self.windows).await {
             Ok(gpu) => {
                 self.renderer.init(&gpu.gpu());
@@ -1181,8 +1201,28 @@ impl Engine {
                 self.gpu = Some(gpu);
                 self.logger.info("Graphics Context Initialized!");
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            Err(e) if mode == GpuMode::Auto && !self.windows.is_headless() => {
+                self.logger.warn(&format!("no usable wgpu graphics ({e}); falling back to SDL mode (2D only)"));
+                match self.init_sdl_mode() {
+                    Ok(()) => self.logger.info("Graphics Context Initialized (SDL mode)!"),
+                    Err(e2) => self.logger.error(&format!("graphics init failed: wgpu: {e}; SDL: {e2}")),
+                }
+            }
             Err(e) => self.logger.error(&format!("graphics init failed: {e}")),
         }
+    }
+
+    /// Create the window's `SDL_Renderer` (SDL mode).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn init_sdl_mode(&mut self) -> Result<(), String> {
+        let window = self.windows.sdl_window_ptr();
+        // SAFETY: the pointer is the main SDL window owned by `self.windows`; `self.sdl` is
+        // declared before `windows` in `Engine`, so the renderer is destroyed first.
+        let draw = unsafe { rendering::SdlDraw2D::for_window(window) }?;
+        crate::global_info(&format!("graphics backend: SDL_Renderer ({})", draw.renderer_name()));
+        self.sdl = Some(rendering::SdlMode::new(draw));
+        Ok(())
     }
 
     /// Reconfigure the surface and tell the renderer.
@@ -1201,6 +1241,17 @@ impl Engine {
     /// (headless, failed init). If the frame could not be drawn, its texture changes are put
     /// back so the renderer still sees them once.
     fn render_frame_to_surface(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(sdl) = &mut self.sdl {
+            let (w, h) = self.windows.size();
+            if w > 0 && h > 0 && self.state.resources.contains::<RenderFrame>() {
+                let frame = self.state.resources.get::<RenderFrame>().expect("RenderFrame resource");
+                sdl.render(&frame, self.renderer.has_custom(), self.renderer.has_installed_2d(), !self.overlays.is_empty());
+            } else if let (Some(f), Some(t)) = (self.state.resources.get_mut::<RenderFrame>().map(|f| std::mem::take(&mut f.textures)), self.state.resources.get_mut::<Textures>()) {
+                t.requeue(f);
+            }
+            return;
+        }
         let Engine { renderer, overlays, gpu, state, logger, .. } = self;
         let Some(gpu) = gpu else { return };
         if !state.resources.contains::<RenderFrame>() {

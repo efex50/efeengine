@@ -70,6 +70,10 @@ pub trait InnerWindow: HasWindowHandle + HasDisplayHandle{
     #[cfg(target_family = "wasm")]
     fn canvas_id(&self) -> &str;
     fn set_title(&mut self,title:String);
+    /// The raw `SDL_Window*` (SDL mode creates an `SDL_Renderer` on it). Null when the backend
+    /// is not SDL (headless).
+    #[cfg(not(target_family = "wasm"))]
+    fn sdl_window_ptr(&self) -> *mut sdl3::sys::video::SDL_Window { std::ptr::null_mut() }
     /// Drawable size in physical pixels.
     fn size(&self) -> (u32, u32);
     /// Physical pixels per logical pixel (DPI scale / devicePixelRatio).
@@ -158,6 +162,11 @@ impl GameWindowManager {
     /// The last cursor icon given to `set_cursor_icon`.
     pub fn cursor_icon(&self) -> CursorIcon {
         self.cursor_icon
+    }
+    /// The raw `SDL_Window*` of the main window (null when headless).
+    #[cfg(not(target_family = "wasm"))]
+    pub fn sdl_window_ptr(&self) -> *mut sdl3::sys::video::SDL_Window {
+        self.inner.sdl_window_ptr()
     }
     pub fn is_headless(&self) -> bool {
         self.headless

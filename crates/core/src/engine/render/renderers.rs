@@ -8,20 +8,33 @@ pub(crate) struct Renderers {
     r2: Box<dyn Renderer2D>,
     r3: Option<Box<dyn Renderer3D>>,
     custom: Option<Box<dyn CustomRenderer>>,
+    /// A 2D renderer other than the default was installed (SDL mode cannot run it).
+    r2_installed: bool,
 }
 
 impl Renderers {
     pub fn new() -> Self {
-        Self { r2: Box::new(SpriteRenderer::new()), r3: None, custom: None }
+        Self { r2: Box::new(SpriteRenderer::new()), r3: None, custom: None, r2_installed: false }
     }
 
     /// Install a 2D renderer (drops a custom renderer). `gpu` is `Some` when the GPU is up.
     pub fn set_2d(&mut self, r: Box<dyn Renderer2D>, gpu: Option<&Gpu>) {
         self.custom = None;
+        self.r2_installed = true;
         self.r2 = r;
         if let Some(g) = gpu {
             self.r2.init(g);
         }
+    }
+
+    /// A [`CustomRenderer`] is installed.
+    pub fn has_custom(&self) -> bool {
+        self.custom.is_some()
+    }
+
+    /// A 2D renderer was installed with `set_2d` (not the built-in default).
+    pub fn has_installed_2d(&self) -> bool {
+        self.r2_installed
     }
 
     pub fn set_3d(&mut self, r: Box<dyn Renderer3D>, gpu: Option<&Gpu>) {

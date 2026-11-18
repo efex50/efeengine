@@ -176,10 +176,15 @@ impl raw_window_handle::HasDisplayHandle for DisplayOwner {
 #[cfg(not(target_arch = "wasm32"))]
 async fn native_adapter(window: &GameWindowManager) -> Result<(Instance, Surface<'static>, Adapter), String> {
     use crate::config::GpuMode;
+    // Test hook: pretend no adapter exists (this is how the `auto` -> SDL fallback is tested on
+    // a machine that has a GPU). `wgpu` / `wgpu-gl` then fail, `auto` falls back to SDL mode.
+    if std::env::var_os("EFE_TEST_NO_WGPU").is_some_and(|v| !v.is_empty() && v != "0") {
+        return Err("no wgpu adapter (forced by EFE_TEST_NO_WGPU)".to_string());
+    }
     let sets: &[(wgpu::Backends, &str)] = match GpuMode::effective() {
         GpuMode::Auto | GpuMode::Wgpu => &[(wgpu::Backends::PRIMARY, "Vulkan/Metal/DX12"), (wgpu::Backends::GL, "GL")],
         GpuMode::WgpuGl => &[(wgpu::Backends::GL, "GL")],
-        GpuMode::Sdl => return Err("gpu mode \"sdl\" is not implemented yet (Phase 4C.4); use auto, wgpu or wgpu-gl".to_string()),
+        GpuMode::Sdl => return Err("gpu mode \"sdl\" has no wgpu context".to_string()),
     };
     let mut errors = Vec::new();
     for &(backends, name) in sets {

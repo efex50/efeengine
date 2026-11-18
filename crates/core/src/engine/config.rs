@@ -30,15 +30,15 @@ pub struct StartupConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GpuMode {
-    /// wgpu on Vulkan / Metal / DX12, then wgpu on GL when none works. (4C.5 adds SDL as the
-    /// last resort.)
+    /// wgpu on Vulkan / Metal / DX12, then wgpu on GL when none works, then (native only) SDL mode
+    /// when there is no wgpu adapter at all (a log line says so).
     #[default]
     Auto,
     /// Same native order as `auto`, but never falls back to SDL.
     Wgpu,
     /// wgpu on its GL backend only (GL 3.3+ / GLES 3.0); for old drivers and for testing.
     WgpuGl,
-    /// SDL_Renderer, no wgpu context. Reserved for Phase 4C.4: startup fails with a clear error.
+    /// SDL_Renderer, no wgpu context: 2D only, no iced UI (native only; on the web it warns and uses wgpu).
     Sdl,
 }
 

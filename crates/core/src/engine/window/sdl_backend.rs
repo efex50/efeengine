@@ -107,6 +107,9 @@ impl SdlWindowManager {
 }
 
 impl InnerWindow for SdlWindowManager {
+    fn sdl_window_ptr(&self) -> *mut sdl3::sys::video::SDL_Window {
+        self.main_window.raw()
+    }
     fn set_title(&mut self,title:String) {
         if let Err(e) = self.main_window.set_title(&title) {
             log::warn!("failed to set window title: {e}");
