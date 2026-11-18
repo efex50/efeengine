@@ -47,6 +47,9 @@ mods/dash_tiles/                [deps: dash_core] ground tilemap read from asset
 mods/dash_enemies/              [deps: dash_core] patrolling enemies; [meta.difficulty] enemy_count / enemy_speed,
   src/{main,common,patrol}.efa  read back by the mod with engine.mods.meta_f64 and logged by the game
   assets/enemy.png
+mods/dash_hud/                  [deps: dash_core] a score panel (top right) with a Reset button, built with the `ui` host
+  mod.toml                      functions: the mod owns its widgets (`mod:dash_hud/...`), gets button clicks as `ui.signal`
+  src/main.efa                  events and cannot see or change any other widget (docs/ui/GUIDE.md, section on mods)
 mods/dash_coins/                [deps: dash_core] coins: reads round_started, spins/bobs, reports pickups to dash_core
   src/{main,common,coins}.efa
   assets/coin_sheet.png
@@ -55,6 +58,6 @@ tests/headless.rs               packs the folders with the efa/efemod APIs, load
                                 a corrupt package, a broken PNG, the default grant
 ```
 
-The policy gives each mod only what it needs (`dash_tiles` gets no `engine.world`; a mod the game does not know gets
+The policy gives each mod only what it needs (`dash_hud` gets `ui`, `engine.events`, `engine.log` and `game`, nothing that touches the world) (`dash_tiles` gets no `engine.world`; a mod the game does not know gets
 `engine.log` and `engine.time`). A mod cannot define components, so coins and enemies keep their data in the mod's own
 memory; mods share code only through `provide`s (that is why `dash_core.format_i64` exists).

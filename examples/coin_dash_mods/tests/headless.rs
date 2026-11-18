@@ -86,7 +86,7 @@ fn packages() -> Vec<(String, Vec<u8>)> {
 fn running() -> (Engine, Game, LoadReport) {
     let (mut e, game) = engine();
     let items = packages();
-    assert_eq!(items.len(), 4, "{:?}", items.iter().map(|i| &i.0).collect::<Vec<_>>());
+    assert_eq!(items.len(), 5, "{:?}", items.iter().map(|i| &i.0).collect::<Vec<_>>());
     e.add_mod_source(BytesSource { items });
     let report = e.load_mods();
     (e, game, report)
@@ -116,7 +116,7 @@ fn module_of(e: &Engine, id: &str) -> ModuleId {
 fn the_packages_load_under_the_policy_with_their_grants_and_meta() {
     let (e, game, report) = running();
     assert!(report.failed.is_empty(), "{:?}", report.failed);
-    assert_eq!(report.loaded.len(), 4);
+    assert_eq!(report.loaded.len(), 5);
     // dependency order: dash_core first
     assert!(report.loaded[0].0.starts_with("dash_core"), "{:?}", report.loaded);
     let grant = |id: &str| e.package(module_of(&e, id)).unwrap().grant.namespaces.clone();
@@ -236,7 +236,7 @@ fn reload_skips_unchanged_mods_then_unload_cleans_up() {
     // reload_mods with nothing changed: every mod is skipped, nothing is touched
     let r = e.reload_mods();
     assert!(r.loaded.is_empty() && r.reloaded.is_empty() && r.unloaded.is_empty() && r.failed.is_empty(), "{r:?}");
-    assert_eq!(r.skipped.len(), 4);
+    assert_eq!(r.skipped.len(), 5);
     assert_eq!(r.skipped.iter().map(|(_, id)| *id).collect::<Vec<_>>().len(), before_ids.len());
     e.run_frames(5, DT);
     assert_eq!(sprites(&e).len(), live_before, "no entity was added or lost");
@@ -250,7 +250,7 @@ fn reload_skips_unchanged_mods_then_unload_cleans_up() {
         .collect();
     let u = e.unload_mods();
     assert!(u.failed.is_empty(), "{:?}", u.failed);
-    assert_eq!(u.unloaded.len(), 4);
+    assert_eq!(u.unloaded.len(), 5);
     assert_eq!(u.unloaded.last().map(String::as_str), Some("dash_core"), "{:?}", u.unloaded);
     assert_eq!(game.mod_texture_count(), 0);
     for id in tex_ids {
@@ -265,7 +265,7 @@ fn reload_skips_unchanged_mods_then_unload_cleans_up() {
     assert_eq!(e.world().query::<&Camera>().iter().count(), 1);
     // and the mods can come back: load_mods loads them again
     let again = e.load_mods();
-    assert_eq!(again.loaded.len(), 4, "{again:?}");
+    assert_eq!(again.loaded.len(), 5, "{again:?}");
     assert!(again.failed.is_empty());
 }
 
@@ -279,7 +279,7 @@ fn a_corrupt_package_fails_alone_and_the_others_run() {
     items[i].1.truncate(half);
     e.add_mod_source(BytesSource { items });
     let report = e.load_mods();
-    assert_eq!(report.loaded.len(), 3, "{report:?}");
+    assert_eq!(report.loaded.len(), 4, "{report:?}");
     assert_eq!(report.failed.len(), 1);
     assert!(report.failed[0].0.starts_with("dash_enemies"));
     log_report(&e, &report);
@@ -322,4 +322,99 @@ fn an_unknown_mod_gets_only_the_default_grant() {
         }
         other => panic!("{:?}", other.map(|_| ())),
     }
+}
+
+// ---- the HUD mod builds UI through the `ui` host functions ----
+
+use efeengine_ui::{Owner, UiScripts, UiTree};
+
+fn ui_text(e: &Engine, key: &str) -> Option<String> {
+    let tree = e.resources().get::<UiTree>()?;
+    let id = tree.find(key)?;
+    tree.text_of(id).map(str::to_string)
+}
+
+#[test]
+fn the_hud_mod_builds_its_own_panel_and_follows_the_score() {
+    let (mut e, game, report) = running();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    e.run_frames(5, DT);
+    assert!(errors(&e).is_empty(), "{:?}", errors(&e));
+    {
+        let ui = e.resources().get::<UiTree>().expect("UiTree");
+        let layer = ui.find("mod:dash_hud/hud").expect("the mod's layer, under its own prefix");
+        assert_eq!(ui.owner_of(layer), Some(&Owner::module("dash_hud")));
+        // layer, column, row, two texts, button
+        assert_eq!(ui.nodes_of(&Owner::module("dash_hud")).len(), 6);
+        assert!(ui.nodes_of(&Owner::Game).is_empty(), "the game built nothing");
+    }
+    assert!(lines(&e).iter().any(|t| t.contains("[dash_hud] hud panel built")));
+    // the digits follow game.score
+    game.set_score(42);
+    e.run_frames(3, DT);
+    let tree = e.resources().get::<UiTree>().unwrap();
+    let layer = tree.find("mod:dash_hud/hud").unwrap();
+    let texts: Vec<String> = tree.subtree(layer).into_iter().filter_map(|id| tree.text_of(id).map(str::to_string)).collect();
+    assert!(texts.contains(&"42".to_string()), "{texts:?}");
+    assert!(texts.contains(&"Score:".to_string()));
+}
+
+#[test]
+fn a_click_on_the_hud_button_reaches_the_mod_and_resets_the_score() {
+    let (mut e, game, _) = running();
+    e.run_frames(5, DT);
+    game.set_score(7);
+    e.run_frames(2, DT);
+    let button = {
+        let ui = e.resources().get::<UiTree>().unwrap();
+        let layer = ui.find("mod:dash_hud/hud").unwrap();
+        ui.subtree(layer).into_iter().find(|id| matches!(ui.kind(*id), Some(efeengine_ui::NodeKind::Button { .. }))).unwrap()
+    };
+    // the headless backend queues the click like a real one; the plugin delivers it as ui.signal
+    let handle = e.resources().get::<efeengine_ui::HeadlessHandle>().unwrap().clone();
+    handle.inject(efeengine_ui::UiSignal { widget: button, key: None, owner: Owner::Game, kind: efeengine_ui::UiSignalKind::Click });
+    e.run_frames(2, DT);
+    assert_eq!(game.score(), 0, "the mod got the click and called game.score_reset");
+    assert!(errors(&e).is_empty(), "{:?}", errors(&e));
+}
+
+#[test]
+fn the_hud_mod_is_limited_to_its_grant_and_its_own_widgets() {
+    let (e, _game, _) = running();
+    let grant = e.package(module_of(&e, "dash_hud")).unwrap().grant.namespaces.clone();
+    assert!(grant.iter().any(|n| n == "ui"));
+    assert!(!grant.iter().any(|n| n == "engine.world"), "{grant:?}");
+    // a game widget is out of reach: the mod only finds its own keys
+    let scripts = e.resources().get::<UiScripts>().unwrap().clone();
+    assert!(scripts.violations().is_empty());
+    assert_eq!(scripts.nodes_of("dash_hud"), 6);
+    assert_eq!(ui_text(&e, "mod:dash_hud/nothing"), None);
+}
+
+#[test]
+fn an_unknown_mod_cannot_use_the_ui_namespace() {
+    let (mut e, _game) = engine();
+    let files = efeengine_core::efa::asm::MemSource::new()
+        .with("mod.toml", "[mod]\nid = \"intruder\"\nversion = \"1.0.0\"\ngame = \"coin_dash_mods\"\n[permissions]\nnamespaces = [\"ui\", \"engine.log\"]\n")
+        .with("src/main.efa", "import ui.layer\nx db \"x\"\nexport fn init() {\n    reg l, f\n    const.i32 f, 0\n    call ui.layer(x, x.len, 1, 1, f) -> l\n    ret\n}\n");
+    match e.load_input(LoadInput::Folder { label: "intruder", files: &files, assets: &[] }) {
+        Err(LoadError::Mod(ModError::NotGranted { id, namespaces })) => {
+            assert_eq!(id, "intruder");
+            assert_eq!(namespaces, ["ui"]);
+        }
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+    assert_eq!(e.resources().get::<UiTree>().unwrap().len(), 0);
+}
+
+#[test]
+fn unloading_the_mods_removes_the_hud() {
+    let (mut e, _game, _) = running();
+    e.run_frames(5, DT);
+    assert_eq!(e.resources().get::<UiTree>().unwrap().nodes_of(&Owner::module("dash_hud")).len(), 6);
+    let u = e.unload_mods();
+    assert!(u.failed.is_empty(), "{:?}", u.failed);
+    e.run_frames(3, DT);
+    assert_eq!(e.resources().get::<UiTree>().unwrap().nodes_of(&Owner::module("dash_hud")).len(), 0);
+    assert!(e.resources().get::<UiTree>().unwrap().find("mod:dash_hud/hud").is_none());
 }

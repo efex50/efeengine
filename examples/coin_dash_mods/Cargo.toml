@@ -19,6 +19,12 @@ dependencies = ["sdl3"]
 
 [dependencies]
 efeengine-core = { path = "../../crates/core" }
+efeengine-ui = { path = "../../crates/ui", default-features = false }
+
+[features]
+default = ["iced"]
+# Native UI backend (iced); without it the native build runs headless (nothing drawn).
+iced = ["efeengine-ui/iced"]
 
 [dev-dependencies]
 # the tests pack the mod folders into .efmod files (the writer is behind this feature)

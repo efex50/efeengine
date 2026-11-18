@@ -81,6 +81,11 @@ impl Game {
         self.score.load(Ordering::Relaxed)
     }
 
+    /// Set the score (tests; the mods change it through `game.score_add` / `game.score_reset`).
+    pub fn set_score(&self, v: i64) {
+        self.score.store(v, Ordering::Relaxed);
+    }
+
     pub fn set_autoplay(&self, on: bool) {
         self.autoplay.store(on, Ordering::Relaxed);
     }
@@ -181,6 +186,8 @@ pub fn mod_policy(r: &ModRequest<'_>) -> Result<Grant, String> {
         "dash_tiles" => grant(&["engine.log", "engine.mods", "game"]),
         "dash_enemies" => grant(&["engine.world", "engine.log", "engine.mods", "game"]),
         "dash_coins" => grant(&["engine.world", "engine.random", "engine.math", "engine.time", "engine.events", "engine.log", "game"]),
+        // the HUD may build UI (its own widgets only) and react to clicks
+        "dash_hud" => grant(&["ui", "engine.events", "engine.log", "game"]),
         _ => grant(&["engine.log", "engine.time"]),
     })
 }
@@ -279,6 +286,10 @@ pub fn mods_dir() -> Option<std::path::PathBuf> {
 
 /// Textures bookkeeping, the policy and the handler, the camera, the sweep and the R / U keys.
 pub fn setup(engine: &mut Engine) -> Game {
+    // the UI plugin registers the `ui` namespace and the `ui.signal` event, so it comes before
+    // anything that exports the API index (the mods are packed against it); iced on native, DOM
+    // on the web, headless in tests
+    engine.add_plugin(efeengine_ui::UiPlugin::new()).expect("UiPlugin");
     let game = register_api(engine);
     engine.insert_resource(Freed::default());
     engine.set_mod_policy(mod_policy);

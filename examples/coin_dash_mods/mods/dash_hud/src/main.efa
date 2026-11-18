@@ -1,0 +1,90 @@
+; dash_hud: a score panel built through the `ui` host functions. The mod owns every widget it
+; creates (`Owner::Mod("dash_hud")`, keys `mod:dash_hud/...`) and cannot reach any other widget.
+;
+;   layer "hud" (top right)
+;     column
+;       row:    text "Score:"   text <digits>
+;       button  "Reset score"          -> game.score_reset when clicked (ui.signal kind 1)
+import ui.layer
+import ui.column
+import ui.row
+import ui.text
+import ui.button
+import ui.set_text
+import ui.set_class
+import ui.set_gap
+import ui.set_padding
+import event ui.signal
+import engine.events.count
+import engine.events.read
+import engine.log.info
+import game.score
+import game.score_reset
+import dash_core.format_i64
+
+s_hud db "hud"
+s_label db "Score:"
+s_zero db "0"
+s_reset db "Reset score"
+s_panel db "panel"
+s_built db "hud panel built"
+global mut value_w: i64 = 0
+global mut reset_w: i64 = 0
+global mut shown: i64 = -1
+ev resb UiSignal.size
+digits resb 32
+
+export fn init() {
+    reg layer, col, line, label, value, btn, no, st, gap
+    const.i32 no, 0
+    ; z = 20, anchor 4 = top right, not modal
+    call ui.layer(s_hud, s_hud.len, 20, 4, no) -> layer
+    call ui.column(layer) -> col
+    call ui.set_class(col, s_panel, s_panel.len) -> st
+    const.f32 gap, 6.0
+    call ui.set_gap(col, gap) -> st
+    call ui.row(col) -> line
+    call ui.set_gap(line, gap) -> st
+    call ui.text(line, s_label, s_label.len) -> label
+    call ui.text(line, s_zero, s_zero.len) -> value
+    global.set value_w, value
+    call ui.button(col, s_reset, s_reset.len) -> btn
+    global.set reset_w, btn
+    call engine.log.info(s_built, s_built.len)
+    ret
+}
+
+export fn frame(dt: f32) {
+    reg n, i, st, w, kind, btn, score, last, len, value
+    ; clicks on the reset button
+    call engine.events.count(ui.signal.id) -> n
+    global.get btn, reset_w
+    const.i32 i, 0
+next:
+    i32.lt_s st, i, n
+    br_ifz st, show
+    call engine.events.read(ui.signal.id, i, ev) -> st
+    br_if st, show
+    i64.load w, ev, UiSignal.widget
+    i32.load kind, ev, UiSignal.kind
+    i64.eq st, w, btn
+    br_ifz st, skip
+    i32.eq st, kind, 1
+    br_ifz st, skip
+    call game.score_reset()
+skip:
+    i32.add i, i, 1
+    jmp next
+show:
+    ; the score text, only when it changed
+    call game.score() -> score
+    global.get last, shown
+    i64.eq st, score, last
+    br_if st, out
+    global.set shown, score
+    call dash_core.format_i64(score, digits, 32) -> len
+    global.get value, value_w
+    call ui.set_text(value, digits, len) -> st
+out:
+    ret
+}

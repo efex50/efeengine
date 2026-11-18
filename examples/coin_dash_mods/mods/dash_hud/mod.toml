@@ -1,0 +1,18 @@
+[mod]
+id = "dash_hud"
+version = "1.0.0"
+name = "Dash HUD"
+description = "A small score panel (top right) with a Reset button, built with the ui host functions."
+game = "coin_dash_mods"
+
+[dependencies]
+dash_core = "^1"
+
+# ui: the panel (only this mod's own widgets are visible to it); engine.events: the ui.signal
+# event (button clicks); game: game.score and game.score_reset.
+[permissions]
+namespaces = ["ui", "engine.events", "engine.log", "game"]
+
+[meta]
+category = "interface"
+author = "someone else"
