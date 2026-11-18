@@ -48,29 +48,23 @@ impl GpuContext {
     /// because WebGL can only hand out an adapter for a given canvas.
     pub async fn new(window: &GameWindowManager) -> Result<Self, String> {
         #[cfg(not(target_arch = "wasm32"))]
-        let instance = Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let (instance, surface, adapter) = native_adapter(window).await?;
         #[cfg(target_arch = "wasm32")]
-        let instance = web_instance().await;
-
-        let surface = create_surface(&instance, window)?;
-
-        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }).await.map_err(|e| format!("no suitable graphics adapter: {e}"))?;
+        let (instance, surface, adapter) = {
+            let instance = web_instance().await;
+            let surface = create_surface(&instance, window)?;
+            let adapter = request_adapter(&instance, &surface).await?;
+            (instance, surface, adapter)
+        };
 
         let info = adapter.get_info();
         crate::global_info(&format!("graphics backend: {:?} ({})", info.backend, info.name));
 
         // WebGL2 cannot meet wgpu's default limits. Take the max texture size from
         // the adapter, so large / HiDPI canvases are not capped at the defaults.
+        // Native GL (3.3+ / GLES 3.0) gets the downlevel limits, WebGL2 the stricter ones.
         let base_limits = if info.backend == wgpu::Backend::Gl {
-            wgpu::Limits::downlevel_webgl2_defaults()
+            if cfg!(target_arch = "wasm32") { wgpu::Limits::downlevel_webgl2_defaults() } else { wgpu::Limits::downlevel_defaults() }
         } else {
             wgpu::Limits::default()
         };
@@ -143,6 +137,77 @@ impl GpuContext {
         }
         self.surface.configure(&self.device, &self.config);
     }
+}
+
+async fn request_adapter(instance: &Instance, surface: &Surface<'static>) -> Result<Adapter, String> {
+    instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::default(),
+        compatible_surface: Some(surface),
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }).await.map_err(|e| format!("no suitable graphics adapter: {e}"))
+}
+
+/// The window system's display connection as an owned value for `InstanceDescriptor::display`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct DisplayOwner(raw_window_handle::RawDisplayHandle);
+
+// SAFETY: the raw display handle (wl_display / X11 Display pointer) is only ever handed to
+// wgpu's EGL setup, and stays valid for as long as the SDL video subsystem, which outlives the
+// GPU context (`Engine` drops `gpu` before `windows`). The engine uses it from the main thread.
+#[cfg(not(target_arch = "wasm32"))]
+unsafe impl Send for DisplayOwner {}
+#[cfg(not(target_arch = "wasm32"))]
+unsafe impl Sync for DisplayOwner {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl raw_window_handle::HasDisplayHandle for DisplayOwner {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        // SAFETY: see the `Send` impl above.
+        Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(self.0) })
+    }
+}
+
+/// Native instance, surface and adapter for the GPU mode. The backend sets are tried in order
+/// and each gets its own instance (wgpu picks among every adapter of one instance by device
+/// type, not by backend, so one `PRIMARY | GL` instance could not guarantee GL comes last):
+/// `PRIMARY` (Vulkan / Metal / DX12), then `GL`. `wgpu-gl` tries only `GL`.
+#[cfg(not(target_arch = "wasm32"))]
+async fn native_adapter(window: &GameWindowManager) -> Result<(Instance, Surface<'static>, Adapter), String> {
+    use crate::config::GpuMode;
+    let sets: &[(wgpu::Backends, &str)] = match GpuMode::effective() {
+        GpuMode::Auto | GpuMode::Wgpu => &[(wgpu::Backends::PRIMARY, "Vulkan/Metal/DX12"), (wgpu::Backends::GL, "GL")],
+        GpuMode::WgpuGl => &[(wgpu::Backends::GL, "GL")],
+        GpuMode::Sdl => return Err("gpu mode \"sdl\" is not implemented yet (Phase 4C.4); use auto, wgpu or wgpu-gl".to_string()),
+    };
+    let mut errors = Vec::new();
+    for &(backends, name) in sets {
+        // The GL backend needs the platform display (Wayland / X11) when the instance is
+        // created, to make its EGL display; the others do not use it.
+        let desc = if backends.contains(wgpu::Backends::GL) {
+            use raw_window_handle::HasDisplayHandle;
+            match window.display_handle() {
+                Ok(h) => wgpu::InstanceDescriptor::new_with_display_handle(Box::new(DisplayOwner(h.as_raw()))),
+                Err(e) => return Err(format!("no display handle for GL: {e}")),
+            }
+        } else {
+            wgpu::InstanceDescriptor::new_without_display_handle()
+        };
+        let instance = Instance::new(wgpu::InstanceDescriptor { backends, ..desc });
+        let attempt = match create_surface(&instance, window) {
+            Ok(surface) => request_adapter(&instance, &surface).await.map(|a| (surface, a)),
+            Err(e) => Err(e),
+        };
+        match attempt {
+            Ok((surface, adapter)) => return Ok((instance, surface, adapter)),
+            Err(e) => {
+                crate::global_warn(&format!("graphics backend set {name} unavailable: {e}"));
+                errors.push(format!("{name}: {e}"));
+            }
+        }
+    }
+    Err(format!("no usable graphics backend ({})", errors.join("; ")))
 }
 
 /// Pick WebGPU or WebGL2 per the startup config's `graphicsBackend`.

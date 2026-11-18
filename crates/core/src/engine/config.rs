@@ -21,6 +21,53 @@ pub struct StartupConfig {
     pub external_api: bool,
     /// Which browser graphics API to use (web only).
     pub graphics_backend: GraphicsBackend,
+    /// Which GPU path to use (native; the web only has wgpu). On native the environment
+    /// variable `EFE_GPU_MODE` (same values) is used when this is `auto`.
+    pub gpu_mode: GpuMode,
+}
+
+/// GPU path, chosen once at startup. JS / env: `"auto" | "wgpu" | "wgpu-gl" | "sdl"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GpuMode {
+    /// wgpu on Vulkan / Metal / DX12, then wgpu on GL when none works. (4C.5 adds SDL as the
+    /// last resort.)
+    #[default]
+    Auto,
+    /// Same native order as `auto`, but never falls back to SDL.
+    Wgpu,
+    /// wgpu on its GL backend only (GL 3.3+ / GLES 3.0); for old drivers and for testing.
+    WgpuGl,
+    /// SDL_Renderer, no wgpu context. Reserved for Phase 4C.4: startup fails with a clear error.
+    Sdl,
+}
+
+impl GpuMode {
+    /// Parse the config / env spelling.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "wgpu" => Some(Self::Wgpu),
+            "wgpu-gl" => Some(Self::WgpuGl),
+            "sdl" => Some(Self::Sdl),
+            _ => None,
+        }
+    }
+
+    /// The mode in effect: the startup config, or `EFE_GPU_MODE` (native) when that is `auto`.
+    pub fn effective() -> Self {
+        let cfg = startup_config().gpu_mode;
+        #[cfg(not(target_arch = "wasm32"))]
+        if cfg == Self::Auto {
+            if let Ok(v) = std::env::var("EFE_GPU_MODE") {
+                match Self::parse(&v) {
+                    Some(m) => return m,
+                    None => crate::global_warn(&format!("EFE_GPU_MODE={v:?} is not one of auto, wgpu, wgpu-gl, sdl; using auto")),
+                }
+            }
+        }
+        cfg
+    }
 }
 
 /// Browser graphics API choice. JS: `"auto" | "webgpu" | "webgl"`.
@@ -217,5 +264,20 @@ mod tests {
     #[test]
     fn new_sets_title() {
         assert_eq!(EngineConfig::new("x").title, "x");
+    }
+}
+
+#[cfg(test)]
+mod gpu_mode_tests {
+    use super::*;
+
+    #[test]
+    fn gpu_mode_spellings() {
+        assert_eq!(GpuMode::parse("wgpu-gl"), Some(GpuMode::WgpuGl));
+        assert_eq!(GpuMode::parse(" SDL "), Some(GpuMode::Sdl));
+        assert_eq!(GpuMode::parse("gl"), None);
+        let cfg: StartupConfig = serde_json::from_str(r#"{"gpuMode":"wgpu-gl"}"#).unwrap();
+        assert_eq!(cfg.gpu_mode, GpuMode::WgpuGl);
+        assert_eq!(StartupConfig::default().gpu_mode, GpuMode::Auto);
     }
 }
