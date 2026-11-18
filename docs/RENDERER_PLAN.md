@@ -1,6 +1,6 @@
 # Renderer plan: separate 2D and 3D renderers, GPU modes, SDL fallback
 
-> **Status:** Accepted plan, not started\
+> **Status:** 4C.1 and 4C.2 built (see section 8); 4C.3 onward not started\
 > **Date:** 2026-11-18\
 > **Current design:** [`RENDERING.md`](RENDERING.md) (one `Renderer` slot, `RenderFrame`, built-in `SpriteRenderer`)\
 > **Roadmap:** `ROADMAP.md` Phase 4 (4A 2D, 4B 3D) and the new Phase 4C below
@@ -132,11 +132,11 @@ work in both modes, with one implementation.
 
 ## 5. Phases (ROADMAP Phase 4C)
 
-- [ ] **4C.1 Split the frame and traits.** `Frame2D`/`Frame3D`, camera kinds, `Renderer2D`/`Renderer3D`,
+- [x] **4C.1 Split the frame and traits.** `Frame2D`/`Frame3D`, camera kinds, `Renderer2D`/`Renderer3D`,
   `CustomRenderer` (old trait), `GpuCx` with only the wgpu variant. The current `SpriteRenderer`
   becomes the wgpu `Renderer2D` and the default. _Done when_ coin_dash, custom_renderer and all tests
   work unchanged in behaviour.
-- [ ] **4C.2 Native GL fallback for wgpu.** `PRIMARY | GL` with GL last, downlevel limits on GL, config
+- [x] **4C.2 Native GL fallback for wgpu.** `PRIMARY | GL` with GL last, downlevel limits on GL, config
   switch. _Done when_ coin_dash runs with the GL backend forced natively.
 - [ ] **4C.3 Draw2D.** The trait, the wgpu implementation, 2D debug draw (ROADMAP 4A.17) on top of it.
 - [ ] **4C.4 SDL mode.** `graphics = sdl` startup path (SDL creates an `SDL_Renderer` for the window,
@@ -171,3 +171,30 @@ work in both modes, with one implementation.
 | Legacy GL | wgpu's GL backend (GL 3.3 / GLES 3.0 / WebGL2); below that, SDL mode |
 | Shared 2D drawing | `Draw2D`, used by both 2D renderers, debug draw and the fallback UI |
 | Custom renderers | `CustomRenderer` (wgpu mode only), replaces 2D and 3D |
+
+## 8. As built (4C.1, 4C.2)
+
+Deviations and decisions:
+
+- **Frame:** `RenderFrame { d2: Frame2D { camera, ignored_cameras, sprites }, d3: Frame3D { camera, ignored_cameras, meshes },
+  textures, frame, time }`. `CameraView` gained `target` (copied from `Camera::target`; 0 = main window, ignored until the
+  multi-window phase). One active camera per kind: `Camera::kind` 0 (orthographic) feeds `d2`, 1 (perspective,
+  `Camera::perspective_3d()`) feeds `d3`; `RenderWarnings` has a flag per kind plus `no_renderer_3d`.
+- **Traits:** `Renderer2D`, `Renderer3D`, `CustomRenderer`. `GpuCx` was not introduced: the traits take the existing
+  `&Gpu` (wgpu handles) and a `Target { view, clear }`; 4C.4 will make both enums over the mode. `Target::clear` is how the
+  pass order works: the first pass clears, later ones load.
+- **Textures:** `&TextureChanges` (the frame's list) is passed to both renderers; the engine does not take it.
+- **Defaults:** the default 2D renderer is `SpriteRenderer` (nearest filtering), not `ClearRenderer` (kept as a 2D renderer that
+  only clears). A 3D renderer is called only on frames with an active 3D camera; the 2D renderer is called every frame.
+- **Engine API:** `set_renderer_2d`, `set_renderer_3d`, `set_renderer` (custom). `render/renderers.rs` holds the slots and the
+  pass order. `examples/custom_renderer` only changed the trait name and `frame.d2` / `frame.d3` field paths.
+- **GPU mode (4C.2):** `GpuMode { Auto, Wgpu, WgpuGl, Sdl }` in `StartupConfig::gpu_mode` (JS `gpuMode`), plus env
+  `EFE_GPU_MODE` on native when the config is `auto`. Native tries `PRIMARY` then `GL` with a separate wgpu instance each
+  (a single `PRIMARY | GL` instance picks by device type, so it cannot guarantee GL last); `wgpu-gl` only `GL`. `Auto` and `Wgpu`
+  behave the same until 4C.5 (auto will end in SDL mode). `Sdl` errors at graphics init until 4C.4. Native GL uses
+  `Limits::downlevel_defaults()` (WebGL2 keeps `downlevel_webgl2_defaults()`). The GL instance needs the display handle at
+  creation (`InstanceDescriptor::display`, a small `Send + Sync` wrapper around SDL's raw display handle), otherwise Mesa EGL
+  on Wayland reports "gl not compatible with provided surface".
+- **Result:** coin_dash runs natively in Vulkan (default) and with `EFE_GPU_MODE=wgpu-gl` (log: `graphics backend: Gl (Mesa
+  Intel UHD 620)`), on Wayland and with `SDL_VIDEODRIVER=x11`, no panics or wgpu errors. No pixel comparison was made (the game
+  has no offscreen screenshot path).

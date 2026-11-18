@@ -1,12 +1,14 @@
 # Rendering
 
 The engine does the plumbing; the game draws. Each frame the engine turns the ECS world into a
-plain-data `RenderFrame` and hands it to the game's `Renderer`. The renderer never touches the world.
+plain-data `RenderFrame` (split into `d2: Frame2D` and `d3: Frame3D`) and hands it to the renderers: a
+`Renderer2D` (default `SpriteRenderer`), an optional `Renderer3D`, or one `CustomRenderer` for everything. Renderers never
+touch the world. Design and plan: [`RENDERER_PLAN.md`](RENDERER_PLAN.md).
 
 ## Data flow
 
 ```
-components ──► systems (per stage) ──► RenderFrame (resource) ──► Renderer::render
+components ──► systems (per stage) ──► RenderFrame (resource) ──► Renderer3D, Renderer2D, overlays
 ```
 
 | Stage | System | What it does |
@@ -15,21 +17,23 @@ components ──► systems (per stage) ──► RenderFrame (resource) ──
 | `PostUpdate` | `propagate_transforms` | `GlobalTransform = parent_global * local` along the `Parent` chain; inserts `GlobalTransform` where missing; rebuilds `Children`. A missing/despawned parent (or one without `Transform`) makes the entity a root. A cycle is broken (the first entity of it in id order becomes a root) and warned once. |
 | `RenderExtract` | `render_extract` | builds `RenderFrame` (below) |
 
-Then the engine acquires the surface, calls `Renderer::render(&Gpu, &target_view, &RenderFrame)` and presents.
+Then the engine acquires the surface, draws the passes (3D if there is a 3D camera, then 2D, then `RenderOverlay`s) and presents.
 Headless engines (and a failed GPU init) skip drawing but still build the `RenderFrame`, so it can be tested.
 
 Components (`engine/components.rs`): `Camera`, `Sprite`, `TextureHandle`, `Visibility`, `Parent`, `GlobalTransform`
 are script-visible (registered, in the API index); `Children` is Rust-only. A missing `Visibility` means visible;
 it is not inherited by children.
 
-`RenderFrame`: `camera: Option<CameraView>`, `ignored_cameras`, `sprites: Vec<SpriteInstance>` (sorted by
+`RenderFrame`: `d2: Frame2D { camera, ignored_cameras, sprites }`, `d3: Frame3D { camera, ignored_cameras, meshes }`,
+`textures: TextureChanges`, `frame`, `time`. `d2.sprites` is a `Vec<SpriteInstance>` (sorted by
 `layer`, then entity id; `auto_size != 0` resolves the size to the texture's pixel size, 1x1 without a texture; with `auto_size == 0` `size` is used as is, so 0 means zero-size),
-`meshes: Vec<MeshInstance>`, `textures: TextureChanges`, `frame`, `time`.
+`d3.meshes` is a `Vec<MeshInstance>`.
 
-## One camera
+## One camera per kind
 
-Exactly one camera is used per frame: the entity with `Camera.active != 0` and the lowest entity id. If more than
-one is active, the rest are ignored (`RenderFrame::ignored_cameras`) and a warning is logged once
+One 2D (`Camera::kind == ORTHOGRAPHIC`, goes to `d2.camera`) and one 3D (`PERSPECTIVE`, `d3.camera`, `Camera::perspective_3d()`)
+camera is used per frame: per kind, the entity with `Camera.active != 0` and the lowest entity id. If more than
+one of a kind is active, the rest are ignored (`RenderFrame::ignored_cameras`) and a warning is logged once
 (`RenderWarnings::multiple_cameras`). No active camera: `camera` is `None`. Position and rotation come from the
 camera entity's `GlobalTransform` (else `Transform`); scale is ignored.
 `Camera.target` (0 = the main window) is reserved: later, cameras will be assigned to screen panels or windows
@@ -67,25 +71,43 @@ Gray/RGB `tRNS` colour keys are ignored. Garbage input returns an error and neve
   (applied by the renderer).
 - Sprites arrive back to front; draw in order, batching only consecutive runs of one texture.
 
-## The `Renderer` trait
+## The renderer traits
 
 ```rust
-pub struct Gpu<'a> { pub device: &'a wgpu::Device, pub queue: &'a wgpu::Queue,
-                     pub surface_format: wgpu::TextureFormat, pub size: (u32, u32) }
-pub trait Renderer: 'static {
-    fn init(&mut self, gpu: &Gpu) {}     // once, when the GPU is ready (or at set_renderer if it is)
+pub struct Target<'a> { pub view: &'a wgpu::TextureView, pub clear: bool }  // clear: first pass of the frame
+pub trait Renderer2D: 'static {
+    fn init(&mut self, gpu: &Gpu) {}     // once, when the GPU is ready (or at set_renderer_2d if it is)
     fn resize(&mut self, gpu: &Gpu) {}   // surface size changed
+    fn render(&mut self, gpu: &Gpu, target: &Target, frame: &Frame2D, textures: &TextureChanges);
+}
+pub trait Renderer3D: 'static { /* same, with frame: &Frame3D */ }
+pub trait CustomRenderer: 'static {      // whole frame, whole surface; replaces 2D + 3D
     fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView, frame: &RenderFrame);
+    /* init, resize as above */
 }
 ```
 
-`Engine::set_renderer(r)`. Default `ClearRenderer`: clears to the camera's `clear_color` (black without a camera).
-No `Send` bound: the engine and the renderer stay on the main thread (the web has one thread).
+`Engine::set_renderer_2d(r)`, `set_renderer_3d(r)`, `set_renderer(custom)`. Setting a 2D or 3D renderer drops a custom one;
+setting a custom one replaces both until a 2D/3D renderer is set again. Defaults: `SpriteRenderer` as 2D, no 3D renderer
+(a 3D camera then logs a warning once and draws nothing). Pass order: 3D (only with an active 3D camera; `Target::clear`
+is true), 2D (always, also without a camera; clears unless the 3D pass drew; use `Target::load_op(clear_color)`),
+then overlays. `ClearRenderer` is a 2D renderer that only clears. Texture changes are the same list for every renderer
+of the frame. Custom renderers read `frame.d2` / `frame.d3`.
+No `Send` bound: the engine and the renderers stay on the main thread (the web has one thread).
 `wgpu` and `bytemuck` are re-exported from the prelude (`efeengine_core::wgpu`, `render::wgpu`).
+
+## GPU mode
+
+Startup config `gpuMode` (`StartupConfig::gpu_mode`, `GpuMode`) or, on native when the config says `auto`, the
+environment variable `EFE_GPU_MODE`: `auto` (default), `wgpu`, `wgpu-gl`, `sdl`. Native `auto` / `wgpu` try wgpu on
+Vulkan / Metal / DX12 first and then on GL (one instance per backend set, so GL is really last); `wgpu-gl` uses GL only
+(GL 3.3+ / GLES 3.0, downlevel limits, display handle given to the instance, needed on Wayland). `sdl` is reserved
+for Phase 4C.4 and currently fails graphics init with a clear error. The web ignores it (`graphicsBackend` picks
+WebGPU or WebGL2). The log line `graphics backend: Gl (...)` shows what was chosen.
 
 ## `SpriteRenderer` (built in)
 
-`engine.set_renderer(SpriteRenderer::new())` draws `frame.sprites` with no further code (`SpriteRenderer::with_linear_filtering()`
+The default 2D renderer (`engine.set_renderer_2d(SpriteRenderer::new())` to choose it or its filter explicitly) draws `frame.d2.sprites` with no further code (`SpriteRenderer::with_linear_filtering()`
 for smooth scaling; the default is nearest-neighbour, for pixel art). Source: `render/sprite_renderer.rs` and
 `render/sprite.wgsl`, written to be read; it does what the template below asks for.
 
