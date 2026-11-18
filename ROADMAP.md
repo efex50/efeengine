@@ -337,12 +337,15 @@ How changes apply:
 - [ ] 7.6 **[N] Hot-patching systems with Subsecond (Dioxus).** Run the scheduler's system calls through `subsecond::HotFn`, so systems registered with `add_system` pick up new code on the next frame. Builds go through `dx` (or its linker shim), driven by `xtask` and the editor. Only function bodies of the game crate can be patched; struct layouts, statics and engine crates cannot. Native first; wasm only if it proves stable. **Start with a small test:** hot-patch one script_demo system and measure the cost per call. _Done when_ editing a system body changes the running game in under a second.
 - [ ] 7.7 **[S] Seamless restart.** When a change cannot be patched (a component layout, a new type), the editor snapshots the scene, rebuilds, restarts the game and restores the snapshot, mapping fields by name through the schema, with added fields set to their defaults. _Done when_ adding a field to a component keeps the scene and the camera position.
 
-## Later: multiple windows
+## Later: multiple windows (done)
 
-`Engine::create_window(WindowDesc)`: extra SDL windows natively, a canvas mounted in any HTML element on
-the web. Per-window size, scale, focus and input (`InputEvent.window`), cameras targeting a window
-(`Camera.target`), UI layers per window. Built on the core `SurfaceSet` from the UI GPU views
-(`docs/ui/API.md` 17.4), which already handles several surfaces on one device, including WebGL2.
+- [x] `Engine::create_window(WindowDesc)` and `Commands::create_window` (id reserved at once): extra SDL windows natively, a canvas mounted in any HTML element (`web_element`), an existing canvas (`web_canvas`) or a box in `<body>` on the web.
+- [x] Per-window size, scale, focus and fullscreen (`Windows`, `Ctx::windows`), `WindowId` on every `InputEvent`, new `Created` / `Closed` / `FullscreenChanged` events; pointer state per window, keyboard to the focused window; closing a secondary window removes it, closing the main one quits.
+- [x] Cameras target a window (`Camera::target`, `RenderFrame::windows`); one wgpu device with a surface per window (`ExtraSurface::from_surface` natively, `for_canvas` on the web, WebGL2 through the copy path); the renderers and overlays run per window.
+- [x] UI layers per window (`Layer::window`, `UiTree::layer_in`), one backend instance per window (web: a DOM layer element next to each canvas, iced: one renderer per window).
+- [x] Web fullscreen desync fixed (`WindowEvent::FullscreenChanged`, native and web).
+- [x] `examples/multi_window`; headless tests in `crates/core/tests/windows.rs` and `crates/ui/tests/windows.rs`.
+- Not supported: SDL mode (`SDL_Renderer`) draws the main window only; a `CustomRenderer` draws the main window only; scripts cannot target a window yet. Design as built: [`docs/MULTI_WINDOW.md`](docs/MULTI_WINDOW.md).
 
 ## Later: missing parts
 

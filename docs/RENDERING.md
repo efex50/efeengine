@@ -93,6 +93,12 @@ setting a custom one replaces both until a 2D/3D renderer is set again. Defaults
 is true), 2D (always, also without a camera; clears unless the 3D pass drew; use `Target::load_op(clear_color)`),
 then overlays. `ClearRenderer` is a 2D renderer that only clears. Texture changes are the same list for every renderer
 of the frame. Custom renderers read `frame.d2` / `frame.d3`.
+**Several windows** (`docs/MULTI_WINDOW.md`): the same renderer instances draw every window, once per window per frame.
+`Gpu::window` (0 = main) names the target; `gpu.size`, `gpu.scale_factor` and `gpu.surface_format` are that window's, and `frame` is
+that window's part (`RenderFrame::window(id)`; `frame.d2` / `frame.d3` of a `CustomRenderer` are the main window's). `resize` is
+called for the main window only, so keep size-dependent resources (depth buffers) per `gpu.window` and check `gpu.size` in
+`render`. Overlays get `init` / `resize` / `render` per window. The texture changes go to the first window drawn; later
+windows get an empty list. A `CustomRenderer` draws the main window only (the others are cleared); SDL mode draws the main window only.
 No `Send` bound: the engine and the renderers stay on the main thread (the web has one thread).
 `wgpu` and `bytemuck` are re-exported from the prelude (`efeengine_core::wgpu`, `render::wgpu`).
 

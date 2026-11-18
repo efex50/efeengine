@@ -44,6 +44,14 @@ the widgets from the page, use `!important` (node styles are inline) and note th
 `docs/ui/API.md` section 12. The canvas rule is `#canvas`, so image widgets (canvases of
 their own) are not stretched.
 
+## More windows
+
+`Engine::create_window(WindowDesc::new("Map").web_element("#sidebar"))` mounts another engine window as a canvas inside the page
+element matching the selector (`web_canvas(sel)` uses an existing `<canvas>`, the default puts a box in `<body>`). The element must
+exist when the window is created, so a game that does this ships its own page: put it in `examples/<name>/web/index.html` (files
+there override this template's) and add the host element, see `examples/multi_window/web/index.html` (`#sidebar` with `#map-box`).
+The window's size follows the element's CSS size; the window's UI layer is created next to its canvas. `docs/MULTI_WINDOW.md`.
+
 ## Behaviour notes
 
 - Not cross-origin isolated: the engine still runs, with a thread pool of size 1

@@ -61,8 +61,9 @@ The tree has several roots called **layers**, drawn in z order:
 
 ```rust
 let hud   = ui.layer("hud",   Layer::fill(0));
-let pause = ui.layer("pause", Layer::centered(100).modal());   // Layer { z, modal, anchor, offset }
+let pause = ui.layer("pause", Layer::centered(100).modal());   // Layer { z, modal, anchor, offset, window }
 ui.set_visible(pause, false);
+let map_hud = ui.layer_in(map, "map-hud", Layer::top_left(0)); // shown in window `map` (or Layer::top_left(0).window(map))
 ```
 
 - `anchor` places the layer's root: `Fill`, `Center`, `TopLeft`, `Top`, `TopRight`, `Left`, `Right`,
@@ -71,6 +72,12 @@ ui.set_visible(pause, false);
 - Signals from widgets on layers below a visible modal layer (lower `z`) are dropped by the plugin
   (a `Focus(false)` still passes). A visible `modal` layer captures all pointer and keyboard input below it, even outside its
   widgets (pause menus, dialogs).
+- **Per window:** `Layer::window` (a core `WindowId`'s number, default 0 = the main window) says where the layer is shown;
+  `ui.layer_in(window, name, layer)` sets it. `z`, `modal` and "below a modal" act inside one window; the capture flags of
+  `InputCapture` stay global (a visible modal layer in any window captures). A layer for a window that does not exist
+  (yet) is kept and shown once the window opens. Re-targeting an existing layer name moves it (and its nodes) to the
+  new window (`UiChange::Layer`). Queries: `layers_in(window)`, `layer_window(id)`, `window_of(node)`, `layer_windows()`.
+  `docs/MULTI_WINDOW.md`.
 - Layers are the only absolute positioning in v1. Inside a layer everything is flex layout.
 
 ## 4. Nodes
@@ -434,12 +441,15 @@ pub type UiCapture = efeengine_core::input::InputCapture;   // { pointer: bool, 
 5. **Web (done):** a `uiLayerId` in the startup config (default `"ui"`; the backend creates the
    element in the canvas's parent when missing), and the template's `#ui` element above the canvas
    inside `#stage` (so fullscreen includes it); key handling in `web_backend.rs` as in section 10.
+6. **Windows (done):** `RenderOverlay` calls and the input filter are per window (`Gpu::window`, `InputEvent::window`);
+   the plugin keeps one backend instance per window with a layer (section 13). `docs/MULTI_WINDOW.md`.
 
 ## 13. Backend trait
 
 ```rust
 pub trait UiBackend: 'static {
-    fn init(&mut self, cx: &mut UiBackendCx);                          // GPU/DOM resources
+    fn init(&mut self, cx: &mut UiBackendCx);                          // GPU/DOM resources; cx.window = the window this instance draws
+    fn handles_all_windows(&self) -> bool { false }                    // headless: one instance for every window
     fn input(&mut self, ev: &InputEvent) -> Filter;                    // native only; web: no-op (no tree: the backend keeps its own copy)
     fn sync(&mut self, tree: &UiTree, changes: &[UiChange], theme: &Theme, cx: &mut UiBackendCx);
     fn drain_signals(&mut self, out: &mut Vec<UiSignal>);
@@ -470,6 +480,13 @@ pub enum UiChange {
   or changed in this `sync` use, or that were replaced in `Textures` since the last hand-over
   (filled by the plugin from `Textures`; for replaced textures the `changes` slice also holds one
   synthesized `UiChange::Kind` per node that shows the texture).
+- **One instance per window.** `UiBackendCx::window` names the window (0 = main). The instance given to `UiPlugin` serves the main
+  window; the others come from `UiPlugin::with_window_backends(|window| Some(Box::new(..)))` once the window exists and has a
+  layer (default: `WebBackend` on wasm, `IcedBackend` natively with `iced`, none for a headless engine). An instance builds its
+  view from `tree.layers_in(cx.window)` (iced: `Model::build(tree, window)`), receives the whole journal (it skips changes of other
+  windows; a `Layer` change can move a subtree in or out), and only the input events of its window. An instance made later gets
+  `UiTree::snapshot_changes()` first. The headless backend returns `handles_all_windows() == true` (one instance, whole tree), so
+  `UiTest` needs no change. Web: the layer element of window N is `div[data-efui-window=N]` next to that window's canvas.
 - The plugin installs one engine `InputFilter` (calls `backend.input`, answers `Filter::Captured` / `Pass`) and one `RenderOverlay` (`gpu_init`, `gpu_resize`, `render`). The backend never calls back into the engine: signals and the text-input request are queued and the plugin's `ui_signals` system hands them over (`cx.commands.set_text_input(bool)`, `set_text_input_area`). The filter uses `try_borrow_mut`, never a blocking borrow of the shared backend.
 - `UiPlugin::new()` picks the backend: web on wasm32 (`UiPlugin::headless()` forces headless; `UiTest` uses it), iced on native when the default `iced` cargo feature is on and the engine is not headless (`EngineConfig::headless`), the fallback with the
   `ui-fallback` feature, headless when there is no window (tests, servers).
@@ -748,8 +765,8 @@ surface.present(&gpu, frame)           // after submitting the commands that dre
 - WebGL2: copy path as in 17.3 (format `Rgba8UnormSrgb`). The readback is double-gated: if the previous one
   has not completed when a frame is presented, that frame is re-read at the next `acquire`, so the last
   drawn content always arrives. The path is logged once. Details in `crates/core/structure.md`.
-- The iced backend does not need it (textures). `Engine::create_window` will use the same layer later
-  (`ExtraSurface::from_surface` is the native hook).
+- The iced backend does not need it (textures). `Engine::create_window` uses the same layer for its windows:
+  `ExtraSurface::from_surface` (native) and `for_canvas` (web), see `docs/MULTI_WINDOW.md`.
 
 ## 18. Open questions
 

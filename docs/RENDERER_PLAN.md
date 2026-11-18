@@ -179,8 +179,8 @@ work in both modes, with one implementation.
 Deviations and decisions:
 
 - **Frame:** `RenderFrame { d2: Frame2D { camera, ignored_cameras, sprites }, d3: Frame3D { camera, ignored_cameras, meshes },
-  textures, frame, time }`. `CameraView` gained `target` (copied from `Camera::target`; 0 = main window, ignored until the
-  multi-window phase). One active camera per kind: `Camera::kind` 0 (orthographic) feeds `d2`, 1 (perspective,
+  textures, frame, time }`. `CameraView` gained `target` (copied from `Camera::target`; 0 = main window; used since the multi-window phase, see
+  `docs/MULTI_WINDOW.md`: `RenderFrame::windows` holds the other windows' parts). One active camera per kind: `Camera::kind` 0 (orthographic) feeds `d2`, 1 (perspective,
   `Camera::perspective_3d()`) feeds `d3`; `RenderWarnings` has a flag per kind plus `no_renderer_3d`.
 - **Traits:** `Renderer2D`, `Renderer3D`, `CustomRenderer`. `GpuCx` was not introduced: the traits take the existing
   `&Gpu` (wgpu handles) and a `Target { view, clear }`; 4C.4 will make both enums over the mode. `Target::clear` is how the
