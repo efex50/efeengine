@@ -87,6 +87,8 @@ enum Nav {
 }
 
 pub struct IcedBackend {
+    /// The window this instance draws (`UiBackendCx::window`).
+    window: u32,
     gpu: Option<GpuState>,
     /// The overlay could not be set up (no adapter): the backend stays inert.
     broken: bool,
@@ -131,6 +133,7 @@ pub struct IcedBackend {
 impl IcedBackend {
     pub fn new() -> Self {
         Self {
+            window: 0,
             gpu: None,
             broken: false,
             model: Model::default(),
@@ -417,6 +420,7 @@ impl Operation for FocusProbe {
 
 impl UiBackend for IcedBackend {
     fn init(&mut self, cx: &mut UiBackendCx) {
+        self.window = cx.window;
         self.conv.scale = cx.scale_factor.max(0.01);
         self.logical = Size::new(cx.logical_size.0, cx.logical_size.1);
     }
@@ -466,7 +470,7 @@ impl UiBackend for IcedBackend {
             }
         }
         self.dirty = true;
-        self.model = Model::build(tree);
+        self.model = Model::build(tree, self.window);
         // Forget ids that are gone or no longer interesting; a surviving widget keeps its state
         // in iced's cache, so its enter / exit pairs stay consistent.
         let m = &self.model;

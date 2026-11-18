@@ -101,7 +101,7 @@ fn render(
     for (h, img) in images {
         assets.set_image(*h, img);
     }
-    let model = Model::build(tree);
+    let model = Model::build(tree, 0);
 
     let mut ui = UserInterface::build(view(&model, &assets), viewport.logical_size(), user_interface::Cache::new(), &mut renderer);
     let mut bus = shell::Bus::new();

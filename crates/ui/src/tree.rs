@@ -211,15 +211,49 @@ impl UiTree {
         v.into_iter().map(|(_, _, id)| id).collect()
     }
 
-    /// `true` if a visible modal layer exists.
+    /// The layer roots shown in `window`, lowest z first.
+    pub fn layers_in(&self, window: u32) -> Vec<WidgetId> {
+        self.layers().into_iter().filter(|id| self.layer_window(*id) == Some(window)).collect()
+    }
+
+    /// The window a layer root is shown in (`None` if `id` is not a layer root).
+    pub fn layer_window(&self, id: WidgetId) -> Option<u32> {
+        self.get(id)?.layer.map(|l| l.window)
+    }
+
+    /// The window the node `id` is shown in: that of the layer it lives on.
+    pub fn window_of(&self, id: WidgetId) -> Option<u32> {
+        self.layer_window(self.layer_of(id)?)
+    }
+
+    /// Every window that has a layer, ascending.
+    pub fn layer_windows(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.iter().filter_map(|(_, n)| n.layer.map(|l| l.window)).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// The journal entries that would build the tree from nothing: what a backend that joins
+    /// late (a new window's) is synced with. Parents come before their children.
+    pub fn snapshot_changes(&self) -> Vec<UiChange> {
+        let mut out = vec![UiChange::Theme];
+        out.extend((0..self.fonts().len()).map(|i| UiChange::Font(crate::style::FontId(i as u32))));
+        for root in self.layers() {
+            out.extend(self.subtree(root).into_iter().map(UiChange::Created));
+        }
+        out
+    }
+
+    /// `true` if a visible modal layer exists (in any window).
     pub fn modal_active(&self) -> bool {
         self.iter().any(|(id, n)| n.layer.is_some_and(|l| l.modal) && n.visible && self.is_shown(id))
     }
 
-    /// `true` if a visible modal layer sits above the layer `id` lives on (higher `z`).
+    /// `true` if a visible modal layer sits above the layer `id` lives on (higher `z`, same window).
     pub fn is_below_modal(&self, id: WidgetId) -> bool {
-        let Some(z) = self.layer_of(id).and_then(|l| self.get(l)).and_then(|n| n.layer).map(|l| l.z) else { return false };
-        self.iter().any(|(m, n)| n.layer.is_some_and(|l| l.modal && l.z > z) && self.is_shown(m))
+        let Some(own) = self.layer_of(id).and_then(|l| self.get(l)).and_then(|n| n.layer) else { return false };
+        self.iter().any(|(m, n)| n.layer.is_some_and(|l| l.modal && l.z > own.z && l.window == own.window) && self.is_shown(m))
     }
 
     /// All nodes under `id`, depth first, `id` itself first (empty for a stale id).
@@ -437,6 +471,12 @@ impl UiTree {
         self.fresh.insert(id);
         self.journal.push(UiChange::Created(id));
         id
+    }
+
+    /// Creates (or updates) the layer `name` and shows it in `window` (`Layer::window`). The
+    /// window may be opened later: the layer simply has no UI until it exists.
+    pub fn layer_in(&mut self, window: impl Into<u32>, name: &str, layer: Layer) -> WidgetId {
+        self.layer(name, layer.window(window))
     }
 
     /// Changes the `Layer` data of a layer root.

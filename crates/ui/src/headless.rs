@@ -103,6 +103,10 @@ impl HeadlessBackend {
 }
 
 impl UiBackend for HeadlessBackend {
+    fn handles_all_windows(&self) -> bool {
+        true
+    }
+
     fn init(&mut self, cx: &mut UiBackendCx) {
         let mut s = self.handle.lock();
         s.size = cx.logical_size;

@@ -959,6 +959,11 @@ impl Engine {
         let mut overlay: Box<dyn RenderOverlay> = Box::new(overlay);
         if let Some(gpu) = &self.gpu {
             overlay.init(&gpu.gpu());
+            for id in gpu.windows.keys() {
+                if let Some(g) = gpu.gpu_for(*id) {
+                    overlay.init(&g);
+                }
+            }
         }
         self.overlays.push(overlay);
         self

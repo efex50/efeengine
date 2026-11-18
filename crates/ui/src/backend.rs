@@ -27,8 +27,14 @@ pub struct TextInputArea {
 }
 
 impl UiBackendCx {
+    /// For the main window.
     pub fn new(logical_size: (f32, f32), scale_factor: f32) -> Self {
-        Self { logical_size, scale_factor, images: Vec::new() }
+        Self { window: 0, logical_size, scale_factor, images: Vec::new() }
+    }
+
+    /// For window `window` (0 = main).
+    pub fn for_window(window: u32, logical_size: (f32, f32), scale_factor: f32) -> Self {
+        Self { window, logical_size, scale_factor, images: Vec::new() }
     }
 }
 
@@ -36,6 +42,11 @@ impl UiBackendCx {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct UiBackendCx {
+    /// The window this backend instance draws (0 = main). The plugin makes one instance per
+    /// window that has layers; an instance shows the layers whose `Layer::window` is this
+    /// ([`UiTree::layers_in`]) and receives only that window's input events. It is told the
+    /// whole journal (`sync`) and skips what is not its own.
+    pub window: u32,
     /// Window size in logical pixels.
     pub logical_size: (f32, f32),
     pub scale_factor: f32,
@@ -53,12 +64,19 @@ pub struct UiBackendCx {
 /// backend inside main-thread engine systems.
 ///
 pub trait UiBackend: 'static {
-    /// Once, when the plugin is built.
+    /// Once, when the plugin is built (the main window's instance) or when the window's first
+    /// layer appears (the others). `cx.window` is the window.
     fn init(&mut self, cx: &mut UiBackendCx);
 
-    /// A raw input event, before the game sees it (native backends; web: no-op). Called from the
-    /// engine's input filter, so it also sees window events; it must not call back into the
-    /// engine. The backend keeps its own copy of what it needs from the tree.
+    /// `true` for a backend that handles every window in one instance (headless: it records the
+    /// whole tree). The plugin then makes no further instances for other windows.
+    fn handles_all_windows(&self) -> bool {
+        false
+    }
+
+    /// A raw input event of this backend's window (`ev.window`), before the game sees it (native
+    /// backends; web: no-op). Called from the engine's input filter, so it also sees window events;
+    /// it must not call back into the engine. The backend keeps its own copy of what it needs from the tree.
     fn input(&mut self, _ev: &InputEvent) -> Filter {
         Filter::Pass
     }
@@ -83,7 +101,8 @@ pub trait UiBackend: 'static {
     /// at render time. Backends that never paint them (headless) ignore it.
     fn set_painters(&mut self, _painters: &crate::painter::UiPainters) {}
 
-    /// Native: the GPU is ready (the engine's render overlay `init`).
+    /// Native: the GPU is ready for this backend's window (`gpu.window`; the engine's render
+    /// overlay `init`, or the first `render` when the instance is created after the window).
     fn gpu_init(&mut self, _gpu: &Gpu) {}
 
     /// Native: surface size or scale factor changed (overlay `resize`).

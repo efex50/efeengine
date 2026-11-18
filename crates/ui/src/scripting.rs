@@ -292,7 +292,7 @@ impl Inner {
             return -(self.deny(w, F, STATUS_DENIED) as i64);
         }
         let z = if w.trusted { z } else { z.clamp(self.z_range.0, self.z_range.1) };
-        let layer = Layer { z, modal, anchor, offset: (0.0, 0.0) };
+        let layer = Layer { z, modal, anchor, offset: (0.0, 0.0), window: 0 };
         let limit = self.limit_for(w);
         let st = self.state(w);
         let key = st.full_key(name);

@@ -42,9 +42,10 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn build(tree: &UiTree) -> Model {
+    /// The layers shown in `window`.
+    pub fn build(tree: &UiTree, window: u32) -> Model {
         let mut layers = Vec::new();
-        for root in tree.layers() {
+        for root in tree.layers_in(window) {
             if !tree.is_shown(root) {
                 continue;
             }
@@ -167,7 +168,7 @@ mod tests {
         let gone = ui.text(col, "hidden").visible(false).id();
         let plain = ui.text(col, "plain").id();
         let off = ui.button(col, "off").enabled(false).id();
-        let m = Model::build(&ui);
+        let m = Model::build(&ui, 0);
         assert_eq!(m.layers.len(), 1);
         assert!(m.find(gone).is_none());
         // Panel has a background: blocking. Plain text does not.
@@ -192,7 +193,7 @@ mod tests {
         let col = ui.column(root).style(Style::new().bold(true)).id();
         let t = ui.text(col, "hi").id();
         let own = ui.text(col, "own").style(Style::new().bold(false)).id();
-        let m = Model::build(&ui);
+        let m = Model::build(&ui, 0);
         let st = m.find(t).unwrap().style();
         assert_eq!(st.bold, Some(true));
         assert_eq!(m.find(own).unwrap().style().bold, Some(false));
@@ -204,7 +205,7 @@ mod tests {
         let a = ui.layer("a", Layer::fill(1).modal());
         let b = ui.layer("b", Layer::fill(2));
         ui.set_visible(b, false);
-        let m = Model::build(&ui);
+        let m = Model::build(&ui, 0);
         assert_eq!(m.layers.len(), 1);
         assert!(m.modal());
         assert!(m.find(a).unwrap().blocking);

@@ -176,11 +176,15 @@ pub struct Layer {
     pub anchor: Anchor,
     /// Logical-pixel offset from the anchor.
     pub offset: (f32, f32),
+    /// The window the layer is shown in (a core `WindowId`'s number; 0 = the main window).
+    /// `z` and `modal` only act inside this window. See [`Layer::window`] and
+    /// `UiTree::layer_in`.
+    pub window: u32,
 }
 
 impl Layer {
     pub fn anchored(z: i32, anchor: Anchor) -> Self {
-        Self { z, modal: false, anchor, offset: (0.0, 0.0) }
+        Self { z, modal: false, anchor, offset: (0.0, 0.0), window: 0 }
     }
 
     pub fn fill(z: i32) -> Self {
@@ -214,6 +218,12 @@ impl Layer {
 
     pub fn offset(mut self, x: f32, y: f32) -> Self {
         self.offset = (x, y);
+        self
+    }
+
+    /// Show the layer in `window` (a `WindowId` or its raw `u32`) instead of the main window.
+    pub fn window(mut self, window: impl Into<u32>) -> Self {
+        self.window = window.into();
         self
     }
 }

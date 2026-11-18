@@ -63,7 +63,7 @@ pub mod ecs {
     pub use crate::engine::plugin::PluginError;
     pub use crate::engine::resources::Resources;
     pub use crate::engine::commands::{EngineCommands, ParCommands};
-    pub use crate::engine::{EngineState, WindowState};
+    pub use crate::engine::{EngineState, WindowState, Windows};
 }
 
 pub mod window {
