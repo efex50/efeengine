@@ -22,7 +22,7 @@ efeengine-core = { path = "../../crates/core" }
 efeengine-ui = { path = "../../crates/ui", default-features = false }
 
 [features]
-default = ["iced"]
+default = ["iced", "fallback"]
 # Native UI backend (iced); without it the native build runs headless (nothing drawn).
 iced = ["efeengine-ui/iced"]
 # Fallback native UI backend (taffy + cosmic-text through Draw2D); also draws in SDL mode.

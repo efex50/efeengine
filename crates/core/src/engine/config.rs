@@ -42,6 +42,17 @@ pub enum GpuMode {
     Sdl,
 }
 
+/// The graphics path the engine actually came up with (reported to
+/// [`Engine::on_graphics_ready`](crate::engine::Engine::on_graphics_ready) hooks): what `auto`
+/// resolved to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicsMode {
+    /// wgpu (any backend, including GL).
+    Wgpu,
+    /// SDL_Renderer (native only).
+    Sdl,
+}
+
 impl GpuMode {
     /// Parse the config / env spelling.
     pub fn parse(s: &str) -> Option<Self> {

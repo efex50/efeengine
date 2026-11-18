@@ -201,13 +201,21 @@ slider rail drawn the full width (as iced), and the GPU view shown as an outline
    plugin registers a Draw2D overlay (instead of the wgpu `RenderOverlay`) when the main backend
    draws with Draw2D, and routes it to the window's backend instance. The fallback reads
    `cx.window` in `init` and shows `tree.layers_in(window)`.
-4. **`UiPlugin`:** `UiPlugin::fallback()` forces the fallback. `UiPlugin::new()` on native picks iced
-   when it is compiled in and the mode is not SDL, else the fallback when compiled in (with a log
-   line when iced is also compiled in). Limitation: `auto` mode finding no wgpu adapter only switches
-   to SDL at graphics init, after the choice, so use `UiPlugin::fallback()` or `EFE_GPU_MODE=sdl`
-   for UI there. SDL mode draws the main window only.
-5. **Examples:** `ui_demo`, `coin_dash`, `coin_dash_mods`, `multi_window` have a `fallback` feature
-   (`cargo build -p coin_dash --no-default-features --features fallback`).
+4. **`UiPlugin`:** `UiPlugin::fallback()` forces the fallback. `UiPlugin::new()` on native defers
+   the choice until the graphics mode is known: it installs a no-op stand-in backend and an
+   `Engine::on_graphics_ready` hook (core reports `GraphicsMode::Wgpu` or `Sdl`, which is what
+   `auto` resolved to, before the overlays' GPU `init`). The hook builds iced for wgpu (when
+   compiled in) or the fallback (SDL mode, or no iced), swaps it into the main window's slot,
+   replays the whole tree into it (the next `ui_sync` treats it like a new instance) and registers
+   the matching overlay (Draw2D overlay for the fallback, wgpu `RenderOverlay` for iced). One info
+   line names the choice (`[efeengine-ui] UI backend: ...`). So `auto` falling back to SDL (no wgpu
+   adapter) shows the fallback UI too, if the `fallback` feature is compiled in; otherwise a
+   warning says no UI is drawn. Explicit `with_backend` / `fallback()` are not deferred. SDL mode
+   draws the main window only.
+5. **Examples:** `ui_demo`, `coin_dash`, `coin_dash_mods`, `multi_window` have `fallback` in their
+   default features next to `iced` (release `coin_dash`: 20,379,040 -> 21,593,568 bytes, +1.2 MB
+   for taffy and the fallback code), so SDL mode shows the menus out of the box
+   (`--no-default-features --features iced` or `fallback` for one backend only).
 6. **Verified:** coin_dash menu and HUD in `EFE_GPU_MODE=sdl` and `wgpu` (window screenshots),
    ui_demo in SDL mode, workspace check, wasm checks of core and ui.
 

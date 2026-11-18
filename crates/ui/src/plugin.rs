@@ -37,6 +37,7 @@ use crate::backend::{UiBackend, UiBackendCx};
 use crate::capture::UiCapture;
 use crate::bindings::{BindCx, UiBindings};
 use crate::headless::HeadlessBackend;
+use efeengine_core::engine::config::GraphicsMode;
 use crate::journal::UiChange;
 use crate::node::NodeKind;
 use crate::signal::{UiSignal, filter_signals};
@@ -67,37 +68,39 @@ impl UiPlugin {
         Self { backend: RefCell::new(None), factory: RefCell::new(None), theme: None, headless: false }
     }
 
-    /// The default backend for this engine: the iced backend on native when the `iced` feature
-    /// is on and the engine has a window (not a headless config), else as [`new`](Self::new).
-    fn default_backend(engine: &Engine, headless: bool) -> Option<Box<dyn UiBackend>> {
+    /// Whether the native default applies: a native build, a window, and some native backend
+    /// compiled in. The backend itself is chosen later, when the graphics mode is known (see
+    /// [`native_backend_for`](Self::native_backend_for)).
+    fn defers_native(engine: &Engine, headless: bool) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         if !headless && !engine.config().headless {
-            return Self::native_backend(engine);
+            return cfg!(any(feature = "iced", feature = "fallback"));
         }
         let _ = (engine, headless);
-        None
+        false
     }
 
-    /// The native default: iced when it is compiled in and the rendering mode is not SDL (iced
-    /// needs wgpu), else the fallback backend when it is compiled in. Note the `auto` mode that
-    /// finds no wgpu adapter only switches to SDL at graphics init, after this choice: select
-    /// [`UiPlugin::fallback`] (or `EFE_GPU_MODE=sdl`) for UI there.
+    /// The native default for the graphics mode the engine came up with: iced on wgpu, else the
+    /// fallback backend (SDL mode, or no iced compiled in). `None` = nothing compiled in.
     #[cfg(not(target_arch = "wasm32"))]
-    fn native_backend(engine: &Engine) -> Option<Box<dyn UiBackend>> {
-        let _ = engine;
+    fn native_backend_for(mode: GraphicsMode) -> Option<Box<dyn UiBackend>> {
         #[cfg(feature = "iced")]
-        if efeengine_core::engine::config::GpuMode::effective() != efeengine_core::engine::config::GpuMode::Sdl {
+        if mode == GraphicsMode::Wgpu {
+            efeengine_core::prelude::global_info("[efeengine-ui] UI backend: iced (wgpu)");
             return Some(Box::new(crate::native::IcedBackend::new()));
         }
         #[cfg(feature = "fallback")]
         {
-            if cfg!(feature = "iced") {
-                efeengine_core::prelude::global_info("[efeengine-ui] SDL rendering mode: using the fallback UI backend (iced needs wgpu)");
-            }
+            efeengine_core::prelude::global_info(&format!("[efeengine-ui] UI backend: fallback ({mode:?} mode)"));
             return Some(Box::new(crate::fallback::FallbackBackend::new()));
         }
         #[allow(unreachable_code)]
-        None
+        {
+            efeengine_core::prelude::global_warn(&format!(
+                "[efeengine-ui] no UI backend for {mode:?} mode (enable the `fallback` feature for SDL mode); no UI is drawn"
+            ));
+            None
+        }
     }
 
     /// The default way to make a secondary window's backend (see [`with_window_backends`](Self::with_window_backends)).
@@ -107,12 +110,13 @@ impl UiPlugin {
             return Some(Box::new(|_| Some(Box::new(crate::web::WebBackend::new()) as Box<dyn UiBackend>)));
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if !headless && !engine.config().headless && Self::native_backend(engine).is_some() {
+        if Self::defers_native(engine, headless) {
+            // Secondary windows exist in the wgpu modes only (SDL mode closes them), so this is
+            // iced when compiled in; the fallback otherwise.
             return Some(Box::new(|_| {
                 #[cfg(feature = "iced")]
-                if efeengine_core::engine::config::GpuMode::effective() != efeengine_core::engine::config::GpuMode::Sdl {
-                    return Some(Box::new(crate::native::IcedBackend::new()) as Box<dyn UiBackend>);
-                }
+                return Some(Box::new(crate::native::IcedBackend::new()) as Box<dyn UiBackend>);
+                #[allow(unreachable_code)]
                 #[cfg(feature = "fallback")]
                 return Some(Box::new(crate::fallback::FallbackBackend::new()) as Box<dyn UiBackend>);
                 #[allow(unreachable_code)]
@@ -169,12 +173,15 @@ impl Plugin for UiPlugin {
 
     fn build(&self, engine: &mut Engine) {
         let mut headless_handle = None;
+        let mut deferred = false;
         let mut backend: Box<dyn UiBackend> = match self.backend.borrow_mut().take() {
             Some(b) => b,
             #[cfg(target_arch = "wasm32")]
             None if !self.headless => Box::new(crate::web::WebBackend::new()),
-            None if Self::default_backend(engine, self.headless).is_some() => {
-                Self::default_backend(engine, self.headless).unwrap()
+            // Native default: the real backend is chosen when graphics is up (hook below).
+            None if Self::defers_native(engine, self.headless) => {
+                deferred = true;
+                Box::new(PendingBackend)
             }
             None => {
                 let (b, handle) = HeadlessBackend::new();
@@ -209,6 +216,7 @@ impl Plugin for UiPlugin {
             slots: vec![Slot { window: 0, be: backend, bcx, gpu_ready: false, consumed: (false, false) }],
             factory,
             painters,
+            replay_main: false,
         }));
 
         // Raw input: the engine's input filter hands every event to its window's backend before
@@ -219,7 +227,35 @@ impl Plugin for UiPlugin {
         // Native overlay: GPU init / resize / draw, per window.
         // Draw2D backends (the fallback) draw through a Draw2D overlay instead, which also works
         // in SDL mode.
-        if backends.borrow().slots[0].be.draws_with_draw2d() {
+        if deferred {
+            // The mode is known only once graphics is up (`auto` may fall back to SDL): pick the
+            // backend then, replay the tree into it and register its kind of overlay.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let backends = backends.clone();
+                engine.on_graphics_ready(move |engine, mode| {
+                    let Some(mut be) = Self::native_backend_for(mode) else { return };
+                    {
+                        let mut b = backends.borrow_mut();
+                        let painters = b.painters.clone();
+                        let slot = &mut b.slots[0];
+                        be.init(&mut slot.bcx);
+                        be.set_painters(&painters);
+                        if slot.bcx.logical_size.0 > 0.0 {
+                            be.resize(slot.bcx.logical_size, slot.bcx.scale_factor);
+                        }
+                        slot.be = be;
+                        slot.gpu_ready = false;
+                        b.replay_main = true;
+                    }
+                    if backends.borrow().slots[0].be.draws_with_draw2d() {
+                        engine.add_draw2d_overlay(UiDraw2D { backends: backends.clone() });
+                    } else {
+                        engine.add_render_overlay(UiOverlay { backends: backends.clone() });
+                    }
+                });
+            }
+        } else if backends.borrow().slots[0].be.draws_with_draw2d() {
             engine.add_draw2d_overlay(UiDraw2D { backends: backends.clone() });
         } else {
             engine.add_render_overlay(UiOverlay { backends: backends.clone() });
@@ -428,6 +464,20 @@ struct Backends {
     slots: Vec<Slot>,
     factory: Option<WindowBackends>,
     painters: crate::painter::UiPainters,
+    /// Slot 0's backend was swapped in (deferred native choice): it gets the whole tree next sync.
+    replay_main: bool,
+}
+
+/// Slot 0's stand-in until graphics is up and the real native backend is chosen: ignores everything.
+struct PendingBackend;
+
+impl UiBackend for PendingBackend {
+    fn init(&mut self, _cx: &mut UiBackendCx) {}
+    fn sync(&mut self, _tree: &UiTree, _changes: &[UiChange], _theme: &Theme, _cx: &mut UiBackendCx) {}
+    fn drain_signals(&mut self, _out: &mut Vec<UiSignal>) {}
+    fn capture(&self) -> crate::capture::UiCapture {
+        Default::default()
+    }
 }
 
 impl Backends {
@@ -444,6 +494,9 @@ impl Backends {
         use efeengine_core::input::WindowId;
         self.slots.retain(|s| s.window == 0 || windows.contains(WindowId(s.window)));
         let mut fresh = Vec::new();
+        if std::mem::take(&mut self.replay_main) {
+            fresh.push(0);
+        }
         if self.slots[0].be.handles_all_windows() {
             return fresh;
         }

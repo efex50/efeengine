@@ -102,6 +102,9 @@ pub struct EngineState{
     pub(crate) scripting: Scripting,
 }
 
+/// A one-shot hook for `Engine::on_graphics_ready`.
+type GraphicsHook = Box<dyn FnOnce(&mut Engine, crate::config::GraphicsMode)>;
+
 pub struct Engine{
     // NOTE: field order matters. Fields drop in declaration order, and the surface inside
     // `gpu` was created from `windows`' raw window handle, so `renderer` and `gpu` must be
@@ -111,6 +114,8 @@ pub struct Engine{
     overlays: Vec<Box<dyn RenderOverlay>>,
     /// Draw2D overlays (work in both rendering modes), drawn after `overlays`.
     overlays_2d: rendering::Overlays2D,
+    /// One-shot hooks run once graphics came up (see `on_graphics_ready`).
+    graphics_hooks: Vec<GraphicsHook>,
     /// Run for every raw input event before `InputState::apply`, in add order.
     input_filters: Vec<Box<dyn InputFilter>>,
     gpu: Option<GpuContext>,
@@ -230,6 +235,7 @@ impl Engine {
             renderer: Renderers::new(),
             overlays: Vec::new(),
             overlays_2d: Default::default(),
+            graphics_hooks: Vec::new(),
             input_filters: Vec::new(),
             gpu: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -972,6 +978,21 @@ impl Engine {
         self
     }
 
+    /// Runs `f` once, when graphics came up and the mode is known (`GraphicsMode::Wgpu` or `Sdl`;
+    /// what `auto` resolved to), before the render overlays get their GPU `init` and before the
+    /// first frame, so `f` may add overlays suited to the mode. Never runs without graphics
+    /// (headless, or a failed init). Add it during setup.
+    pub fn on_graphics_ready(&mut self, f: impl FnOnce(&mut Engine, crate::config::GraphicsMode) + 'static) -> &mut Self {
+        self.graphics_hooks.push(Box::new(f));
+        self
+    }
+
+    fn run_graphics_hooks(&mut self, mode: crate::config::GraphicsMode) {
+        for h in std::mem::take(&mut self.graphics_hooks) {
+            h(self, mode);
+        }
+    }
+
     /// Add a [`Draw2DOverlay`]: extra 2D drawing over the frame through [`Draw2D`](rendering::Draw2D),
     /// in the wgpu and in the SDL mode, for every rendered window (SDL mode: the main one). Drawn after
     /// the [`RenderOverlay`]s, in add order. Never called without a window (headless). Texture
@@ -1202,7 +1223,10 @@ impl Engine {
         #[cfg(not(target_arch = "wasm32"))]
         if mode == GpuMode::Sdl {
             match self.init_sdl_mode() {
-                Ok(()) => self.logger.info("Graphics Context Initialized (SDL mode)!"),
+                Ok(()) => {
+                    self.run_graphics_hooks(crate::config::GraphicsMode::Sdl);
+                    self.logger.info("Graphics Context Initialized (SDL mode)!")
+                }
                 Err(e) => self.logger.error(&format!("graphics init failed: {e}")),
             }
             return;
@@ -1213,6 +1237,7 @@ impl Engine {
         }
         match GpuContext::new(&self.windows).await {
             Ok(gpu) => {
+                self.run_graphics_hooks(crate::config::GraphicsMode::Wgpu);
                 self.renderer.init(&gpu.gpu());
                 for o in &mut self.overlays {
                     o.init(&gpu.gpu());
@@ -1225,7 +1250,10 @@ impl Engine {
             Err(e) if mode == GpuMode::Auto && !self.windows.is_headless() => {
                 self.logger.warn(&format!("no usable wgpu graphics ({e}); falling back to SDL mode (2D only)"));
                 match self.init_sdl_mode() {
-                    Ok(()) => self.logger.info("Graphics Context Initialized (SDL mode)!"),
+                    Ok(()) => {
+                        self.run_graphics_hooks(crate::config::GraphicsMode::Sdl);
+                        self.logger.info("Graphics Context Initialized (SDL mode)!")
+                    }
                     Err(e2) => self.logger.error(&format!("graphics init failed: wgpu: {e}; SDL: {e2}")),
                 }
             }
