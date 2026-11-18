@@ -31,6 +31,11 @@ pub enum EngineCommand {
     ReloadMods,
     /// `Engine::unload_mods`, the report is logged.
     UnloadMods,
+    /// `Engine::load_scene`: switch to the scene when the stage's commands apply. A failed
+    /// load is logged and the current scene keeps running.
+    LoadScene(Box<crate::engine::scene::Scene>),
+    /// `Engine::unload_scene` when the stage's commands apply.
+    UnloadScene,
     /// Open a secondary window under the id `Commands::create_window` handed out. On failure
     /// the error is logged and a `WindowEvent::Closed` for that id is delivered next frame.
     CreateWindow { id: WindowId, desc: WindowDesc },
@@ -100,6 +105,15 @@ impl Commands {
     /// Ask the engine to `unload_mods` (every mod, dependents first) and log the report.
     pub fn unload_mods(&mut self) {
         self.list.push(EngineCommand::UnloadMods);
+    }
+    /// Switch to `scene` at the end of the current stage (see `Engine::load_scene`). It is
+    /// validated then, not now: a scene that fails to load is logged and the old one stays.
+    pub fn load_scene(&mut self, scene: crate::engine::scene::Scene) {
+        self.list.push(EngineCommand::LoadScene(Box::new(scene)));
+    }
+    /// Unload the active scene at the end of the current stage (see `Engine::unload_scene`).
+    pub fn unload_scene(&mut self) {
+        self.list.push(EngineCommand::UnloadScene);
     }
     pub fn quit(&mut self) {
         self.list.push(EngineCommand::Quit);

@@ -526,6 +526,18 @@ impl Schedule {
         st.batches.clone()
     }
 
+    /// Enable or disable every system named `name` in one stage; returns how many matched.
+    pub(crate) fn set_enabled_in(&mut self, stage: Stage, name: &str, enabled: bool) -> usize {
+        let st = &mut self.stages[stage.index()];
+        let mut n = 0;
+        for e in st.entries.iter_mut().filter(|e| e.name == name) {
+            e.enabled = enabled;
+            n += 1;
+        }
+        st.batches_valid = false;
+        n
+    }
+
     /// Enable or disable every system named `name` (in all stages); returns how many matched.
     pub fn set_enabled(&mut self, name: &str, enabled: bool) -> usize {
         let mut n = 0;

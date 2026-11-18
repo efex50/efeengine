@@ -31,6 +31,7 @@ pub mod time;
 pub mod config;
 pub mod input;
 pub mod scripting;
+pub mod scene;
 
 pub static WASM_PATH:OnceCell<String> =OnceCell::new();
 #[cfg(target_family = "wasm")]
@@ -137,6 +138,8 @@ pub struct Engine{
     /// Runs the parallel batches of a stage.
     exec: Executor,
     commands: Commands,
+    /// The active scene and the global systems (docs/SCENES.md, phase S2).
+    scene_state: scene::SceneState,
     /// Frame-rate cap of the native loop; `None` = uncapped.
     max_fps: Option<f32>,
     /// This engine's own message queue.
@@ -252,6 +255,7 @@ impl Engine {
             plugins: Vec::new(),
             exec,
             commands: Commands::default(),
+            scene_state: scene::SceneState::default(),
             msg_tx,
             msg_rx,
             clock: 0.0,
@@ -1177,6 +1181,12 @@ impl Engine {
                 EngineCommand::CloseWindow(id) => self.close_window(id),
                 EngineCommand::SetWindowTitle(id, t) => self.windows.set_title(id, t),
                 EngineCommand::SetWindowFullscreen(id, on) => self.windows.set_fullscreen(id, on),
+                EngineCommand::LoadScene(scene) => {
+                    if let Err(e) = self.load_scene(&scene) {
+                        self.logger.error(&format!("load_scene: {e}"));
+                    }
+                }
+                EngineCommand::UnloadScene => self.unload_scene(),
                 EngineCommand::ReloadMods => {
                     let report = self.reload_mods();
                     self.log_load_report(&report);

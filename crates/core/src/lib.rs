@@ -61,6 +61,7 @@ pub mod ecs {
     pub use crate::engine::types::{TypeRegistry, TypeEntry, ScriptField, CompError, TypeError, entity_to_bits, entity_from_bits};
     pub use crate::engine::schedule::{ScheduleCommands, PendingSystem, ScheduleError};
     pub use crate::engine::plugin::PluginError;
+    pub use crate::engine::scene::{Scene, SceneEntity, SceneValue, SceneError, SceneOwned, Snapshot, SceneLoaded, SceneUnloaded, SCENE_FORMAT};
     pub use crate::engine::resources::Resources;
     pub use crate::engine::commands::{EngineCommands, ParCommands};
     pub use crate::engine::{EngineState, WindowState, Windows};
