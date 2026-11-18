@@ -654,6 +654,19 @@ impl InnerWindow for WebWindow{
         self.apply_cursor();
     }
 
+    /// The Fullscreen API needs a user gesture; a request outside one is refused by the browser
+    /// (a rejected promise, ignored here).
+    fn set_fullscreen(&mut self, on: bool) {
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return };
+        if on {
+            if let Some(el) = doc.document_element() {
+                let _ = el.request_fullscreen();
+            }
+        } else if doc.fullscreen_element().is_some() {
+            doc.exit_fullscreen();
+        }
+    }
+
     fn set_cursor_grab(&mut self, grab: bool) {
         self.shared.want_grab.set(grab);
         if grab {

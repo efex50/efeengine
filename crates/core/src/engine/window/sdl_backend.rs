@@ -174,6 +174,12 @@ impl InnerWindow for SdlWindowManager {
         self.mouse.set_relative_mouse_mode(&self.main_window, grab);
     }
 
+    fn set_fullscreen(&mut self, on: bool) {
+        if let Err(e) = self.main_window.set_fullscreen(on) {
+            crate::engine::log::global_warn(&format!("set_fullscreen({on}) failed: {e}"));
+        }
+    }
+
     fn poll_events(&mut self, out: &mut Vec<InputEvent>) {
         use sdl3::event::{DisplayEvent, WindowEvent};
 

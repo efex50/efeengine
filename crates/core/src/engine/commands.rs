@@ -19,6 +19,8 @@ pub enum EngineCommand {
     SetFrameRate(f32),
     SetCursorVisible(bool),
     SetCursorGrab(bool),
+    /// Borderless fullscreen on or off (the web needs a user gesture and may refuse).
+    SetFullscreen(bool),
     SetCursorIcon(CursorIcon),
     SetTextInput(bool),
     /// Where text is being typed, in logical pixels (IME popup placement) and the cursor
@@ -104,6 +106,10 @@ impl Commands {
     }
     pub fn set_cursor_grab(&mut self, g: bool) {
         self.list.push(EngineCommand::SetCursorGrab(g));
+    }
+    /// Fullscreen on or off (applied after the stage; ignored by headless windows).
+    pub fn set_fullscreen(&mut self, on: bool) {
+        self.list.push(EngineCommand::SetFullscreen(on));
     }
     /// Change the mouse cursor's shape (applied after the stage; only sent to the window when it changes).
     pub fn set_cursor_icon(&mut self, icon: CursorIcon) {
@@ -328,6 +334,9 @@ impl ParCommands {
     }
     pub fn set_cursor_grab(&mut self, g: bool) {
         self.inner.set_cursor_grab(g);
+    }
+    pub fn set_fullscreen(&mut self, on: bool) {
+        self.inner.set_fullscreen(on);
     }
     pub fn set_cursor_icon(&mut self, icon: CursorIcon) {
         self.inner.set_cursor_icon(icon);

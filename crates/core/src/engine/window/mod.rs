@@ -98,6 +98,8 @@ pub trait InnerWindow: HasWindowHandle + HasDisplayHandle{
     fn set_cursor_icon(&mut self, _icon: CursorIcon) {}
     /// Grab the pointer: relative mouse mode (native) / pointer lock (web). Default no-op.
     fn set_cursor_grab(&mut self, _grab: bool) {}
+    /// Fullscreen on or off. Default no-op.
+    fn set_fullscreen(&mut self, _on: bool) {}
     /// Write the current gamepad snapshot into `state` (connect/update/retain). Default no-op.
     fn poll_gamepads(&mut self, _state: &mut GamepadState) {}
 }
@@ -114,6 +116,8 @@ pub trait WindowManager{
     /// Change the cursor shape. Default no-op.
     fn set_cursor_icon(&mut self, _icon: CursorIcon) {}
     fn set_cursor_grab(&mut self, grab: bool);
+    /// Fullscreen on or off (no-op for headless windows).
+    fn set_fullscreen(&mut self, on: bool);
     fn poll_gamepads(&mut self, state: &mut GamepadState);
 }
 pub struct GameWindowManager{
@@ -217,6 +221,12 @@ impl WindowManager for GameWindowManager {
 
     fn set_cursor_grab(&mut self, grab: bool) {
         self.inner.set_cursor_grab(grab);
+    }
+
+    fn set_fullscreen(&mut self, on: bool) {
+        if !self.headless {
+            self.inner.set_fullscreen(on);
+        }
     }
 
     fn poll_gamepads(&mut self, state: &mut GamepadState) {

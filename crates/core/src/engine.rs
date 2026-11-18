@@ -1127,6 +1127,7 @@ impl Engine {
                 EngineCommand::SetCursorVisible(v) => self.windows.set_cursor_visible(v),
                 EngineCommand::SetCursorIcon(i) => self.windows.set_cursor_icon(i),
                 EngineCommand::SetCursorGrab(g) => self.windows.set_cursor_grab(g),
+                EngineCommand::SetFullscreen(on) => self.windows.set_fullscreen(on),
                 EngineCommand::SetTextInput(on) => self.windows.set_text_input(on),
                 EngineCommand::SetTextInputArea { x, y, w, h, cursor } => self.windows.set_text_input_area(x, y, w, h, cursor),
                 EngineCommand::ReloadMods => {
