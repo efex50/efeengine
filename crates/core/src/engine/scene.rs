@@ -279,6 +279,43 @@ fn decode_component(entry: &TypeEntry, fields: &BTreeMap<String, SceneValue>) ->
     Ok(bytes)
 }
 
+/// The restart restore's decoder (E6.2): never fails. A field the type no longer has is dropped
+/// with a warning, a field the file lacks is zero (the registry holds no per-field defaults, so
+/// zero is the default of a new field) with a warning, and a field whose value does not fit the
+/// type (a changed type) is zero with a warning. `what` prefixes the warnings.
+fn decode_component_lenient(entry: &TypeEntry, fields: &BTreeMap<String, SceneValue>, what: &str, warnings: &mut Vec<String>) -> Vec<u8> {
+    let desc = entry.desc();
+    for k in fields.keys().filter(|k| !desc.fields.iter().any(|f| &f.name == *k)) {
+        warnings.push(format!("{what}: field `{k}` no longer exists, dropped"));
+    }
+    let mut bytes = vec![0u8; desc.size as usize];
+    for f in &desc.fields {
+        let Some(v) = fields.get(&f.name) else {
+            warnings.push(format!("{what}: new field `{}` not in the snapshot, set to zero", f.name));
+            continue;
+        };
+        let sz = prim_size(f.ty);
+        let at = f.offset as usize;
+        let mut one = |v: &SceneValue, o: usize| write_prim(f.ty, v, &mut bytes[o..o + sz]);
+        let result = if f.count == 1 {
+            one(v, at)
+        } else {
+            match v {
+                SceneValue::List(items) if items.len() == f.count as usize => {
+                    items.iter().enumerate().try_for_each(|(i, item)| one(item, at + i * sz))
+                }
+                _ => Err(format!("expected a list of {} values", f.count)),
+            }
+        };
+        if let Err(m) = result {
+            // A partly written list is cleared so the field is wholly zero.
+            bytes[at..at + sz * f.count as usize].fill(0);
+            warnings.push(format!("{what}: field `{}` does not fit its new type ({m}), set to zero", f.name));
+        }
+    }
+    bytes
+}
+
 /// Replace Entity-typed field values found in `map` (old raw bits to new raw bits).
 fn remap_entities(entry: &TypeEntry, bytes: &mut [u8], map: &BTreeMap<u64, u64>) {
     for f in &entry.desc().fields {
@@ -728,6 +765,35 @@ impl Engine {
     }
 }
 
+/// The world handed from one run of the game to the next on a seamless restart (docs/EDITOR.md
+/// E6.2): the same entity list as a [`Snapshot`] (with ids, so references survive), plus
+/// ownership, as RON text. [`Engine::restore_lenient`] reads it with a tolerant decoder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestartSnapshot {
+    pub scene: Scene,
+    /// Per entity of `scene`: the `(scene id, scene name)` of its `SceneOwned`, if any.
+    pub owners: Vec<Option<(u32, String)>>,
+}
+
+impl RestartSnapshot {
+    pub fn to_ron(&self) -> String {
+        let cfg = ron::ser::PrettyConfig::new().struct_names(true);
+        ron::ser::to_string_pretty(self, cfg).expect("a restart snapshot always serialises") + "\n"
+    }
+
+    pub fn from_ron(text: &str) -> Result<Self, SceneError> {
+        ron::from_str(text).map_err(|e| SceneError::Parse { scene: "<restart snapshot>".into(), msg: e.to_string() })
+    }
+}
+
+/// What [`Engine::restore_lenient`] did: how many entities it spawned and everything it had to
+/// drop, default or skip.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RestoreReport {
+    pub entities: usize,
+    pub warnings: Vec<String>,
+}
+
 /// An in-memory copy of the world's scene state (docs/SCENES.md, phase S3): the same data as a
 /// scene file, plus ownership, the system enabled flags, the world's tick and the current-scene
 /// bookkeeping. Made by [`Engine::snapshot`], applied by [`Engine::restore`].
@@ -887,5 +953,93 @@ impl Engine {
         self.scene_state.active = snap.active.as_ref().map(|(id, name, systems)| ActiveScene { id: *id, name: Arc::from(name.as_str()), systems: systems.clone() });
         self.scene_state.next_id = self.scene_state.next_id.max(snap.next_id);
         Ok(())
+    }
+}
+
+impl Engine {
+    /// Capture what a restart must carry over: [`snapshot`](Self::snapshot)'s entities and
+    /// ownership, as a serialisable value.
+    pub fn restart_snapshot(&self) -> RestartSnapshot {
+        let snap = self.snapshot();
+        RestartSnapshot { scene: snap.scene, owners: snap.owners }
+    }
+
+    /// Replace the world's captured entities with those of `snap`, tolerating a changed
+    /// layout (see `decode_component_lenient`): unknown fields are dropped, new fields are
+    /// zero, a component the game no longer registers is skipped (all with a warning in the
+    /// report), and the entity is kept with its other components. References between the
+    /// restored entities are remapped as in [`restore`](Self::restore).
+    ///
+    /// Ownership: entities that belonged to the scene now active (same name, usually the one
+    /// the game's setup just loaded) are owned by it again; other scene owners get a fresh
+    /// scene id. System flags and resources are not restored: the new run's setup decides them.
+    ///
+    /// Fails (world untouched) only for a wrong format version or a malformed snapshot.
+    pub fn restore_lenient(&mut self, snap: &RestartSnapshot) -> Result<RestoreReport, SceneError> {
+        let name = snap.scene.name.clone();
+        if snap.scene.format != SCENE_FORMAT {
+            return Err(SceneError::Format { scene: name, found: snap.scene.format });
+        }
+        if snap.owners.len() != snap.scene.entities.len() {
+            return Err(SceneError::Snapshot(format!("{} owner entries for {} entities", snap.owners.len(), snap.scene.entities.len())));
+        }
+        let mut ids = BTreeSet::new();
+        for (i, ent) in snap.scene.entities.iter().enumerate() {
+            if let Some(id) = ent.id.filter(|id| !ids.insert(*id)) {
+                return Err(SceneError::DuplicateId { scene: name, entity: i, id });
+            }
+        }
+        let mut warnings = Vec::new();
+        let mut decoded: Vec<DecodedEntity> = Vec::with_capacity(snap.scene.entities.len());
+        let mut editor_ids = BTreeSet::new();
+        for (i, ent) in snap.scene.entities.iter().enumerate() {
+            let mut comps = Vec::new();
+            for (cname, fields) in &ent.components {
+                let what = format!("entity {i} component `{cname}`");
+                match self.types().by_name(cname) {
+                    None => warnings.push(format!("{what}: no such component any more, skipped")),
+                    Some(entry) if !entry.is_component() => warnings.push(format!("{what}: is no longer a component, skipped")),
+                    Some(entry) => {
+                        let bytes = decode_component_lenient(entry, fields, &what, &mut warnings);
+                        if cname == "EditorId" {
+                            // Duplicate editor ids would break the editor's lookups.
+                            let id = fields.get("id").and_then(int_of);
+                            if id.is_some_and(|id| !editor_ids.insert(id)) {
+                                warnings.push(format!("{what}: duplicate editor id, skipped"));
+                                continue;
+                            }
+                        }
+                        comps.push((entry.id(), bytes));
+                    }
+                }
+            }
+            decoded.push(comps);
+        }
+        // Scene ids: the active scene keeps its id, any other old scene gets a new one.
+        let active = self.scene_state.active.as_ref().map(|a| (a.id, a.name.to_string()));
+        let mut next = self.scene_state.next_id;
+        let mut fresh: BTreeMap<u32, u32> = BTreeMap::new();
+        let owners: Vec<Option<SceneOwned>> = snap
+            .owners
+            .iter()
+            .map(|o| {
+                o.as_ref().map(|(old, n)| match &active {
+                    Some((id, an)) if an == n => SceneOwned { id: *id, name: Arc::from(n.as_str()) },
+                    _ => {
+                        let id = *fresh.entry(*old).or_insert_with(|| {
+                            next += 1;
+                            next
+                        });
+                        SceneOwned { id, name: Arc::from(n.as_str()) }
+                    }
+                })
+            })
+            .collect();
+        for e in self.captured_entities(false) {
+            let _ = self.state.world.despawn(e);
+        }
+        let spawned = self.spawn_decoded(&snap.scene, &decoded, &owners)?;
+        self.scene_state.next_id = next;
+        Ok(RestoreReport { entities: spawned.len(), warnings })
     }
 }
