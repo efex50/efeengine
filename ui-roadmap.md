@@ -195,10 +195,25 @@ Started by the Phase 0 spike (`crates/ui/src/native/`); what is ticked works, th
 
 ### Phase 4: scripts, mods and examples
 
-- [ ] UI signals as script events; scripts build nodes through host functions, under the existing
-  grant rules (a mod only sees and changes its own widgets).
-- [ ] Example: main menu + settings + pause menu in coin_dash.
-- [ ] Docs: building UI, themes, input ownership, replacing the backend.
+- [x] UI signals as script events; scripts build nodes through host functions, under the existing
+  grant rules (a mod only sees and changes its own widgets). Namespace `ui` (about 35 functions),
+  event `ui.signal`, `UiScripts` for limits and mount points: `crates/ui/src/scripting.rs`,
+  `crates/ui/tests/scripts.rs`, API.md section 9. The `dash_hud` mod in `examples/coin_dash_mods`.
+- [x] Example: main menu + settings + pause menu in coin_dash (`examples/coin_dash/src/menu.rs`,
+  `tests/menu.rs`, native screenshot test). Needed `Commands::set_fullscreen` in core.
+- [x] Docs: `docs/ui/GUIDE.md` (building UI, themes, input ownership, scripts and mods, replacing the backend).
+
+**Phase 4 decisions** (details in GUIDE.md section 8): namespace `ui` (owner `engine` is reserved); host
+functions queue operations because script lanes run on a snapshot and the tree is a resource; handles are
+module-local `i64`s, never `WidgetId`s; mods get their own prefixed keys, can use game-exposed *mount points*
+as parents only, have a node limit (256), no modal layers and a clamped `z` unless the game allows it;
+game scripts are trusted. Not done: per-module filtering of the broadcast `ui.signal` event (handles name
+the owner, text is not in the payload), GPU views and free-form styles for scripts, a web run of the coin_dash
+menus in a real browser (DOM backend compile-checked and covered by the shared headless tests; the fullscreen
+request on the web needs a user gesture and may be refused).
+
+**Exit:** coin_dash has a main menu, settings and a pause menu on both backends; a mod adds its own widgets
+and is held to its grant.
 
 ### Later
 

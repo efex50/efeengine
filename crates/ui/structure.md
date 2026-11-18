@@ -1,6 +1,6 @@
 # efeengine-ui
 
-The common UI API of the engine (design: `docs/ui/API.md`, sections 1 to 15; plan: `ui-roadmap.md`, Phase 1 retained layer). A retained `UiTree` resource with a change journal, a style subset and themes, signals, bindings, the `UiBackend` trait, a headless backend and the `UiTest` helper. The web backend (DOM) is real (Phase 2); the native iced backend is in progress (Phase 0 spike done, the start of Phase 3); the fallback comes later; no UI toolkit type appears in the API. The Elm-style view layer (section 16) is the `view` module, built on top of the public tree API.
+The common UI API of the engine (design: `docs/ui/API.md`, sections 1 to 15; plan: `ui-roadmap.md`, Phase 1 retained layer; scripts and mods: section 9, `src/scripting.rs`; guide: `docs/ui/GUIDE.md`). A retained `UiTree` resource with a change journal, a style subset and themes, signals, bindings, the `UiBackend` trait, a headless backend and the `UiTest` helper. The web backend (DOM) is real (Phase 2); the native iced backend is in progress (Phase 0 spike done, the start of Phase 3); the fallback comes later; no UI toolkit type appears in the API. The Elm-style view layer (section 16) is the `view` module, built on top of the public tree API.
 
 ## At a glance
 | | |
@@ -9,10 +9,10 @@ The common UI API of the engine (design: `docs/ui/API.md`, sections 1 to 15; pla
 | Kind | library (rlib) |
 | Depends on (workspace) | `efeengine-core` (Engine, Plugin, Ctx, Resources, Events, `InputEvent`, `TextureHandle`) |
 | External deps | `smallvec` (node classes), `thiserror` (`TreeError`); native + feature `iced` (default): `iced_wgpu`, `iced_widget`, `iced_runtime`, `iced_core` (iced main, git, pinned to `e5c350f2`, wgpu 30) and `pollster` |
-| Used by | `examples/ui_demo` |
+| Used by | `examples/ui_demo`, `examples/coin_dash`, `examples/coin_dash_mods` |
 | Features | `iced` (default): the native backend. Its dependencies sit under `cfg(not(wasm32))`, so wasm builds never see iced. Without the feature `UiPlugin::new()` is headless on native. `examples/ui_demo` forwards it (`default-features = false` on the ui dependency) |
 | Targets | native and `wasm32-unknown-unknown` (both check clean) |
-| Tests | unit tests in `src/` (24: css, dom_plan, native model / convert / keyed), `tests/tree.rs` (14), `tests/theme.rs` (5), `tests/plugin.rs` (25), `tests/review.rs` (9), `tests/settings.rs` (2), `tests/view.rs` (22), `tests/gpu_view.rs` (4); headless, no window or GPU. `tests/native_gpu.rs` (3, `#[ignore]`: focus navigation, identity across layer insertion and reorder, idle vs active frames on a real GPU; run with `-- --ignored`); `examples/ui_demo/tests/native_screenshot.rs` (2, `#[ignore]`: PNG of the menu incl. the GPU view and its pixel checks, re-present equality) |
+| Tests | unit tests in `src/` (24: css, dom_plan, native model / convert / keyed), `tests/tree.rs` (14), `tests/theme.rs` (5), `tests/plugin.rs` (25), `tests/review.rs` (9), `tests/settings.rs` (2), `tests/view.rs` (22), `tests/gpu_view.rs` (4), `tests/scripts.rs` (11: mods and scripts building UI, grants, handles, signals, limits, mount points, unload); headless, no window or GPU. `tests/native_gpu.rs` (3, `#[ignore]`: focus navigation, identity across layer insertion and reorder, idle vs active frames on a real GPU; run with `-- --ignored`); `examples/ui_demo/tests/native_screenshot.rs` (2, `#[ignore]`: PNG of the menu incl. the GPU view and its pixel checks, re-present equality) |
 
 ## Layout
 ```text
@@ -39,7 +39,8 @@ crates/ui
 │   ├── web.rs        WebBackend (wasm32 only): DOM elements, delegated listeners, capture
 │   ├── native/       IcedBackend (native, feature `iced`): mod.rs (backend, input, render, messages -> signals, focus navigation, clipboard, cursor icon), model.rs (owned, theme-resolved copy of the tree, text-property inheritance), view.rs (model -> iced Element, style mapping), keyed.rs (`Keyed` wrapper: stable widget identity), assets.rs (image handles, font registry, the bundled Inter), convert.rs (engine InputEvent -> iced Event, physical keys), offscreen.rs (render a tree to an offscreen texture + PNG, for screenshots)
 │   ├── headless.rs   HeadlessBackend (journal recorder and consistency checker) and HeadlessHandle
-│   ├── plugin.rs     UiPlugin (resources and four main-thread systems)
+│   ├── plugin.rs     UiPlugin (resources and four main-thread systems; also registers the script side)
+│   ├── scripting.rs  script and mod access (API.md section 9): the `ui` host namespace, the `ui.signal` event, `UiScripts` (limits, mount points, violations), the queue and its apply system
 │   ├── view/         the Elm-style view layer: mod.rs (docs: key scheme, frame order), el.rs (El, IntoChildren, constructors, `column!` / `row!`), reconcile.rs (tree diff), plugin.rs (UiView, UiViews, ViewCx, RunCondition, `changed`)
 │   └── testing.rs    UiTest
 └── tests/            see above
@@ -101,10 +102,18 @@ crates/ui
 
 ## Not done yet
 - Web: fonts (`UiChange::Font`; being added separately), no IME work beyond the browser's own, no browser test automation (checked by hand with `examples/ui_demo`).
-- Script host functions (API.md section 9, Phase 4); `Owner::Mod` and per-owner queries exist.
+- Scripts: no GPU views, no arbitrary style fields (a fixed list of setters plus classes), no moving nodes between parents, no per-module filtering of the broadcast `ui.signal` event (the handle names the owner).
 - Native backend: IME preedit drawing (the preedit reaches iced's editor, the OS popup placement works through `SetTextInputArea`), checkbox / slider / button focus style and tab stops (iced does not make them focusable), subtree `opacity`, stretch to the widest sibling in an auto-sized parent, a mouse cursor reset when the pointer leaves the UI is `Default` (it also overrides a game's own cursor), no Inter subset (two TTFs, 832 KB). Differences are listed in `docs/ui/API.md` ("Per-backend notes").
 - The fallback native backend.
 - View layer: moves across parents recreate the node; reorder uses one `move_to` per out-of-place child (no longest-increasing-subsequence minimization); no `hover_signals` on `El`.
+
+## Scripts and mods (`scripting.rs`, API.md section 9, GUIDE.md section 6)
+
+- Registered by `UiPlugin::build` (`scripting::register`, needs `Engine::api_open()`): namespace `ui` (owner `efeengine-ui`), struct `UiSignal` (16 bytes: `widget: i64`, `kind: u32`, `value: f32`), event `ui.signal`, about 35 host functions. Closures capture one `Arc<Mutex<Inner>>`; the same handle is the `UiScripts` resource.
+- Host functions never touch the tree (lanes run in parallel on a snapshot). Per module (by `ModuleId`) `Inner` keeps a table of entries `{ widget: Option<WidgetId>, tag, own, mount, cache }`, keys and mounts; a call validates the handle (`lookup`: the module part must be the caller, the entry must exist, a mount is refused when modifying), updates the cache (text, bool, f32, so `get_text` / `value` / `checked` answer at once) and pushes an `Op` with `(module id, sequence)`.
+- Systems: `ui_script_signals` (PreUpdate, `INPUT + 12`: `Events<UiSignal>` to `ScriptEvent`s for every table entry that points at the widget, kind and value as in the guide, `send_batch_now`) and `ui_scripts_apply` (PostUpdate, `LATE + 15`: drop the state of unloaded modules with `remove_owner`, sort the ops by `(module, sequence)`, apply each with `tree.with_owner(owner, ..)`, forget entries whose node is gone, refresh the exposed mount ids and, while a trusted script exists, the key snapshot `find` reads).
+- Core support: `ScriptHost::is_mod(id)` (grant-limited module), `ScriptHost::current_module` / `module_name` (existing).
+- Tested in `tests/scripts.rs` with `.efa` modules compiled in memory (`LoadInput::Folder` and `LoadInput::Efa`).
 
 ## GPU views (API.md section 17)
 

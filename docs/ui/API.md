@@ -320,20 +320,44 @@ ui.bind_value(hp_bar, Bind::query::<Health>(player, |h| h.hp / h.max));
 
 ## 9. Scripts and mods
 
-Script host functions mirror the builder (registered by the UI plugin before the registration lock
-closes, so `.efapi` exports include them):
+Implemented in `crates/ui/src/scripting.rs`; the usage guide with an example mod is
+[`GUIDE.md`](GUIDE.md) section 6. The plugin registers the namespace `ui` (owner `efeengine-ui`: the owner
+`engine` is reserved for the engine core) in the one `HostRegistry`, before the registration lock closes, so
+the functions are in the API index, the `.efapi` export and the docs.
 
 ```text
-ui.layer(name, z, modal) -> id      ui.node(parent, kind) -> id     ui.remove(id)
-ui.set_text(id, text)               ui.set_value(id, f32)           ui.set_checked(id, bool)
-ui.set_class(id, name)              ui.set_visible(id, bool)        ui.key(id, name)
-ui.find(name) -> id
-event ui.signal { widget: u64, kind: u32, value: f32, text: str }   ; delivered as a script event
+ui.layer(name, z, anchor, modal) -> i64        ui.remove(w) -> status           ui.find(key) -> i64
+ui.column(parent) / row(parent) -> i64         ui.text(parent, text) -> i64     ui.button(parent, label) -> i64
+ui.checkbox(parent, label, checked) -> i64     ui.slider(parent, min, max, value) -> i64
+ui.text_input(parent, text) -> i64             ui.image(parent, texture, fit) -> i64
+ui.set_key / set_text / set_value / set_checked / set_visible / set_enabled / set_hover_signals
+ui.set_class / add_class / remove_class / set_size / set_padding / set_gap / set_font_size
+ui.set_background(w, 0xRRGGBBAA) / set_text_color     ui.get_text(w, buf) / value(w) / checked(w) / node_count()
+event ui.signal { widget: i64, kind: u32, value: f32 }   ; struct UiSignal, delivered as a script event
 ```
 
-- A mod gets its own root per layer it creates (`mod:<mod>/<layer>`). It can only find, change or
-  remove nodes it owns. A grant limits the number of nodes per mod (default 256).
-- Mod unload removes the mod's nodes and bindings; reload rebuilds them through the mod's `init`.
+- **Handles.** A widget is a positive `i64`: `((module id + 1) << 32) | n`, local to the module that
+  created or found it (the tree's `WidgetId` never reaches a script). Creating functions return a handle or a
+  negative status; the others return a status: 0 ok, 1 bad handle (unknown, stale, forged, foreign; also
+  `find` without a match), 2 wrong kind, 3 node limit, 4 denied, 5 bad argument. Violations never trap or
+  panic; the first of each kind per module is logged and `UiScripts::violations()` keeps the last ones.
+- **Queue, then apply.** Scripts run in parallel lanes against a snapshot, so host functions validate against
+  a shared table (`UiScripts`) and queue operations; `ui_scripts_apply` (PostUpdate, `LATE + 15`, after
+  bindings and views, before the backend sync) applies them in module order and call order. A node created in
+  a frame is in that frame's sync.
+- **Ownership.** A mod's nodes are `Owner::Mod(<id>)`, its layers and keys are prefixed `mod:<id>/`, and it
+  can only change or remove nodes it created. Its `find` returns its own keys and **mount points**: nodes the
+  game exposed with `UiScripts::expose(key)`, usable as the `parent` of new widgets and for nothing else (status
+  4 otherwise). A game script (not a mod) is trusted: `Owner::Plugin("script:<name>")`, plain keys, `find`
+  reaches every keyed node, no limits. Grants: the mod needs `ui` (and `engine.events` for the signal) in
+  its grant like any namespace. Game-configured limits per mod: nodes (default 256), modal layers (default
+  refused), layer `z` range (default 0..=100). Mod unload or reload removes the mod's nodes and handles.
+- **Signals as script events.** `ui.signal` carries `UiSignal { widget, kind, value }` for widgets of the
+  module's own table (click 1, changed 2, submit 3, focus 4 / 5, hover 6 / 7); the plugin sends it with
+  `send_batch_now` at `INPUT + 12`, so the script system reads it with `engine.events.read` in the same frame.
+  Text is read with `get_text`. The event is broadcast like every script event; the handle names the owner.
+- Not offered: GPU views (a Rust painter is needed), arbitrary style fields (classes of the game theme
+  instead), moving a node to another parent.
 
 ## 10. Input capture
 

@@ -10,8 +10,11 @@
 //!   frame (`Ctx::send_batch_now`); `InputState::set_capture` is written (backend capture, a
 //!   visible modal layer, or an input event the backend consumed this frame).
 //! - `PreUpdate`, `order::INPUT + 11`: view message systems (see [`crate::view`]).
+//! - `PreUpdate`, `order::INPUT + 12`: this frame's signals become `ui.signal` script events
+//!   (see [`crate::scripting`]).
 //! - `PostUpdate`, `order::LATE + 10`: bindings evaluated, changed values written to the tree.
 //! - `PostUpdate`, `order::LATE + 11`: view systems (after bindings).
+//! - `PostUpdate`, `order::LATE + 15`: the operations scripts and mods queued are applied to the tree.
 //! - `PostUpdate`, `order::LATE + 20`: the journal goes to `backend.sync`.
 
 use std::cell::{Cell, RefCell};
