@@ -314,7 +314,7 @@ Open questions carried from `ui-roadmap.md`: iced maturity on the web and on mob
 
 Goal: an editor in the Unreal style, where the user writes normal Rust systems and the editor builds them, with no ABI risk. Rust has no stable ABI, so the editor **never loads game code in its own process**. The game process is the authority in both edit mode and play mode: it holds the world, runs the systems and renders. The editor is a client that only does UI, and it talks to the game over a local socket. This is not a full client-server engine (no world copied every frame, no headless server plus a rendering client); multiplayer may reuse the serialization later, but nothing here depends on it.
 
-Depends on Phase 6 (6.4 egui tools, 6.2 UI pass), Phase 4A (a renderer to show scenes) and the type registry (3.4).
+Depends on Phase 6 (6.4 developer tools, 6.2 UI pass), Phase 4A (a renderer to show scenes) and the type registry (3.4). Detailed design and phases E0–E7: [`docs/EDITOR.md`](docs/EDITOR.md); scene format and switching: [`docs/SCENES.md`](docs/SCENES.md).
 
 How changes apply:
 
