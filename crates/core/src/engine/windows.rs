@@ -70,7 +70,8 @@ impl Windows {
         false
     }
 
-    /// The window that has keyboard focus (the main one when none does).
+    /// A window that has focus (the main one when none does). `InputState::focus_window` is the
+    /// one that had it last, which is what the engine's cursor and text-input commands use.
     pub fn focused(&self) -> WindowId {
         self.iter().find(|(_, s)| s.focused).map_or(WindowId::MAIN, |(id, _)| id)
     }

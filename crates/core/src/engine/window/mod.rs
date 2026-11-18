@@ -187,7 +187,8 @@ pub struct GameWindowManager{
     injected: VecDeque<InputEvent>,
     headless: bool,
     text_input_area: Option<(WindowId, (i32, i32, i32, i32, i32))>,
-    cursor_icon: CursorIcon,
+    /// The last icon given per window (`set_cursor_icon` only reaches the backend on a change).
+    cursor_icons: std::collections::HashMap<u32, CursorIcon>,
     /// Secondary windows that exist, in creation order.
     open: Vec<WindowId>,
 }
@@ -208,7 +209,7 @@ impl GameWindowManager {
             injected: VecDeque::new(),
             headless: cfg.headless,
             text_input_area: None,
-            cursor_icon: CursorIcon::Default,
+            cursor_icons: std::collections::HashMap::new(),
             open: Vec::new(),
         })
     }
@@ -220,9 +221,13 @@ impl GameWindowManager {
     pub fn text_input_area(&self) -> Option<(i32, i32, i32, i32, i32)> {
         self.text_input_area.map(|(_, a)| a)
     }
-    /// The last cursor icon given to `set_cursor_icon`.
+    /// The last cursor icon given to `set_cursor_icon` for the main window.
     pub fn cursor_icon(&self) -> CursorIcon {
-        self.cursor_icon
+        self.cursor_icon_of(WindowId::MAIN)
+    }
+    /// The last cursor icon given to `set_cursor_icon` for `window`.
+    pub fn cursor_icon_of(&self, window: WindowId) -> CursorIcon {
+        self.cursor_icons.get(&window.0).copied().unwrap_or_default()
     }
     /// The raw `SDL_Window*` of a window (null when headless or unknown).
     #[cfg(not(target_family = "wasm"))]
@@ -264,6 +269,7 @@ impl GameWindowManager {
     pub fn close_window(&mut self, id: WindowId) -> bool {
         let Some(i) = self.open.iter().position(|w| *w == id) else { return false };
         self.open.remove(i);
+        self.cursor_icons.remove(&id.0);
         self.inner.close_window(id);
         true
     }
@@ -304,8 +310,8 @@ impl GameWindowManager {
     }
     /// Change the cursor shape over `window`.
     pub fn set_cursor_icon(&mut self, window: WindowId, icon: CursorIcon) {
-        if icon != self.cursor_icon {
-            self.cursor_icon = icon;
+        if icon != self.cursor_icon_of(window) {
+            self.cursor_icons.insert(window.0, icon);
             self.inner.set_cursor_icon(window, icon);
         }
     }

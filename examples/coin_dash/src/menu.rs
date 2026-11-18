@@ -11,7 +11,8 @@
 //!   the game view of the input is empty while a modal layer captures the keyboard.
 //! * Settings: volume slider and a fullscreen checkbox. The volume is stored in [`Menu`] (the game
 //!   has no audio yet, the value is shown and kept for when it does); fullscreen goes to the
-//!   window through `Commands::set_fullscreen`.
+//!   window through `Commands::set_fullscreen`, and the checkbox follows `WindowEvent::FullscreenChanged` (leaving
+//!   fullscreen with the browser's Esc updates it).
 //!
 //! The same code runs on both backends (iced on native, DOM on the web); it only uses
 //! `efeengine-ui` types.
@@ -146,7 +147,22 @@ fn hud(cx: &ViewCx) -> El<MenuMsg> {
 fn menu_update(cx: &mut Ctx) {
     let msgs: Vec<MenuMsg> = cx.events::<MenuMsg>().iter().cloned().collect();
     let esc = cx.input.just_pressed(KeyCode::Escape);
+    // The window left (or entered) fullscreen on its own (the browser's Esc, F11, the window manager):
+    // the checkbox follows, without sending a request back.
+    let fullscreen_now = cx
+        .input
+        .events()
+        .iter()
+        .filter(|e| e.window.is_main())
+        .filter_map(|e| match e.kind {
+            efeengine_core::input::InputEventKind::Window(efeengine_core::input::WindowEvent::FullscreenChanged(on)) => Some(on),
+            _ => None,
+        })
+        .last();
     let Some(m) = cx.resources.get_mut::<Menu>() else { return };
+    if let Some(on) = fullscreen_now {
+        m.fullscreen = on;
+    }
     let before = m.clone();
     for msg in msgs {
         match msg {

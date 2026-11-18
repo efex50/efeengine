@@ -1125,14 +1125,14 @@ impl Engine {
                 EngineCommand::Quit => self.request_shutdown(),
                 EngineCommand::SetTitle(t) => self.windows.set_title(WindowId::MAIN, t),
                 EngineCommand::SetFrameRate(f) => self.set_frame_rate(f),
-                // Cursor, grab and text input follow the window that has focus.
-                EngineCommand::SetCursorVisible(v) => self.windows.set_cursor_visible(self.state.windows.focused(), v),
-                EngineCommand::SetCursorIcon(i) => self.windows.set_cursor_icon(self.state.windows.focused(), i),
-                EngineCommand::SetCursorGrab(g) => self.windows.set_cursor_grab(self.state.windows.focused(), g),
+                // Cursor shape / visibility go to the window the pointer is in; grab and text input to the focused one.
+                EngineCommand::SetCursorVisible(v) => self.windows.set_cursor_visible(self.state.input.pointer_window().unwrap_or(self.state.input.focus_window()), v),
+                EngineCommand::SetCursorIcon(i) => self.windows.set_cursor_icon(self.state.input.pointer_window().unwrap_or(self.state.input.focus_window()), i),
+                EngineCommand::SetCursorGrab(g) => self.windows.set_cursor_grab(self.state.input.focus_window(), g),
                 EngineCommand::SetFullscreen(on) => self.windows.set_fullscreen(WindowId::MAIN, on),
-                EngineCommand::SetTextInput(on) => self.windows.set_text_input(self.state.windows.focused(), on),
+                EngineCommand::SetTextInput(on) => self.windows.set_text_input(self.state.input.focus_window(), on),
                 EngineCommand::SetTextInputArea { x, y, w, h, cursor } => {
-                    self.windows.set_text_input_area(self.state.windows.focused(), x, y, w, h, cursor)
+                    self.windows.set_text_input_area(self.state.input.focus_window(), x, y, w, h, cursor)
                 }
                 EngineCommand::CreateWindow { id, desc } => {
                     if let Err(e) = self.open_window(id, desc) {
