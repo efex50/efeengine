@@ -561,6 +561,22 @@ pub fn handle(ctx: &mut Ctx<'_>, req: &Request, state: &Shared, respond: Respond
                 });
             });
         }
+        Request::RestartSnapshot { path } => {
+            let dir = lock(state).project_dir.clone();
+            let full = match resolve_project_path(&dir, path) {
+                Ok(f) => f,
+                Err(m) => return respond(Reply::error("bad_path", m)),
+            };
+            let path = path.clone();
+            ctx.commands.engine_task(move |e| {
+                let text = e.restart_snapshot().to_ron();
+                let written = full.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&full, text));
+                respond(match written {
+                    Ok(()) => Reply::Saved { path },
+                    Err(err) => Reply::error("scene_error", format!("{}: {err}", full.display())),
+                });
+            });
+        }
         Request::LoadScene { path } => {
             let dir = lock(state).project_dir.clone();
             let full = match resolve_project_path(&dir, path) {
@@ -605,6 +621,17 @@ pub fn handle(ctx: &mut Ctx<'_>, req: &Request, state: &Shared, respond: Respond
         Request::Despawn { entity, editor_id } => {
             let (entity, editor_id) = (*entity, editor_id.clone());
             ctx.commands.engine_task(move |e| respond(despawn(e, entity, editor_id.as_deref())));
+        }
+        Request::Select { entity, editor_id, gizmo } => respond(match resolve_target(ctx.world, *entity, editor_id.as_deref()) {
+            Ok(ent) => {
+                ctx.resources.insert(crate::gizmo::Selection { entity: Some(ent), mode: *gizmo });
+                Reply::Selected { entity: Some(entity_to_bits(ent)) }
+            }
+            Err(r) => r,
+        }),
+        Request::ClearSelection => {
+            ctx.resources.insert(crate::gizmo::Selection::default());
+            respond(Reply::Selected { entity: None });
         }
         other => respond(handle_now(ctx, other)),
     }

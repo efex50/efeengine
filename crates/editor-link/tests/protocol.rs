@@ -28,7 +28,7 @@ fn round_trip<T: serde::Serialize + for<'de> serde::Deserialize<'de> + PartialEq
 
 #[test]
 fn every_message_round_trips() {
-    round_trip(ClientMessage::Hello { protocol: 1, client: "t".into() });
+    round_trip(ClientMessage::Hello { protocol: PROTOCOL_VERSION, client: "t".into() });
     for r in [
         Request::Entities,
         Request::Schema,
@@ -44,13 +44,17 @@ fn every_message_round_trips() {
         Request::Fidelity,
         Request::SaveScene { path: "a.ron".into() },
         Request::LoadScene { path: "a.ron".into() },
+        Request::RestartSnapshot { path: "target/r.ron".into() },
         Request::SetField { entity: Some(1), editor_id: None, component: "Door".into(), field: "speed".into(), value: json!(2.5) },
         Request::Spawn { components: Default::default(), editor_id: Some("3".into()) },
         Request::Despawn { entity: None, editor_id: Some("3".into()) },
+        Request::Select { entity: None, editor_id: Some("3".into()), gizmo: GizmoMode::Rotate },
+        Request::Select { entity: Some(8), editor_id: None, gizmo: GizmoMode::Scale },
+        Request::ClearSelection,
     ] {
         round_trip(ClientMessage::Request { id: 3, request: r });
     }
-    round_trip(ServerMessage::Hello { protocol: 1, game: "g".into() });
+    round_trip(ServerMessage::Hello { protocol: PROTOCOL_VERSION, game: "g".into() });
     round_trip(ServerMessage::Error { code: "c".into(), message: "m".into() });
     for r in [
         Reply::Entities { entities: vec![EntityInfo { editor_id: None, entity: 1, name: Some("n".into()) }] },
@@ -68,6 +72,8 @@ fn every_message_round_trips() {
         Reply::FieldSet { entity: 1, old: json!([1.0, 2.0]) },
         Reply::Spawned { entity: 1, editor_id: "4".into() },
         Reply::Despawned { owned: true, editor_id: None, components: vec![] },
+        Reply::Selected { entity: Some(4) },
+        Reply::Selected { entity: None },
     ] {
         round_trip(ServerMessage::Reply { id: 1, reply: r });
     }
@@ -79,6 +85,43 @@ fn wire_shapes() {
     assert_eq!(v, json!({"hello": {"protocol": 1, "client": "x"}}));
     let v = serde_json::to_value(Reply::error("c", "m")).unwrap();
     assert_eq!(v, json!({"error": {"code": "c", "message": "m"}}));
+    let v = serde_json::to_value(Request::Select { entity: None, editor_id: Some("7".into()), gizmo: GizmoMode::Move }).unwrap();
+    assert_eq!(v, json!({"select": {"entity": null, "editor_id": "7", "gizmo": "move"}}));
+    assert_eq!(serde_json::to_value(Request::ClearSelection).unwrap(), json!("clear_selection"));
+    // `gizmo` is optional on the wire.
+    let r: Request = serde_json::from_value(json!({"select": {"editor_id": "7"}})).unwrap();
+    assert_eq!(r, Request::Select { entity: None, editor_id: Some("7".into()), gizmo: GizmoMode::Move });
+    assert_eq!(PROTOCOL_VERSION, 2);
+}
+
+#[test]
+fn select_stores_the_entity_and_clear_empties_it() {
+    let (mut e, port) = engine();
+    let port = port.load(std::sync::atomic::Ordering::Relaxed);
+    let ent = e.world_mut().spawn((EditorId { id: 5 }, Transform::default()));
+    let bits = entity_to_bits(ent);
+    let replies = drive(&mut e, move || {
+        let mut s = connect(port);
+        hello(&mut s);
+        vec![
+            ask(&mut s, 1, Request::Select { entity: None, editor_id: Some("5".into()), gizmo: GizmoMode::Scale }),
+            ask(&mut s, 2, Request::Select { entity: None, editor_id: Some("99".into()), gizmo: GizmoMode::Move }),
+            ask(&mut s, 3, Request::Select { entity: None, editor_id: None, gizmo: GizmoMode::Move }),
+        ]
+    });
+    assert_eq!(replies[0], Reply::Selected { entity: Some(bits) });
+    assert_eq!(err_code(&replies[1]), "unknown_editor_id");
+    assert_eq!(err_code(&replies[2]), "bad_request");
+    // A failed select leaves the previous selection alone.
+    let sel = *e.resources().get::<Selection>().unwrap();
+    assert_eq!(sel, Selection { entity: Some(ent), mode: GizmoMode::Scale });
+    let cleared = drive(&mut e, move || {
+        let mut s = connect(port);
+        hello(&mut s);
+        ask(&mut s, 1, Request::ClearSelection)
+    });
+    assert_eq!(cleared, Reply::Selected { entity: None });
+    assert_eq!(e.resources().get::<Selection>().unwrap().entity, None);
 }
 
 #[test]
@@ -626,4 +669,41 @@ fn spawn_and_despawn_over_the_socket() {
     let ron = e.capture_scene("t").to_ron();
     assert!(ron.contains("Door") && ron.contains("EditorId"), "{ron}");
     assert_eq!(e.capture_scene("t").entities.len(), 1, "only the owned entity: {ron}");
+}
+
+#[test]
+fn restart_snapshot_is_written_and_restored_on_the_next_start() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let dir = temp_project("restart");
+    let (mut e, port) = mode_engine(&dir);
+    let port = port.load(Relaxed);
+    e.world_mut().spawn((Door { speed: 3.5, ..Default::default() },));
+    let r = drive(&mut e, move || {
+        let mut s = connect(port);
+        hello(&mut s);
+        vec![
+            ask(&mut s, 1, Request::RestartSnapshot { path: "target/efe-restart.ron".into() }),
+            ask(&mut s, 2, Request::RestartSnapshot { path: "../escape.ron".into() }),
+        ]
+    });
+    assert_eq!(r[0], Reply::Saved { path: "target/efe-restart.ron".into() });
+    assert_eq!(err_code(&r[1]), "bad_path");
+    let file = dir.join("target/efe-restart.ron");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("RestartSnapshot") && text.contains("3.5"), "{text}");
+    // An "older build" wrote an extra field and lacks none: add a field the type no longer has.
+    std::fs::write(&file, text.replacen("\"speed\"", "\"gone_field\": 1, \"speed\"", 1)).unwrap();
+
+    // The next start: its own setup spawns a different door, the link restores on frame 2.
+    let mut e2 = Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, ..EngineConfig::headless() }).expect("headless engine");
+    e2.register::<Door>().unwrap();
+    e2.add_plugin(EditorLink::new(0).with_project_dir(&dir).with_restore(&file)).unwrap();
+    e2.world_mut().spawn((Door { speed: 1.0, ..Default::default() },));
+    e2.run_frames(1, 1.0 / 60.0);
+    assert_eq!(door_speeds(&e2), vec![1.0], "not restored on the first frame");
+    e2.run_frames(2, 1.0 / 60.0);
+    assert_eq!(door_speeds(&e2), vec![3.5]);
+    let logs = efeengine_editor_link::recent_logs(50);
+    assert!(logs.iter().any(|l| l.text.contains("gone_field")), "{logs:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

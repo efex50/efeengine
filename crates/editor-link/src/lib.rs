@@ -1,6 +1,6 @@
 //! Editor link (docs/EDITOR.md phases E1 and E2): a localhost TCP listener that lets an editor
 //! read a running game, switch edit and play mode, save and load scene files, and (E4) set
-//! fields, spawn and despawn entities.
+//! fields, spawn and despawn entities, and (E7.2) select an entity to draw gizmo handles over it.
 //!
 //! - Off unless `EFE_EDITOR=1`: [`EditorLink::from_env`] then adds nothing, so release games
 //!   never open a socket. The port is `EFE_EDITOR_PORT` (default 7878). It binds `127.0.0.1` only.
@@ -10,8 +10,10 @@
 //! - On wasm32 the plugin does nothing.
 
 mod handler;
+pub mod gizmo;
 pub mod protocol;
 
+pub use gizmo::Selection;
 pub use handler::{RingLogger, recent_logs, resolve_project_path};
 pub use protocol::*;
 
@@ -37,30 +39,39 @@ pub struct EditorLink {
     port: Option<u16>,
     project_dir: Option<std::path::PathBuf>,
     bound: std::sync::Arc<std::sync::atomic::AtomicU16>,
+    restore: Option<std::path::PathBuf>,
 }
 
 impl EditorLink {
     /// Always on, listening on `127.0.0.1:port`.
     pub fn new(port: u16) -> Self {
-        Self { port: Some(port), project_dir: None, bound: Default::default() }
+        Self { port: Some(port), project_dir: None, bound: Default::default(), restore: None }
     }
 
     /// On only when `EFE_EDITOR=1`; port from `EFE_EDITOR_PORT` (default 7878).
     pub fn from_env() -> Self {
         let on = std::env::var("EFE_EDITOR").is_ok_and(|v| v == "1");
         let port = std::env::var("EFE_EDITOR_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7878);
-        Self { port: on.then_some(port), project_dir: None, bound: Default::default() }
+        let restore = std::env::var_os("EFE_RESTORE_SNAPSHOT").filter(|v| !v.is_empty()).map(Into::into);
+        Self { port: on.then_some(port), project_dir: None, bound: Default::default(), restore }
     }
 
     /// The disabled plugin (adds nothing).
     pub fn off() -> Self {
-        Self { port: None, project_dir: None, bound: Default::default() }
+        Self { port: None, project_dir: None, bound: Default::default(), restore: None }
     }
 
     /// The directory `save_scene` / `load_scene` paths are relative to. Default: the
     /// `EFE_EDITOR_PROJECT` environment variable, else the working directory.
     pub fn with_project_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.project_dir = Some(dir.into());
+        self
+    }
+
+    /// Restore this restart snapshot (a file written by the `restart_snapshot` request) on the
+    /// second frame, after the game's own setup. `from_env` sets it from `EFE_RESTORE_SNAPSHOT`.
+    pub fn with_restore(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.restore = Some(path.into());
         self
     }
 
@@ -86,7 +97,7 @@ impl Plugin for EditorLink {
             .clone()
             .or_else(|| std::env::var_os("EFE_EDITOR_PROJECT").map(Into::into))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-        native::build(engine, port, &self.bound, dir);
+        native::build(engine, port, &self.bound, dir, self.restore.clone());
     }
 }
 
@@ -126,7 +137,7 @@ mod native {
         }
     }
 
-    pub fn build(engine: &mut Engine, port: u16, bound: &AtomicU16, project_dir: std::path::PathBuf) {
+    pub fn build(engine: &mut Engine, port: u16, bound: &AtomicU16, project_dir: std::path::PathBuf, restore: Option<std::path::PathBuf>) {
         let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
             Ok(l) => l,
             Err(e) => {
@@ -155,9 +166,21 @@ mod native {
 
         let guard = Stop(stop);
         let state: Arc<Mutex<LinkState>> = Arc::new(Mutex::new(LinkState::new(project_dir)));
+        engine.resources_mut().insert(crate::gizmo::Selection::default());
+        // The editor names the game's window so it can find and place it (E7.1).
+        let mut title = std::env::var("EFE_WINDOW_TITLE").ok().filter(|t| !t.is_empty());
+        let mut restore = restore.map(|p| (p, 0u32));
         engine
             .add_system(Stage::PostUpdate, move |ctx| {
                 let _keep = &guard;
+                if let Some((path, frames)) = &mut restore {
+                    *frames += 1;
+                    if *frames == 2 {
+                        let path = path.clone();
+                        restore = None;
+                        ctx.commands.engine_task(move |e| restore_snapshot(e, &path));
+                    }
+                }
                 while let Ok(p) = rx.try_recv() {
                     let (id, out) = (p.id, p.out);
                     let respond = Box::new(move |reply: Reply| {
@@ -167,12 +190,37 @@ mod native {
                     });
                     handle(ctx, &p.request, &state, respond);
                 }
+                if let Some(t) = title.take() {
+                    ctx.commands.set_title(t);
+                }
+                // Gizmo handles (E7.2): edit mode only, drawn by the game through DebugDraw2D.
+                let editing = state.lock().map_or_else(|p| p.into_inner().mode, |s| s.mode) == Mode::Edit;
+                if editing {
+                    crate::gizmo::draw_selection(ctx.world, ctx.resources);
+                }
             })
             .order(order::LATE + 100)
             .name("editor_link_drain");
         // Edit mode must not stop the link itself.
         if let Err(e) = engine.set_global_system("editor_link_drain") {
             engine.logger.error(&format!("editor-link: {e}"));
+        }
+    }
+
+    /// Read the restart snapshot and restore it; every outcome is logged, never fatal.
+    pub(crate) fn restore_snapshot(e: &mut Engine, path: &std::path::Path) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(err) => return e.logger.error(&format!("editor-link: cannot read restart snapshot {}: {err}", path.display())),
+        };
+        match efeengine_core::ecs::RestartSnapshot::from_ron(&text).and_then(|s| e.restore_lenient(&s)) {
+            Ok(report) => {
+                for w in &report.warnings {
+                    e.logger.warn(&format!("restart restore: {w}"));
+                }
+                e.logger.info(&format!("restart restore: {} entities restored, {} warnings", report.entities, report.warnings.len()));
+            }
+            Err(err) => e.logger.error(&format!("restart restore failed, world left as the game set it up: {err}")),
         }
     }
 

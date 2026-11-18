@@ -3,8 +3,8 @@
 //! A frame is a `u32` big-endian length followed by that many bytes of UTF-8 JSON.
 //!
 //! ```text
-//! client -> {"hello":{"protocol":1,"client":"efe-editor"}}
-//! server -> {"hello":{"protocol":1,"game":"my_game"}}        (or {"error":{"code":"protocol_mismatch",..}} and close)
+//! client -> {"hello":{"protocol":2,"client":"efe-editor"}}
+//! server -> {"hello":{"protocol":2,"game":"my_game"}}        (or {"error":{"code":"protocol_mismatch",..}} and close)
 //! client -> {"request":{"id":7,"request":"stats"}}
 //! server -> {"reply":{"id":7,"reply":{"stats":{"frame":10,"frame_time":0.016,"entity_count":3}}}}
 //! ```
@@ -19,6 +19,15 @@
 //! and play mode. Error codes: `unknown_entity`, `unknown_editor_id`, `unknown_component`,
 //! `unknown_field`, `missing_component`, `readonly`, `bad_value`, `unsupported_type` (a string
 //! for a non-entity field: the registry has no string fields) and `duplicate_editor_id`.
+//! Seamless restart (E6.2): `{"restart_snapshot":{"path":"target/efe-restart.ron"}}` writes the world; the
+//! editor then starts the new build with `EFE_RESTORE_SNAPSHOT=<absolute path>`, and the link
+//! restores it on its second frame with `Engine::restore_lenient`, logging a warning per dropped
+//! or defaulted field.
+//! Gizmos (E7.2, protocol 2): `{"select":{"editor_id":"7","gizmo":"move"}}` (or `"entity":bits`; `gizmo` is
+//! `move`, `rotate` or `scale`, default `move`) stores the entity in the game's [`Selection`]
+//! resource, and in edit mode the game draws that gizmo over it; `"clear_selection"` empties it.
+//! Both reply `selected` (`entity` is null after a clear). Errors: `unknown_entity`,
+//! `unknown_editor_id`, `bad_request`.
 //! Failures are replies: `{"error":{"code":"...","message":"..."}}`.
 //!
 //! # Modes
@@ -54,7 +63,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The protocol version; bumped on every incompatible change.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// The largest frame either side accepts (1 MiB); a bigger length closes the connection.
 pub const MAX_FRAME: usize = 1 << 20;
 
@@ -110,6 +119,9 @@ pub enum Request {
     SaveScene { path: String },
     /// Load a scene file from the project directory (switches the scene).
     LoadScene { path: String },
+    /// Write the whole world (`Engine::restart_snapshot`, RON) to a file under the project
+    /// directory, for a seamless restart (E6.2). Reply: `saved`.
+    RestartSnapshot { path: String },
     /// Set one field of one component (edit and play mode). `value` is JSON converted by the
     /// field's schema type: a number, a bool, an array for vectors, entity bits or an editor
     /// id string for `entity`. Reply: `field_set` with the old value.
@@ -138,6 +150,27 @@ pub enum Request {
         #[serde(default)]
         editor_id: Option<String>,
     },
+    /// Select an entity for the gizmo the game draws in edit mode (E7.2). Reply: `selected`.
+    Select {
+        #[serde(default)]
+        entity: Option<u64>,
+        #[serde(default)]
+        editor_id: Option<String>,
+        #[serde(default)]
+        gizmo: GizmoMode,
+    },
+    /// Clear the selection (no gizmo). Reply: `selected` with a null entity.
+    ClearSelection,
+}
+
+/// Which gizmo handles the game draws over the selected entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GizmoMode {
+    #[default]
+    Move,
+    Rotate,
+    Scale,
 }
 
 /// Edit mode runs only global systems; play mode runs what the scene activated.
@@ -211,6 +244,8 @@ pub enum Reply {
     /// `owned`: the entity carried `SceneOwned` (saved with the scene). `components` are its
     /// writable registered components, ready to feed back into `spawn`.
     Despawned { owned: bool, editor_id: Option<String>, components: Vec<ComponentInfo> },
+    /// The selection after `select` (`Some(bits)`) or `clear_selection` (`None`).
+    Selected { entity: Option<u64> },
     Error { code: String, message: String },
 }
 

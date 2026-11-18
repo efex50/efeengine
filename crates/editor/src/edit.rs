@@ -317,7 +317,7 @@ pub fn history_blocked(mode: Mode, connected: bool) -> Option<&'static str> {
 pub fn is_mutation(r: &Request) -> bool {
     matches!(
         r,
-        Request::SetField { .. } | Request::Spawn { .. } | Request::Despawn { .. } | Request::SetMode { .. } | Request::Stop { .. } | Request::SaveScene { .. } | Request::LoadScene { .. }
+        Request::SetField { .. } | Request::Spawn { .. } | Request::Despawn { .. } | Request::SetMode { .. } | Request::Stop { .. } | Request::SaveScene { .. } | Request::LoadScene { .. } | Request::RestartSnapshot { .. }
     )
 }
 
