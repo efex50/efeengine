@@ -311,7 +311,7 @@ fn is_desktop_linux_browser() -> bool {
 fn create_surface(instance: &Instance, window: &GameWindowManager) -> Result<Surface<'static>, String> {
     #[cfg(target_arch = "wasm32")]
     {
-        let canvas = window.canvas().ok_or_else(|| {
+        let canvas = window.canvas(WindowId::MAIN).ok_or_else(|| {
             format!("canvas element with id \"{}\" not found (or not a <canvas>)", window.canvas_id())
         })?;
         instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))

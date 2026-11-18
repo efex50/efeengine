@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="color-scheme" content="dark">
+    <title>{{TITLE}}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e; color: #e8e8f0;
+            font: 16px/1.4 system-ui, sans-serif; overscroll-behavior: none; }
+
+        /* The stage fills the window (and is the element that goes fullscreen). The canvas fills the
+           stage in CSS pixels; the engine reads clientWidth/clientHeight * devicePixelRatio and sets the
+           drawing buffer size itself, so do not set width/height attributes on the canvas. */
+        #stage { position: fixed; inset: 0 328px 0 0; background: #1a1a2e; }
+        /* multi_window: the second window ("Map") is a canvas the engine mounts in this element
+           (WindowDesc::web_element("#sidebar")); its size follows the element's CSS size. */
+        #sidebar { position: fixed; top: 0; right: 0; width: 328px; bottom: 0; padding: 4px; background: #0e0e1c;
+            border-left: 1px solid #2c2c4a; display: flex; flex-direction: column; gap: 8px; }
+        #sidebar .map-box { width: 320px; height: 240px; }
+        #sidebar h2 { font-size: .9rem; font-weight: 600; color: #a8a8c0; }
+        #sidebar p { font-size: .8rem; color: #8888a8; }
+        #canvas { width: 100%; height: 100%; display: block; outline: none; touch-action: none;
+            user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+            -webkit-tap-highlight-color: transparent; }
+
+        /* The UI layer (efeengine-ui web backend builds its widgets here). It covers the stage and lets
+           pointer events through to the canvas; widgets and modal backdrops take them back. The
+           engine ignores key events that come from inside it. */
+        #ui { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+
+        /* Full-window panels on top of the canvas: loading, click to start, errors. */
+        .panel { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+            justify-content: center; gap: 14px; padding: 24px; text-align: center; background: #1a1a2e; }
+        .panel[hidden] { display: none; }
+        .panel.clear { background: rgba(26, 26, 46, .72); cursor: pointer; }
+        h1 { font-size: 1.4rem; font-weight: 600; }
+        #status, .hint { color: #a8a8c0; max-width: 40em; }
+        .bar { width: min(320px, 70vw); height: 8px; border-radius: 4px; background: #2c2c4a; overflow: hidden; }
+        .bar > div { height: 100%; width: 0; background: #7c8cff; transition: width .15s; }
+        .bar.indeterminate > div { width: 35%; animation: slide 1.1s ease-in-out infinite alternate; }
+        @keyframes slide { from { margin-left: 0 } to { margin-left: 65% } }
+        .play { font-size: 1.3rem; padding: 12px 36px; border-radius: 8px; border: 0; cursor: pointer;
+            background: #7c8cff; color: #10101e; font-weight: 600; }
+        #error { background: #2a1420; align-items: flex-start; overflow: auto; justify-content: flex-start;
+            text-align: left; }
+        #error h1 { color: #ff8a8a; }
+        #error pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; color: #f3c6c6;
+            font: 13px/1.4 ui-monospace, monospace; }
+
+        /* Small corner notice (non-fatal warnings) and the fullscreen button. */
+        #notice { position: absolute; left: 12px; bottom: 12px; max-width: min(90vw, 36em); padding: 8px 12px;
+            border-radius: 6px; background: rgba(60, 50, 20, .92); color: #ffe9a8; font-size: 14px; }
+        #notice[hidden], #fs[hidden] { display: none; }
+        #fs { position: absolute; right: 10px; top: 10px; width: 36px; height: 36px; border-radius: 6px;
+            border: 0; cursor: pointer; background: rgba(0, 0, 0, .45); color: #fff; font-size: 20px;
+            line-height: 36px; opacity: .55; }
+        #fs:hover, #fs:focus-visible { opacity: 1; }
+    </style>
+</head>
+<body>
+    <div id="store"></div>
+    <!-- The engine creates the map window's canvas inside .map-box (see examples/multi_window). -->
+    <aside id="sidebar">
+        <h2>Map window</h2>
+        <div id="map-box" class="map-box"></div>
+        <p>A second engine window mounted in this page element. M reopens it after it is closed.</p>
+    </aside>
+    <!-- Switches (also settable in main.js CONFIG): data-click-to-start="off", data-coi-sw="on",
+         data-fullscreen-button="off", data-pause-hidden="off". -->
+    <div id="stage">
+        <canvas id="canvas" tabindex="0"></canvas>
+        <div id="ui"></div>
+        <button id="fs" type="button" title="Fullscreen" aria-label="Toggle fullscreen" hidden>&#x26F6;</button>
+        <div id="notice" hidden></div>
+
+        <div id="loading" class="panel">
+            <h1>{{TITLE}}</h1>
+            <div class="bar indeterminate" id="bar"><div></div></div>
+            <div id="status">Starting...</div>
+        </div>
+        <div id="start" class="panel clear" hidden>
+            <h1>{{TITLE}}</h1>
+            <button id="play" class="play" type="button">Click to start</button>
+        </div>
+        <div id="error" class="panel" role="alert" hidden></div>
+    </div>
+    <noscript>This game needs JavaScript.</noscript>
+<script type="module" src="main.js"></script>
+</body>
+</html>

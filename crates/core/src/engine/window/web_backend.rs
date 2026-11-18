@@ -1,4 +1,4 @@
-use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet, VecDeque}, ptr::NonNull, rc::Rc};
+use std::{cell::{Cell, RefCell}, collections::{BTreeMap, HashMap, HashSet, VecDeque}, ptr::NonNull, rc::Rc};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, WebDisplayHandle, WebCanvasWindowHandle};
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
@@ -13,11 +13,23 @@ use crate::{
         ElementState, GamepadAxis, GamepadButton, GamepadId, GamepadState, InputEvent, InputEventKind, Key, KeyCode, MouseButton, TouchPhase, WheelUnit,
         WindowEvent, WindowId,
     },
-    window::InnerWindow,
+    window::{InnerWindow, WebTarget, WindowDesc},
 };
 use super::web_impls::{event_ns, is_editable_target, keyboard_event, now_ns, physical_key, should_prevent_default, text_for_key};
 
 const DEFAULT_CANVAS_ID: &str = "canvas";
+
+/// Pointer state of one canvas.
+#[derive(Default)]
+struct Pointer {
+    /// Last mouse/pen position, for deltas while the pointer is not locked.
+    last_pos: Option<(f32, f32)>,
+    /// Mouse/pen buttons currently held, as a `PointerEvent.buttons` mask (bit0 Left, bit1 Right,
+    /// bit2 Middle, bit3 Back, bit4 Forward).
+    buttons: u16,
+    /// Active touch pointer ids with their last position.
+    touches: HashMap<u64, (f32, f32)>,
+}
 
 /// State shared between the DOM listeners and `WebWindow`.
 /// The web build is single-threaded (requestAnimationFrame), so `Rc` + cells are enough.
@@ -28,19 +40,21 @@ struct Shared {
     held: RefCell<HashSet<KeyCode>>,
     /// Last focus state sent (or assumed at startup); used to drop duplicate focus events.
     focused: Cell<bool>,
+    /// The window keyboard input and (document) focus belong to: the last canvas the user
+    /// pressed on or focused.
+    key_window: Cell<u32>,
     /// Whether keydown/compositionend produce `Text` events.
     text_input: Cell<bool>,
-    /// Last mouse/pen position, for deltas while the pointer is not locked.
-    last_pos: Cell<Option<(f32, f32)>>,
     /// Last devicePixelRatio sent as `ScaleFactorChanged` (0.0 = none yet).
     last_scale: Cell<f64>,
-    /// Mouse/pen buttons currently held, as a `PointerEvent.buttons` mask (bit0 Left, bit1 Right,
-    /// bit2 Middle, bit3 Back, bit4 Forward).
-    buttons: Cell<u16>,
-    /// Active touch pointer ids with their last position.
-    touches: RefCell<HashMap<u64, (f32, f32)>>,
+    /// Pointer state per window id.
+    pointers: RefCell<HashMap<u32, Pointer>>,
+    /// Open windows (main included), so page-wide events can be reported for each.
+    windows: RefCell<Vec<u32>>,
     /// Pointer lock wanted by `set_cursor_grab`; re-requested from a pointerdown (user activation).
     want_grab: Cell<bool>,
+    /// The window that is fullscreen (or was, when fullscreen ended).
+    fs_window: Cell<u32>,
 }
 
 impl Shared {
@@ -49,17 +63,27 @@ impl Shared {
             queue: RefCell::default(),
             held: RefCell::default(),
             focused: Cell::new(true),
+            key_window: Cell::new(0),
             text_input: Cell::new(true),
-            last_pos: Cell::new(None),
             last_scale: Cell::new(0.0),
-            buttons: Cell::new(0),
-            touches: RefCell::default(),
+            pointers: RefCell::default(),
+            windows: RefCell::new(vec![0]),
             want_grab: Cell::new(false),
+            fs_window: Cell::new(0),
         }
     }
 
+    /// An event of the window that has keyboard focus.
     fn push(&self, timestamp_ns: u64, kind: InputEventKind) {
-        self.queue.borrow_mut().push_back(InputEvent::with_time(kind, timestamp_ns, WindowId::MAIN));
+        self.push_to(self.key_window.get(), timestamp_ns, kind);
+    }
+
+    fn push_to(&self, window: u32, timestamp_ns: u64, kind: InputEventKind) {
+        self.queue.borrow_mut().push_back(InputEvent::with_time(kind, timestamp_ns, WindowId(window)));
+    }
+
+    fn with_pointer<R>(&self, window: u32, f: impl FnOnce(&mut Pointer) -> R) -> R {
+        f(self.pointers.borrow_mut().entry(window).or_default())
     }
 
     fn track_key(&self, event: &InputEvent) {
@@ -72,10 +96,10 @@ impl Shared {
         }
     }
 
-    /// Diff `new` (a `buttons` mask) against the pressed mask and emit a `MouseButton` event per changed bit.
-    fn sync_buttons(&self, time: u64, new: u16, pos: (f32, f32)) {
+    /// Diff `new` (a `buttons` mask) against the pressed mask of `window` and emit a `MouseButton` event per changed bit.
+    fn sync_buttons(&self, window: u32, time: u64, new: u16, pos: (f32, f32)) {
         let new = new & 0x1f;
-        let old = self.buttons.replace(new);
+        let old = self.with_pointer(window, |p| std::mem::replace(&mut p.buttons, new));
         for bit in 0..5u16 {
             let m = 1 << bit;
             if (old ^ new) & m == 0 { continue; }
@@ -87,7 +111,7 @@ impl Shared {
                 _ => MouseButton::Forward,
             };
             let state = if new & m != 0 { ElementState::Pressed } else { ElementState::Released };
-            self.push(time, InputEventKind::MouseButton { button, state, pos });
+            self.push_to(window, time, InputEventKind::MouseButton { button, state, pos });
         }
     }
 
@@ -106,9 +130,9 @@ impl Shared {
         }
     }
 
-    /// Record a focus change. Duplicates are dropped. On focus loss every held key is
+    /// Record a focus change of the page. Duplicates are dropped. On focus loss every held key is
     /// released first, then mouse buttons and touches, since the browser won't deliver those
-    /// releases when they happen while unfocused.
+    /// releases when they happen while unfocused. The focus belongs to `key_window`.
     fn set_focused(&self, focused: bool) {
         if self.focused.replace(focused) == focused { return; }
         let now = now_ns();
@@ -119,21 +143,39 @@ impl Shared {
                     physical, Key::Unidentified, ElementState::Released, false, Default::default(),
                 ));
             }
-            let pos = self.last_pos.get().unwrap_or((0.0, 0.0));
-            self.sync_buttons(now, 0, pos);
-            let touches: Vec<(u64, (f32, f32))> = self.touches.borrow_mut().drain().collect();
-            for (id, pos) in touches {
-                self.push(now, InputEventKind::Touch { id, phase: TouchPhase::Cancelled, pos });
+            let windows: Vec<u32> = self.windows.borrow().clone();
+            for w in windows {
+                let (pos, touches) = self.with_pointer(w, |p| {
+                    let pos = p.last_pos.unwrap_or((0.0, 0.0));
+                    p.last_pos = None;
+                    (pos, p.touches.drain().collect::<Vec<(u64, (f32, f32))>>())
+                });
+                self.sync_buttons(w, now, 0, pos);
+                for (id, pos) in touches {
+                    self.push_to(w, now, InputEventKind::Touch { id, phase: TouchPhase::Cancelled, pos });
+                }
             }
-            self.last_pos.set(None);
         }
         self.push(now, InputEventKind::Window(WindowEvent::Focused(focused)));
     }
 
-    /// Record a new devicePixelRatio; duplicates are dropped.
+    /// Keyboard focus moves to another canvas of the page.
+    fn set_key_window(&self, window: u32) {
+        let old = self.key_window.replace(window);
+        if old != window && self.focused.get() {
+            let now = now_ns();
+            self.push_to(old, now, InputEventKind::Window(WindowEvent::Focused(false)));
+            self.push_to(window, now, InputEventKind::Window(WindowEvent::Focused(true)));
+        }
+    }
+
+    /// Record a new devicePixelRatio; duplicates are dropped. Reported for every window.
     fn set_scale(&self, scale: f64) {
         if scale != self.last_scale.replace(scale) {
-            self.push(now_ns(), InputEventKind::Window(WindowEvent::ScaleFactorChanged { scale }));
+            let windows: Vec<u32> = self.windows.borrow().clone();
+            for w in windows {
+                self.push_to(w, now_ns(), InputEventKind::Window(WindowEvent::ScaleFactorChanged { scale }));
+            }
         }
     }
 }
@@ -175,27 +217,92 @@ impl Listener {
     }
 }
 
-/// The web counterpart of `SdlWindowManager`: a `<canvas>` instead of an OS window,
+thread_local! {
+    /// The canvas of every open window by id, for page-side code that lives next to it (the UI
+    /// web backend puts a window's layer element beside its canvas). Main thread only.
+    static CANVASES: RefCell<HashMap<u32, HtmlCanvasElement>> = RefCell::new(HashMap::new());
+}
+
+/// The canvas a window draws to (`None` before it is resolved or after it closed).
+pub fn canvas_of(window: u32) -> Option<HtmlCanvasElement> {
+    CANVASES.with(|c| c.borrow().get(&window).cloned())
+}
+
+fn register_canvas(window: u32, canvas: Option<&HtmlCanvasElement>) {
+    CANVASES.with(|c| match canvas {
+        Some(canvas) => { c.borrow_mut().insert(window, canvas.clone()); }
+        None => { c.borrow_mut().remove(&window); }
+    });
+}
+
+/// Where a window's canvas comes from.
+enum Source {
+    /// The main window: an element looked up by id (re-resolved when it disappears or the id changes).
+    Id(String),
+    /// A secondary window. `wrapper` is the element we created around the canvas (removed again
+    /// on close); an existing canvas given by `web_canvas` has none and is left in the page.
+    Own { canvas: HtmlCanvasElement, wrapper: Option<HtmlElement> },
+}
+
+/// One canvas that is a window.
+struct CanvasWin {
+    source: Source,
+    /// Cached lookup (main window).
+    canvas: Option<HtmlCanvasElement>,
+    /// Pointer, wheel, contextmenu and focus listeners on the canvas (replaced when the canvas changes).
+    listeners: Vec<Listener>,
+    /// Last size sent as `Resized`, in physical pixels.
+    last_size: (u32, u32),
+    /// `Resized` and `ScaleFactorChanged` sent once for this window.
+    sent_initial: bool,
+    /// Logical size from the `WindowDesc`, used while the canvas has no layout.
+    fallback: (u32, u32),
+    /// Remembered so it is re-applied when the canvas is re-resolved.
+    cursor_visible: bool,
+    cursor_icon: crate::engine::window::CursorIcon,
+}
+
+impl CanvasWin {
+    fn new(source: Source, fallback: (u32, u32)) -> Self {
+        Self {
+            source,
+            canvas: None,
+            listeners: Vec::new(),
+            last_size: (0, 0),
+            sent_initial: false,
+            fallback,
+            cursor_visible: true,
+            cursor_icon: crate::engine::window::CursorIcon::Default,
+        }
+    }
+
+    fn canvas(&mut self) -> Option<HtmlCanvasElement> {
+        match &self.source {
+            Source::Own { canvas, .. } => Some(canvas.clone()),
+            Source::Id(id) => {
+                if self.canvas.is_none() {
+                    self.canvas = find_canvas(id);
+                }
+                self.canvas.clone()
+            }
+        }
+    }
+}
+
+/// The web counterpart of `SdlWindowManager`: `<canvas>`es instead of OS windows,
 /// and DOM listeners feeding a local queue instead of an SDL event pump.
 pub struct WebWindow{
     canvas_id:String,
-    /// Cached lookup of `canvas_id`; cleared when the id changes.
-    canvas:Option<HtmlCanvasElement>,
     title:String,
     shared:Rc<Shared>,
+    /// Every window's canvas by engine id (0 = main).
+    wins: BTreeMap<u32, CanvasWin>,
     /// Listeners on `window`/`document`.
     listeners:Vec<Listener>,
-    /// Pointer, wheel and contextmenu listeners on the current canvas (replaced when the canvas id changes).
-    canvas_listeners:Vec<Listener>,
     /// `change` listener on the current `(resolution: Ndppx)` media query.
     dpr_listener:Option<Listener>,
     /// The devicePixelRatio the media query listener was armed for.
     dpr_armed:f64,
-    /// Remembered so it is re-applied when the canvas is re-resolved.
-    cursor_visible:bool,
-    cursor_icon: crate::engine::window::CursorIcon,
-    /// Last size sent as `Resized`, in physical pixels.
-    last_size:(u32,u32),
     /// `getGamepads()` failure already logged.
     gamepad_warned:bool,
     /// Gamepad indices already reported as non-standard-mapping (logged once).
@@ -211,18 +318,15 @@ impl WebWindow{
         if window.document().is_none() {
             return Err(EngineError::Window("no `document` object".into()));
         }
+        let id = canvas_id.unwrap_or_else(|| DEFAULT_CANVAS_ID.to_string());
         let mut w = Self {
-            canvas_id: canvas_id.unwrap_or_else(|| DEFAULT_CANVAS_ID.to_string()),
-            canvas: None,
+            canvas_id: id.clone(),
             title: title.to_string(),
             shared: Rc::new(Shared::new()),
+            wins: BTreeMap::from([(0, CanvasWin::new(Source::Id(id), (0, 0)))]),
             listeners: Vec::new(),
-            canvas_listeners: Vec::new(),
             dpr_listener: None,
             dpr_armed: 0.0,
-            cursor_visible: true,
-            cursor_icon: crate::engine::window::CursorIcon::Default,
-            last_size: (0,0),
             gamepad_warned: false,
             gamepad_ignored: HashSet::new(),
         };
@@ -232,17 +336,17 @@ impl WebWindow{
         w.attach_focus_listeners();
         w.attach_composition_listener();
         w.attach_pointer_lock_listeners();
-        w.setup_canvas();
+        w.attach_fullscreen_listener();
+        w.setup_canvas(0);
         // Size the drawing buffer now, so the surface is created at the right size.
         w.sync_canvas_size();
         Ok(w)
     }
 
-    fn canvas(&mut self) -> Option<HtmlCanvasElement> {
-        if self.canvas.is_none() {
-            self.canvas = find_canvas(&self.canvas_id);
-        }
-        self.canvas.clone()
+    fn canvas_of(&mut self, window: u32) -> Option<HtmlCanvasElement> {
+        let c = self.wins.get_mut(&window)?.canvas();
+        register_canvas(window, c.as_ref());
+        c
     }
 
     fn apply_title(&self) {
@@ -279,7 +383,8 @@ impl WebWindow{
                 // A keyup for a key that is not held (its keydown was dropped, or happened while
                 // unfocused) would be a stray release.
                 if !down && physical != KeyCode::Unknown && !held { return; }
-                let event = keyboard_event(&e, down);
+                let mut event = keyboard_event(&e, down);
+                event.window = WindowId(shared.key_window.get());
                 let time = event.timestamp_ns;
                 shared.track_key(&event);
                 shared.queue.borrow_mut().push_back(event);
@@ -346,23 +451,39 @@ impl WebWindow{
         let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
         let shared = self.shared.clone();
         self.add_listener(document.clone().into(), "pointerlockchange", move |_| {
-            shared.last_pos.set(None);
+            for p in shared.pointers.borrow_mut().values_mut() {
+                p.last_pos = None;
+            }
         });
         self.add_listener(document.into(), "pointerlockerror", |_| {
             log::warn!("pointer lock request failed");
         });
     }
 
-    /// Make the canvas focusable, attach pointer/wheel/contextmenu listeners and re-apply the cursor style.
-    fn setup_canvas(&mut self) {
-        for l in self.canvas_listeners.drain(..) {
+    /// The page entered or left fullscreen (also through the browser's own Esc / F11, which the
+    /// game would otherwise not hear about): `FullscreenChanged` for the window that asked, the
+    /// main one for a fullscreen the game did not request.
+    fn attach_fullscreen_listener(&mut self) {
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+        let shared = self.shared.clone();
+        let doc = document.clone();
+        self.add_listener(document.into(), "fullscreenchange", move |_| {
+            let on = doc.fullscreen_element().is_some();
+            shared.push_to(shared.fs_window.get(), now_ns(), InputEventKind::Window(WindowEvent::FullscreenChanged(on)));
+        });
+    }
+
+    /// Make the canvas of `window` focusable, attach pointer/wheel/contextmenu/focus listeners and re-apply the cursor style.
+    fn setup_canvas(&mut self, window: u32) {
+        let Some(w) = self.wins.get_mut(&window) else { return };
+        for l in w.listeners.drain(..) {
             l.remove();
         }
-        let Some(canvas) = self.canvas() else { return };
+        let Some(canvas) = self.canvas_of(window) else { return };
         if !canvas.has_attribute("tabindex") {
             let _ = canvas.set_attribute("tabindex", "0");
         }
-        self.apply_cursor();
+        self.apply_cursor(window);
         let target: EventTarget = canvas.clone().into();
         let mut added = Vec::new();
 
@@ -370,6 +491,7 @@ impl WebWindow{
         let shared = self.shared.clone();
         let el: HtmlElement = canvas.clone().into();
         added.extend(Listener::add(target.clone(), "pointerdown", None, move |e: Event| {
+            shared.set_key_window(window);
             let opts = FocusOptions::new();
             opts.set_prevent_scroll(true);
             let _ = el.focus_with_options(&opts);
@@ -381,8 +503,11 @@ impl WebWindow{
             if let Err(err) = el.set_pointer_capture(e.pointer_id()) {
                 debug_warn(&format!("setPointerCapture failed: {err:?}"));
             }
-            handle_pointer(&shared, &e, PointerPhase::Down);
+            handle_pointer(&shared, window, &e, PointerPhase::Down);
         }));
+        // Tabbing into a canvas moves the keyboard to its window.
+        let shared = self.shared.clone();
+        added.extend(Listener::add(target.clone(), "focus", None, move |_| shared.set_key_window(window)));
         for (kind, phase) in [
             ("pointermove", PointerPhase::Move),
             ("pointerup", PointerPhase::Up),
@@ -391,13 +516,13 @@ impl WebWindow{
             let shared = self.shared.clone();
             added.extend(Listener::add(target.clone(), kind, None, move |e: Event| {
                 let Ok(e) = e.dyn_into::<PointerEvent>() else { return };
-                handle_pointer(&shared, &e, phase);
+                handle_pointer(&shared, window, &e, phase);
             }));
         }
 
         let shared = self.shared.clone();
         added.extend(Listener::add(target.clone(), "pointerleave", None, move |_| {
-            shared.last_pos.set(None);
+            shared.with_pointer(window, |p| p.last_pos = None);
         }));
 
         // wheel must be non-passive, or preventDefault is ignored and the page scrolls.
@@ -415,17 +540,20 @@ impl WebWindow{
             };
             // DOM: deltaY > 0 scrolls down; engine: +y is up/away. deltaX > 0 is right in both.
             let delta = ((e.delta_x() * scale) as f32, (-e.delta_y() * scale) as f32);
-            shared.push(time, InputEventKind::MouseWheel { delta, unit });
+            shared.push_to(window, time, InputEventKind::MouseWheel { delta, unit });
         }));
 
         added.extend(Listener::add(target, "contextmenu", None, |e: Event| e.prevent_default()));
-        self.canvas_listeners = added;
+        if let Some(w) = self.wins.get_mut(&window) {
+            w.listeners = added;
+        }
     }
 
     /// Cursor visibility via the canvas' CSS `cursor`.
-    fn apply_cursor(&mut self) {
-        let Some(canvas) = self.canvas() else { return };
-        let value = if self.cursor_visible { self.cursor_icon.css() } else { "none" };
+    fn apply_cursor(&mut self, window: u32) {
+        let Some(w) = self.wins.get(&window) else { return };
+        let value = if w.cursor_visible { w.cursor_icon.css() } else { "none" };
+        let Some(canvas) = self.canvas_of(window) else { return };
         if canvas.style().set_property("cursor", value).is_err() {
             debug_warn("could not set canvas cursor style");
         }
@@ -461,29 +589,100 @@ impl WebWindow{
 
     /// A canvas' drawing buffer does not follow its CSS size, so match it to
     /// CSS size * devicePixelRatio every frame and report changes as `Resized`
-    /// (the same physical-pixel size SDL's PixelSizeChanged gives).
+    /// (the same physical-pixel size SDL's PixelSizeChanged gives). Every window's canvas, so a
+    /// canvas mounted in an element follows that element's layout.
     fn sync_canvas_size(&mut self) {
         self.sync_scale_factor();
-        // A removed canvas is dropped, and a canvas that appears later gets its listeners.
-        if self.canvas.as_ref().is_some_and(|c| !c.is_connected()) {
-            self.canvas = None;
-            self.last_size = (0,0);
-            self.shared.last_pos.set(None);
-            self.setup_canvas();
-        } else if self.canvas_listeners.is_empty() && self.canvas().is_some() {
-            self.setup_canvas();
+        let ids: Vec<u32> = self.wins.keys().copied().collect();
+        for id in ids {
+            self.sync_one(id);
         }
-        let Some(canvas) = self.canvas() else { return };
+    }
+
+    fn sync_one(&mut self, id: u32) {
+        let Some(w) = self.wins.get_mut(&id) else { return };
+        // A removed canvas is dropped, and a canvas that appears later gets its listeners.
+        if matches!(w.source, Source::Id(_)) && w.canvas.as_ref().is_some_and(|c| !c.is_connected()) {
+            w.canvas = None;
+            w.last_size = (0, 0);
+            self.shared.with_pointer(id, |p| p.last_pos = None);
+            self.setup_canvas(id);
+        } else if w.listeners.is_empty() && self.canvas_of(id).is_some() {
+            self.setup_canvas(id);
+        }
+        let Some(canvas) = self.canvas_of(id) else { return };
+        let Some(w) = self.wins.get_mut(&id) else { return };
         let dpr = device_pixel_ratio();
-        let width = (canvas.client_width().max(0) as f64 * dpr).round() as u32;
-        let height = (canvas.client_height().max(0) as f64 * dpr).round() as u32;
+        let mut width = (canvas.client_width().max(0) as f64 * dpr).round() as u32;
+        let mut height = (canvas.client_height().max(0) as f64 * dpr).round() as u32;
+        // Not laid out (yet): a secondary window falls back to the size it was created with.
+        if (width == 0 || height == 0) && id != 0 && w.last_size == (0, 0) {
+            width = (w.fallback.0 as f64 * dpr).round() as u32;
+            height = (w.fallback.1 as f64 * dpr).round() as u32;
+        }
         // 0x0 means hidden or not laid out yet; keep the old buffer.
         if width == 0 || height == 0 { return; }
         if canvas.width() != width { canvas.set_width(width); }
         if canvas.height() != height { canvas.set_height(height); }
-        if self.last_size != (width, height) {
-            self.last_size = (width, height);
-            self.shared.push(now_ns(), InputEventKind::Window(WindowEvent::Resized { width, height }));
+        if w.last_size != (width, height) {
+            w.last_size = (width, height);
+            self.shared.push_to(id, now_ns(), InputEventKind::Window(WindowEvent::Resized { width, height }));
+        }
+    }
+
+    /// The fullscreen target of a window: the page for the main one, the canvas' wrapper otherwise.
+    fn fullscreen_element(&mut self, window: u32) -> Option<web_sys::Element> {
+        if window == 0 {
+            return web_sys::window()?.document()?.document_element();
+        }
+        match &self.wins.get(&window)?.source {
+            Source::Own { wrapper: Some(w), .. } => Some(w.clone().into()),
+            Source::Own { canvas, .. } => Some(canvas.clone().into()),
+            Source::Id(_) => None,
+        }
+    }
+
+    /// Resolve `desc.web` to a canvas (creating it where asked).
+    fn make_canvas(&self, desc: &WindowDesc) -> Result<(HtmlCanvasElement, Option<HtmlElement>), EngineError> {
+        let err = |m: String| EngineError::Window(m);
+        let document = web_sys::window().and_then(|w| w.document()).ok_or_else(|| err("no document".into()))?;
+        let new_canvas = || -> Result<HtmlCanvasElement, EngineError> {
+            document.create_element("canvas").map_err(|e| err(format!("{e:?}")))?
+                .dyn_into::<HtmlCanvasElement>().map_err(|_| err("not a canvas".into()))
+        };
+        let style = |el: &HtmlElement, css: &str| { let _ = el.set_attribute("style", css); };
+        match &desc.web {
+            WebTarget::Canvas(sel) => {
+                let el = document.query_selector(sel).map_err(|e| err(format!("bad selector {sel:?}: {e:?}")))?
+                    .ok_or_else(|| err(format!("no element matches {sel:?}")))?;
+                let canvas = el.dyn_into::<HtmlCanvasElement>().map_err(|_| err(format!("{sel:?} is not a <canvas>")))?;
+                Ok((canvas, None))
+            }
+            WebTarget::Element(sel) => {
+                let host = document.query_selector(sel).map_err(|e| err(format!("bad selector {sel:?}: {e:?}")))?
+                    .ok_or_else(|| err(format!("no element matches {sel:?}")))?;
+                // wrapper: the positioning context of the canvas and of the window's UI layer
+                let wrapper = document.create_element("div").map_err(|e| err(format!("{e:?}")))?
+                    .dyn_into::<HtmlElement>().map_err(|_| err("not an element".into()))?;
+                let min_h = if host.client_height() == 0 { format!("min-height:{}px;", desc.size.1) } else { String::new() };
+                style(&wrapper, &format!("position:relative;width:100%;height:100%;{min_h}"));
+                let canvas = new_canvas()?;
+                canvas.style().set_css_text("display:block;width:100%;height:100%;outline:none;touch-action:none;user-select:none;-webkit-user-select:none;");
+                wrapper.append_child(&canvas).map_err(|e| err(format!("{e:?}")))?;
+                host.append_child(&wrapper).map_err(|e| err(format!("{e:?}")))?;
+                Ok((canvas, Some(wrapper)))
+            }
+            WebTarget::Body => {
+                let body = document.body().ok_or_else(|| err("no <body>".into()))?;
+                let wrapper = document.create_element("div").map_err(|e| err(format!("{e:?}")))?
+                    .dyn_into::<HtmlElement>().map_err(|_| err("not an element".into()))?;
+                style(&wrapper, &format!("position:relative;width:{}px;height:{}px;", desc.size.0, desc.size.1));
+                let canvas = new_canvas()?;
+                canvas.style().set_css_text("display:block;width:100%;height:100%;outline:none;touch-action:none;user-select:none;-webkit-user-select:none;");
+                wrapper.append_child(&canvas).map_err(|e| err(format!("{e:?}")))?;
+                body.append_child(&wrapper).map_err(|e| err(format!("{e:?}")))?;
+                Ok((canvas, Some(wrapper)))
+            }
         }
     }
 }
@@ -503,7 +702,7 @@ fn event_f64(e: &PointerEvent, name: &str, fallback: i32) -> f64 {
 /// Translate a pointer event: touch -> `Touch`, mouse and pen -> `MouseMotion`/`MouseButton`.
 /// Pointer Events only fire down/up for the first/last button of a chord, so the mouse/pen
 /// buttons are derived by diffing `buttons` against the pressed mask on every event.
-fn handle_pointer(shared: &Shared, e: &PointerEvent, phase: PointerPhase) {
+fn handle_pointer(shared: &Shared, window: u32, e: &PointerEvent, phase: PointerPhase) {
     let dpr = device_pixel_ratio();
     let target = e.current_target().and_then(|t| t.dyn_into::<web_sys::Element>().ok());
     let (left, top) = target.as_ref().map_or((0.0, 0.0), |t| {
@@ -524,11 +723,11 @@ fn handle_pointer(shared: &Shared, e: &PointerEvent, phase: PointerPhase) {
             PointerPhase::Up => TouchPhase::Ended,
             PointerPhase::Cancel => TouchPhase::Cancelled,
         };
-        match phase {
-            TouchPhase::Ended | TouchPhase::Cancelled => { shared.touches.borrow_mut().remove(&id); }
-            _ => { shared.touches.borrow_mut().insert(id, pos); }
-        }
-        shared.push(time, InputEventKind::Touch { id, phase, pos });
+        shared.with_pointer(window, |p| match phase {
+            TouchPhase::Ended | TouchPhase::Cancelled => { p.touches.remove(&id); }
+            _ => { p.touches.insert(id, pos); }
+        });
+        shared.push_to(window, time, InputEventKind::Touch { id, phase, pos });
         return;
     }
 
@@ -542,18 +741,18 @@ fn handle_pointer(shared: &Shared, e: &PointerEvent, phase: PointerPhase) {
                     (event_f64(e, "movementY", e.movement_y()) * dpr) as f32,
                 )
             } else {
-                shared.last_pos.get().map_or((0.0, 0.0), |p| (pos.0 - p.0, pos.1 - p.1))
+                shared.with_pointer(window, |p| p.last_pos).map_or((0.0, 0.0), |p| (pos.0 - p.0, pos.1 - p.1))
             };
-            shared.last_pos.set(Some(pos));
-            shared.push(time, InputEventKind::MouseMotion { pos, delta });
-            shared.sync_buttons(time, e.buttons(), pos);
+            shared.with_pointer(window, |p| p.last_pos = Some(pos));
+            shared.push_to(window, time, InputEventKind::MouseMotion { pos, delta });
+            shared.sync_buttons(window, time, e.buttons(), pos);
         }
         PointerPhase::Down | PointerPhase::Up => {
-            shared.last_pos.set(Some(pos));
-            shared.sync_buttons(time, e.buttons(), pos);
+            shared.with_pointer(window, |p| p.last_pos = Some(pos));
+            shared.sync_buttons(window, time, e.buttons(), pos);
         }
         // The pointer was taken over by the browser: no further up will arrive.
-        PointerPhase::Cancel => shared.sync_buttons(time, 0, pos),
+        PointerPhase::Cancel => shared.sync_buttons(window, time, 0, pos),
     }
 }
 
@@ -590,76 +789,148 @@ impl Drop for WebWindow {
         for l in self.listeners.drain(..) {
             l.remove();
         }
-        for l in self.canvas_listeners.drain(..) {
-            l.remove();
+        for w in self.wins.values_mut() {
+            for l in w.listeners.drain(..) {
+                l.remove();
+            }
         }
         if let Some(l) = self.dpr_listener.take() {
             l.remove();
         }
+        CANVASES.with(|c| c.borrow_mut().clear());
     }
 }
 
 impl InnerWindow for WebWindow{
     fn set_canvas_id(&mut self,canvas_id:String) {
-        self.canvas_id = canvas_id;
-        self.canvas = None;
-        self.shared.last_pos.set(None);
-        // Force a Resized for the new canvas on the next poll.
-        self.last_size = (0,0);
-        self.setup_canvas();
+        self.canvas_id = canvas_id.clone();
+        if let Some(w) = self.wins.get_mut(&0) {
+            w.source = Source::Id(canvas_id);
+            w.canvas = None;
+            // Force a Resized for the new canvas on the next poll.
+            w.last_size = (0,0);
+        }
+        self.shared.with_pointer(0, |p| p.last_pos = None);
+        self.setup_canvas(0);
     }
 
-    fn canvas(&self) -> Option<HtmlCanvasElement> {
-        self.canvas.clone().or_else(|| find_canvas(&self.canvas_id))
+    fn canvas(&self, window: WindowId) -> Option<HtmlCanvasElement> {
+        canvas_of(window.0).or_else(|| match &self.wins.get(&window.0)?.source {
+            Source::Own { canvas, .. } => Some(canvas.clone()),
+            Source::Id(id) => find_canvas(id),
+        })
     }
 
     fn canvas_id(&self) -> &str {
         &self.canvas_id
     }
 
-    fn set_title(&mut self,title:String) {
-        self.title = title;
-        self.apply_title();
+    fn create_window(&mut self, window: WindowId, desc: &WindowDesc) -> Result<(), EngineError> {
+        let (canvas, wrapper) = self.make_canvas(desc)?;
+        let id = window.0;
+        let label = canvas.set_attribute("aria-label", &desc.title);
+        let _ = label;
+        let mut cw = CanvasWin::new(Source::Own { canvas: canvas.clone(), wrapper }, desc.size);
+        cw.sent_initial = false;
+        self.wins.insert(id, cw);
+        self.shared.windows.borrow_mut().push(id);
+        register_canvas(id, Some(&canvas));
+        self.setup_canvas(id);
+        // Size the drawing buffer now, so the surface is created at the right size.
+        self.sync_one(id);
+        Ok(())
+    }
+
+    fn close_window(&mut self, window: WindowId) {
+        let id = window.0;
+        if id == 0 { return; }
+        let Some(mut w) = self.wins.remove(&id) else { return };
+        for l in w.listeners.drain(..) {
+            l.remove();
+        }
+        if let Source::Own { wrapper: Some(wrapper), .. } = &w.source {
+            wrapper.remove();
+        }
+        register_canvas(id, None);
+        self.shared.windows.borrow_mut().retain(|w| *w != id);
+        self.shared.pointers.borrow_mut().remove(&id);
+        if self.shared.key_window.get() == id {
+            self.shared.key_window.set(0);
+        }
+        // Drop events already queued for it.
+        self.shared.queue.borrow_mut().retain(|e| e.window.0 != id);
+    }
+
+    fn set_title(&mut self, window: WindowId, title:String) {
+        if window.is_main() {
+            self.title = title;
+            self.apply_title();
+        } else if let Some(c) = self.canvas_of(window.0) {
+            let _ = c.set_attribute("aria-label", &title);
+        }
     }
 
     /// Drawing-buffer size in physical pixels.
-    fn size(&self) -> (u32, u32) {
-        self.canvas.clone()
-            .or_else(|| find_canvas(&self.canvas_id))
-            .map_or((0,0), |c| (c.width(), c.height()))
+    fn size(&self, window: WindowId) -> (u32, u32) {
+        self.canvas(window).map_or((0,0), |c| (c.width(), c.height()))
     }
 
-    fn scale_factor(&self) -> f64 {
+    fn scale_factor(&self, _window: WindowId) -> f64 {
         device_pixel_ratio()
     }
 
     fn poll_events(&mut self, out: &mut Vec<InputEvent>) {
         self.sync_canvas_size();
+        // Windows that have not reported their scale yet: their first `Resized` came from the
+        // size sync, the scale goes right after it.
+        let mut initial = Vec::new();
+        for (id, w) in self.wins.iter_mut() {
+            if !w.sent_initial && w.last_size != (0, 0) {
+                w.sent_initial = true;
+                initial.push(*id);
+            }
+        }
         // Take the queue first, so a listener firing meanwhile can't hit a borrow.
         let events = std::mem::take(&mut *self.shared.queue.borrow_mut());
         out.extend(events);
+        for id in initial {
+            // The main window's scale is already reported by `set_scale` on the first poll.
+            if id != 0 {
+                out.push(InputEvent::with_time(
+                    InputEventKind::Window(WindowEvent::ScaleFactorChanged { scale: device_pixel_ratio() }),
+                    now_ns(),
+                    WindowId(id),
+                ));
+            }
+        }
     }
 
-    fn set_text_input(&mut self, enabled: bool) {
+    fn set_text_input(&mut self, _window: WindowId, enabled: bool) {
         self.shared.text_input.set(enabled);
     }
 
-    fn set_cursor_visible(&mut self, visible: bool) {
-        self.cursor_visible = visible;
-        self.apply_cursor();
+    fn set_cursor_visible(&mut self, window: WindowId, visible: bool) {
+        if let Some(w) = self.wins.get_mut(&window.0) {
+            w.cursor_visible = visible;
+            self.apply_cursor(window.0);
+        }
     }
 
-    fn set_cursor_icon(&mut self, icon: crate::engine::window::CursorIcon) {
-        self.cursor_icon = icon;
-        self.apply_cursor();
+    fn set_cursor_icon(&mut self, window: WindowId, icon: crate::engine::window::CursorIcon) {
+        if let Some(w) = self.wins.get_mut(&window.0) {
+            w.cursor_icon = icon;
+            self.apply_cursor(window.0);
+        }
     }
 
     /// The Fullscreen API needs a user gesture; a request outside one is refused by the browser
-    /// (a rejected promise, ignored here).
-    fn set_fullscreen(&mut self, on: bool) {
+    /// (a rejected promise, ignored here). The main window fullscreens the page, another window
+    /// its canvas' wrapper. `FullscreenChanged` comes from the `fullscreenchange` event.
+    fn set_fullscreen(&mut self, window: WindowId, on: bool) {
         let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return };
         if on {
-            if let Some(el) = doc.document_element() {
+            self.shared.fs_window.set(window.0);
+            if let Some(el) = self.fullscreen_element(window.0) {
                 let _ = el.request_fullscreen();
             }
         } else if doc.fullscreen_element().is_some() {
@@ -667,10 +938,10 @@ impl InnerWindow for WebWindow{
         }
     }
 
-    fn set_cursor_grab(&mut self, grab: bool) {
+    fn set_cursor_grab(&mut self, window: WindowId, grab: bool) {
         self.shared.want_grab.set(grab);
         if grab {
-            match self.canvas() {
+            match self.canvas_of(window.0) {
                 Some(canvas) => canvas.request_pointer_lock(),
                 None => debug_warn("set_cursor_grab: canvas not found"),
             }

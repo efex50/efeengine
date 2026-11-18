@@ -14,6 +14,9 @@ pub mod headless;
 pub mod clipboard;
 
 pub use clipboard::{clipboard_text, set_clipboard_text};
+/// The canvas of a window by id (web; main thread): page code that wants to put elements next to it.
+#[cfg(target_family = "wasm")]
+pub use web_backend::canvas_of;
 
 /// Mouse cursor shape (`Commands::set_cursor_icon`). SDL has no grab cursors: `Grab` shows the
 /// pointer hand and `Grabbing` the move cursor there; the web uses the CSS `grab` / `grabbing`.

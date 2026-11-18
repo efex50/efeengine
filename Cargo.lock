@@ -1609,6 +1609,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "multi_window"
+version = "0.1.0"
+dependencies = [
+ "efeengine-core",
+ "efeengine-ui",
+]
+
+[[package]]
 name = "mutate_once"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

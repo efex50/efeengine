@@ -89,6 +89,8 @@ pub struct WebBackend {
 }
 
 struct Inner {
+    /// The window this instance shows (`UiBackendCx::window`).
+    window: u32,
     document: Document,
     root: HtmlElement,
     theme_style: HtmlElement,
@@ -117,6 +119,34 @@ impl Default for WebBackend {
 
 fn warn(msg: &str) {
     web_sys::console::warn_1(&format!("efeengine-ui: {msg}").into());
+}
+
+/// The layer element of a secondary window: a `div[data-efui-window]` next to the window's canvas
+/// (inside the wrapper `Engine::create_window` made, or the parent of an existing canvas).
+fn find_or_create_window_root(document: &Document, window: u32) -> Option<HtmlElement> {
+    let canvas = efeengine_core::window::canvas_of(window)?;
+    let parent = canvas.parent_element()?;
+    let sel = format!("[data-efui-window=\"{window}\"]");
+    if let Ok(Some(el)) = parent.query_selector(&sel) {
+        return el.dyn_into().ok();
+    }
+    let el: HtmlElement = document.create_element("div").ok()?.dyn_into().ok()?;
+    let _ = el.set_attribute("data-efui-window", &window.to_string());
+    let _ = el.style().set_property("position", "absolute");
+    let _ = el.style().set_property("inset", "0");
+    let _ = el.style().set_property("overflow", "hidden");
+    let _ = el.style().set_property("pointer-events", "none");
+    // The layer is positioned against its parent: make sure the parent is a positioning context.
+    if let Some(p) = parent.dyn_ref::<HtmlElement>() {
+        let pos = web_sys::window()
+            .and_then(|w| w.get_computed_style(p).ok().flatten())
+            .and_then(|st| st.get_property_value("position").ok());
+        if pos.as_deref() == Some("static") {
+            let _ = p.style().set_property("position", "relative");
+        }
+    }
+    parent.append_child(&el).ok()?;
+    Some(el)
 }
 
 fn find_or_create_root(document: &Document) -> Option<HtmlElement> {
@@ -150,13 +180,15 @@ fn head_style(document: &Document, id: &str) -> Option<HtmlElement> {
 }
 
 impl UiBackend for WebBackend {
-    fn init(&mut self, _cx: &mut UiBackendCx) {
+    fn init(&mut self, cx: &mut UiBackendCx) {
         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
             warn("no document, the web backend does nothing");
             return;
         };
-        let Some(root) = find_or_create_root(&document) else {
-            warn("could not find or create the ui layer element");
+        let window = cx.window;
+        let root = if window == 0 { find_or_create_root(&document) } else { find_or_create_window_root(&document, window) };
+        let Some(root) = root else {
+            warn(&format!("could not find or create the ui layer element of window {window}"));
             return;
         };
         let (Some(base_style), Some(theme_style)) = (head_style(&document, "efui-base"), head_style(&document, "efui-theme")) else {
@@ -167,6 +199,7 @@ impl UiBackend for WebBackend {
         let _ = root.set_attribute(LAYER_ATTR, "");
         let shared = Rc::new(RefCell::new(Shared::default()));
         let mut inner = Inner {
+            window,
             document,
             root,
             theme_style,
@@ -416,7 +449,7 @@ impl Inner {
         for ch in changes {
             match *ch {
                 UiChange::Created(id) => {
-                    if tree.get(id).is_none() {
+                    if tree.get(id).is_none() || tree.window_of(id) != Some(self.window) {
                         continue;
                     }
                     self.create(tree, id, cx);
@@ -426,7 +459,11 @@ impl Inner {
                     }
                 }
                 UiChange::Removed(id) => self.remove(id),
-                UiChange::Moved { parent, .. } => dirty_parents.push(parent),
+                UiChange::Moved { parent, .. } => {
+                    if self.entries.contains_key(&parent) {
+                        dirty_parents.push(parent)
+                    }
+                }
                 UiChange::Kind(id) => self.apply_kind(tree, id, cx),
                 UiChange::Style(id) | UiChange::Classes(id) => {
                     let old = self.entries.get(&id).map(|e| e.dir);
@@ -446,6 +483,9 @@ impl Inner {
                     }
                 }
                 UiChange::HoverSignals(id) => {
+                    if !self.entries.contains_key(&id) {
+                        continue;
+                    }
                     let bits = id.to_bits();
                     let mut sh = self.shared.borrow_mut();
                     if tree.get(id).is_some_and(|n| n.hover_signals()) {
@@ -455,8 +495,27 @@ impl Inner {
                     }
                 }
                 UiChange::Layer(id) => {
-                    self.restyle(tree, id);
-                    self.sync_backdrop(tree, id);
+                    let mine = tree.window_of(id) == Some(self.window);
+                    let has = self.entries.contains_key(&id);
+                    if mine && !has {
+                        // The layer moved into this window: build it.
+                        let nodes = tree.subtree(id);
+                        for n in &nodes {
+                            self.create(tree, *n, cx);
+                        }
+                        for n in &nodes {
+                            self.place_children(tree, *n);
+                        }
+                        self.attach_layer(tree, id);
+                    } else if !mine && has {
+                        // The layer moved to another window: drop its elements here.
+                        for n in tree.subtree(id) {
+                            self.remove(n);
+                        }
+                    } else if mine {
+                        self.restyle(tree, id);
+                        self.sync_backdrop(tree, id);
+                    }
                 }
                 UiChange::Theme => {
                     self.theme_style.set_text_content(Some(&css::theme_state_stylesheet(theme)));
