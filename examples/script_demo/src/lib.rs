@@ -29,7 +29,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use efeengine_core::efemod::Manifest;
 use efeengine_core::efevm::{ApiType, HostFn, HostOk};
 use efeengine_core::prelude::*;
-use efeengine_core::mods::{AssetHandler, DirSource, Grant, ModRequest};
+use efeengine_core::mods::{AssetHandler, Grant, ModRequest};
+#[cfg(not(target_family = "wasm"))]
+use efeengine_core::mods::DirSource;
 use efeengine_core::scripting::{ModuleId, Script};
 use efeengine_core::ecs::{Resources};
 
