@@ -18,8 +18,10 @@ pub mod math {
 }
 
 pub mod render {
-    //! Writing a renderer or touching the GPU: `Renderer2D`, `Renderer3D`, `CustomRenderer`, `Gpu`, `Target`, the `RenderFrame` and its parts, textures, plus the `wgpu` and `bytemuck` crates.
-    pub use crate::engine::render::{Renderer2D, Renderer3D, CustomRenderer, Target, Frame2D, Frame3D, RenderOverlay, Gpu, ExtraSurface, SurfaceFrame, ClearRenderer, PngError, RenderFrame, CameraView, SpriteInstance, MeshInstance, TextureChanges, Textures, Image, TextureError, RenderWarnings, SpriteRenderer};
+    //! Writing a renderer or touching the GPU: `Renderer2D`, `Renderer3D`, `CustomRenderer`, `Gpu`, `Target`, the `RenderFrame` and its parts, textures, `Draw2D` and its `DrawList` / wgpu backend, the `DebugDraw2D` resource, offscreen rendering (native), plus the `wgpu` and `bytemuck` crates.
+    pub use crate::engine::render::{Renderer2D, Renderer3D, CustomRenderer, Target, Frame2D, Frame3D, RenderOverlay, Gpu, ExtraSurface, SurfaceFrame, ClearRenderer, PngError, RenderFrame, CameraView, SpriteInstance, MeshInstance, TextureChanges, Textures, Image, TextureError, RenderWarnings, SpriteRenderer, Draw2D, DrawList, DrawCommand, DrawState, Vertex2D, Rect, RectI, Blend, Filter, DebugDraw2D, GpuTextures, WgpuDraw2D};
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use crate::engine::render::{OffscreenGpu, encode_png, write_png};
     pub use bytemuck;
     pub use wgpu;
 }

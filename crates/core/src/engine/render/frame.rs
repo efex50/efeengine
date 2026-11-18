@@ -10,6 +10,7 @@ use glam::Vec2;
 use hecs::Entity;
 
 use crate::engine::components::{MeshHandle, TextureHandle};
+use super::draw2d::DrawList;
 use super::textures::TextureChanges;
 
 /// One camera of the frame, ready to use (the active one of its kind).
@@ -81,6 +82,9 @@ pub struct Frame2D {
     pub ignored_cameras: usize,
     /// Visible sprites ordered by `layer` (ascending: first drawn first), ties by entity id.
     pub sprites: Vec<SpriteInstance>,
+    /// Extra 2D drawing in **screen pixels**, drawn after (over) the sprites: the debug draw
+    /// (`DebugDraw2D`) is converted into it by the extract. Cleared and refilled every frame.
+    pub draw: DrawList,
 }
 
 /// What a [`Renderer3D`](super::Renderer3D) draws: the active perspective camera and the meshes.

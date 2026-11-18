@@ -4,25 +4,27 @@
 //! needed for another filter mode). It is meant to be read: the
 //! same steps are what a hand-written renderer (`examples/custom_renderer`) has to do.
 //!
-//! * Textures: `textures` (added / updated / removed) is mirrored into GPU textures, each
-//!   with a bind group (texture + sampler). `TextureHandle { id: 0 }` is a 1x1 white texture.
+//! * Textures: `textures` (added / updated / removed) is mirrored into GPU textures by
+//!   [`GpuTextures`] (shared with the Draw2D pass), each with a bind group (texture + sampler).
+//!   `TextureHandle { id: 0 }` is a 1x1 white texture.
 //! * Camera: `frame.camera.view_projection` goes into a uniform; the target is cleared to
 //!   the camera's `clear_color` (black, and nothing drawn, without a camera).
 //! * Sprites: each becomes one 112-byte instance in a vertex buffer (the world matrix, size,
 //!   uv rectangle, tint, flip). One instanced draw of a 6-vertex quad per *batch*, where a
 //!   batch is a run of consecutive sprites with the same texture (the order is already
 //!   back to front, so batching must not reorder).
+//! * Draw2D: after the sprites, `frame.draw` (a [`DrawList`](super::DrawList) in screen pixels: debug
+//!   draw, later UI) is drawn in the same pass by a [`WgpuDraw2D`].
 //! * WebGL2: no storage buffers (instance data lives in a vertex buffer), no `first_instance`
 //!   (each batch binds its own slice of the buffer and draws instances `0..n`), and the
 //!   texture size is checked against the device limit.
 //! * The instance buffer grows (power of two) when a frame has more sprites than it holds.
 
-use std::collections::HashMap;
 use std::ops::Range;
 
-use wgpu::util::DeviceExt;
-
 use crate::engine::components::TextureHandle;
+use super::draw2d::Filter;
+use super::draw2d_wgpu::{GpuTextures, WgpuDraw2D};
 use super::frame::{Frame2D, SpriteInstance};
 use super::textures::TextureChanges;
 use super::{Gpu, Renderer2D, Target};
@@ -77,11 +79,10 @@ struct State {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    texture_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    /// GPU textures by handle id (id 0 = the white texture). The texture is kept only to
-    /// own the GPU resource that the bind group views.
-    textures: HashMap<u32, (wgpu::Texture, wgpu::BindGroup)>,
+    filter: Filter,
+    /// GPU textures by handle id (shared with `draw2d`).
+    textures: GpuTextures,
+    draw2d: WgpuDraw2D,
     instance_buffer: wgpu::Buffer,
     /// Capacity of `instance_buffer` in sprites.
     capacity: usize,
@@ -148,37 +149,9 @@ impl State {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() }],
         });
 
-        // group 1: texture + sampler
-        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("sprite texture layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let filter = if linear { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest };
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("sprite sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: filter,
-            min_filter: filter,
-            ..Default::default()
-        });
+        // group 1: texture + sampler (layout owned by the shared texture table)
+        let textures = GpuTextures::new(gpu);
+        let draw2d = WgpuDraw2D::new(gpu, &textures);
 
         // pipeline: straight-alpha blending, no depth (the order of the draws is the order)
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -187,7 +160,7 @@ impl State {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sprite pipeline layout"),
-            bind_group_layouts: &[Some(&camera_layout), Some(&texture_layout)],
+            bind_group_layouts: &[Some(&camera_layout), Some(textures.layout())],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -228,69 +201,21 @@ impl State {
         });
 
         let capacity = 256;
-        let mut state = Self {
+        Self {
             pipeline,
             camera_buffer,
             camera_bind_group,
-            texture_layout,
-            sampler,
-            textures: HashMap::new(),
+            filter: if linear { Filter::Linear } else { Filter::Nearest },
+            textures,
+            draw2d,
             instance_buffer: create_instance_buffer(device, capacity),
             capacity,
             staging: Vec::new(),
-        };
-        state.upload_texture(gpu, 0, 1, 1, &[255, 255, 255, 255]);
-        state
-    }
-
-    /// Create (or replace) the GPU texture of handle `id` from RGBA8 pixels.
-    fn upload_texture(&mut self, gpu: &Gpu, id: u32, width: u32, height: u32, rgba8: &[u8]) {
-        let max = gpu.device.limits().max_texture_dimension_2d;
-        if width > max || height > max {
-            crate::global_warn(&format!("sprite renderer: texture {id} is {width}x{height}, over this device's limit of {max}; not uploaded"));
-            self.textures.remove(&id);
-            return;
-        }
-        let texture = gpu.device.create_texture_with_data(
-            gpu.queue,
-            &wgpu::TextureDescriptor {
-                label: Some("sprite texture"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                // sRGB: the sampler converts to linear, the sRGB surface converts back
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            rgba8,
-        );
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sprite texture"),
-            layout: &self.texture_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-            ],
-        });
-        self.textures.insert(id, (texture, bind_group));
-    }
-
-    /// Mirror this frame's texture changes. (They are delivered once, so this runs every frame.)
-    fn sync_textures(&mut self, gpu: &Gpu, textures: &TextureChanges) {
-        for (h, img) in textures.added.iter().chain(&textures.updated) {
-            self.upload_texture(gpu, h.id, img.width(), img.height(), img.rgba8());
-        }
-        for h in &textures.removed {
-            self.textures.remove(&h.id);
         }
     }
 
     fn render(&mut self, gpu: &Gpu, target: &Target, frame: &Frame2D, textures: &TextureChanges) {
-        self.sync_textures(gpu, textures);
+        self.textures.sync(gpu, textures);
 
         let clear_color = frame.camera.as_ref().map_or([0.0, 0.0, 0.0, 1.0], |c| c.clear_color);
         // Without a camera there is no projection: clear and draw nothing.
@@ -314,7 +239,9 @@ impl State {
             gpu.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&self.staging));
         }
 
-        let runs = batches(sprites, |t| if self.textures.contains_key(&t.id) { t } else { TextureHandle::NONE });
+        let runs = batches(sprites, |t| if self.textures.contains(t.id) { t } else { TextureHandle::NONE });
+
+        self.draw2d.prepare(gpu, &frame.draw);
 
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sprites") });
         {
@@ -335,7 +262,7 @@ impl State {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 for (tex, range) in &runs {
-                    let Some((_, bind_group)) = self.textures.get(&tex.id) else { continue };
+                    let Some(bind_group) = self.textures.get_bind(tex.id, self.filter) else { continue };
                     pass.set_bind_group(1, bind_group, &[]);
                     // bind just this batch's slice, so every draw starts at instance 0
                     let bytes = range.start as u64 * INSTANCE_BYTES..range.end as u64 * INSTANCE_BYTES;
@@ -343,6 +270,7 @@ impl State {
                     pass.draw(0..6, 0..(range.end - range.start) as u32);
                 }
             }
+            self.draw2d.draw(&mut pass, &self.textures, &frame.draw);
         }
         gpu.queue.submit(std::iter::once(encoder.finish()));
     }

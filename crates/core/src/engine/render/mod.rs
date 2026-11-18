@@ -7,18 +7,28 @@
 //! [`RenderOverlay`]s. A game that wants the whole frame and the whole surface installs a
 //! [`CustomRenderer`] instead. See `docs/RENDERER_PLAN.md` and `docs/RENDERING.md`.
 
+mod debug_draw;
+mod draw2d;
+mod draw2d_wgpu;
 mod extra_surface;
 mod extract;
 mod frame;
 pub(crate) mod gpu;
+#[cfg(not(target_arch = "wasm32"))]
+mod offscreen;
 mod png;
 mod renderers;
 mod sprite_renderer;
 mod textures;
 
+pub use debug_draw::DebugDraw2D;
+pub use draw2d::{Blend, Draw2D, DrawCommand, DrawList, DrawState, Filter, Rect, RectI, Vertex2D};
+pub use draw2d_wgpu::{GpuTextures, WgpuDraw2D};
 pub use extra_surface::{ExtraSurface, SurfaceFrame};
 pub use extract::{camera_matrices, render_extract};
 pub use frame::{CameraView, Frame2D, Frame3D, MeshInstance, RenderFrame, RenderWarnings, SpriteInstance};
+#[cfg(not(target_arch = "wasm32"))]
+pub use offscreen::{encode_png, write_png, OffscreenGpu};
 pub use png::PngError;
 pub(crate) use renderers::Renderers;
 pub use sprite_renderer::SpriteRenderer;

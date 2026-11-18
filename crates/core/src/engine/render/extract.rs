@@ -69,6 +69,7 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
     let mut frame = cx.resources.remove::<RenderFrame>().unwrap_or_default();
     let mut warnings = cx.resources.remove::<RenderWarnings>().unwrap_or_default();
     frame.d2.sprites.clear();
+    frame.d2.draw.clear();
     frame.d3.meshes.clear();
     frame.frame = cx.time.frame();
     frame.time = cx.time.elapsed();
@@ -157,6 +158,11 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
     }
     }
     frame.d2.sprites.sort_by_key(|s| (s.layer, s.entity.id()));
+
+    // ---- debug draw: queued shapes -> screen pixels (one frame of life) ----
+    if let Some(dd) = cx.resources.get_mut::<super::DebugDraw2D>() {
+        dd.flush_into(frame.d2.camera.as_ref(), &mut frame.d2.draw);
+    }
 
     // ---- meshes ----
     for (e, m, g, t, v) in cx

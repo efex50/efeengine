@@ -324,3 +324,28 @@ fn rendering_components_are_registered_and_indexed() {
     let parent = idx.struct_type("Parent").unwrap();
     assert_eq!(parent.fields[0].ty, efeengine_core::efevm::Prim::Entity);
 }
+
+// ---- 2D debug draw ----
+
+#[test]
+fn debug_draw_reaches_the_frame_for_one_frame() {
+    use efeengine_core::render::DebugDraw2D;
+    let mut e = engine();
+    e.world_mut().spawn((Camera::default(), Transform::default()));
+    e.world_mut().spawn((Sprite { size: Vec2::new(10.0, 10.0), ..Sprite::default() }, Transform::from_position(Vec2::new(4.0, 0.0))));
+    {
+        let dd = e.resources_mut().get_mut::<DebugDraw2D>().expect("DebugDraw2D resource");
+        // a bounding box around the sprite (world) and a screen-space marker
+        dd.rect(Vec2::new(-1.0, -5.0), Vec2::new(9.0, 5.0), DebugDraw2D::YELLOW);
+        dd.screen_rect(Vec2::new(1.0, 1.0), Vec2::new(5.0, 5.0), DebugDraw2D::RED);
+    }
+    e.run_frames(1, DT);
+    let f = e.render_frame().clone();
+    assert_eq!(f.d2.sprites.len(), 1);
+    assert!(!f.d2.draw.is_empty());
+    assert_eq!(f.d2.draw.commands().len(), 1);
+    assert!(e.resources().get::<DebugDraw2D>().unwrap().is_empty());
+    // not repeated: shapes live one frame
+    e.run_frames(1, DT);
+    assert!(e.render_frame().d2.draw.is_empty());
+}

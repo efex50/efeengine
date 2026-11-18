@@ -18,7 +18,7 @@ pub use crate::engine::{
     events::Events,
     time::Time,
     input::{Key, KeyCode, MouseButton, InputState},
-    render::{SpriteRenderer, Textures},
+    render::{DebugDraw2D, SpriteRenderer, Textures},
     log::{global_info, global_warn, global_alert, global_error, debug_info, debug_warn, debug_alert, debug_error},
 };
 pub use efeengine_macros::{main, Component, script_component, ScriptType};

@@ -219,6 +219,7 @@ impl Engine {
         };
         let mut state = state;
         state.resources.insert(Textures::new());
+        state.resources.insert(rendering::DebugDraw2D::new());
         state.resources.insert(RenderFrame::default());
         state.resources.insert(rendering::RenderWarnings::default());
         let (msg_tx, msg_rx) = flume::unbounded();
