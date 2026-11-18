@@ -81,6 +81,28 @@ pub fn mode_label(m: Mode) -> &'static str {
     }
 }
 
+/// Resources an editor user does not need in the fidelity list: the engine's own (core, window,
+/// graphics, audio and link internals). What is left is mostly the game's own state.
+pub fn game_gaps(gaps: &[String]) -> Vec<String> {
+    const INTERNAL: [&str; 4] = ["efeengine_core::", "efeengine_editor_link::", "efeengine_ui::", "efeengine_audio::"];
+    gaps.iter().filter(|g| !INTERNAL.iter().any(|p| g.starts_with(p)) && !g.starts_with("std::") && !g.starts_with("alloc::")).cloned().collect()
+}
+
+/// The Play panel text: the resources a stop will not rewind, then what no snapshot covers.
+pub fn fidelity_lines(gaps: &[String], not_covered: &[String]) -> Vec<String> {
+    let game = game_gaps(gaps);
+    let mut out = Vec::new();
+    if game.is_empty() {
+        out.push("all game resources are registered for snapshots".to_string());
+    } else {
+        out.push(format!("stop will not rewind these resources ({}; register them for snapshots):", game.len()));
+        out.extend(game.into_iter().map(|g| format!("  {g}")));
+    }
+    out.push("a snapshot never covers:".to_string());
+    out.extend(not_covered.iter().map(|n| format!("  {n}")));
+    out
+}
+
 /// Client-side check of a scene path before it is sent (the game checks again): the same rule
 /// as the link's, so a typo shows up without a round trip.
 pub fn validate_scene_path(path: &str) -> Result<(), String> {
@@ -158,6 +180,15 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].0, "Update (1/2 on)");
         assert_eq!(s[0].1, vec!["a".to_string(), "b  (off)".to_string()]);
+    }
+
+    #[test]
+    fn fidelity() {
+        let gaps = vec!["efeengine_core::engine::Time".to_string(), "mygame::Score".to_string()];
+        assert_eq!(game_gaps(&gaps), vec!["mygame::Score".to_string()]);
+        let l = fidelity_lines(&gaps, &["events in flight".to_string()]);
+        assert!(l[0].contains("(1;") && l.iter().any(|x| x == "  mygame::Score") && l.iter().any(|x| x == "  events in flight"));
+        assert!(fidelity_lines(&[], &[])[0].starts_with("all game"));
     }
 
     #[test]

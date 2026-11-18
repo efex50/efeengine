@@ -122,17 +122,24 @@ Each phase ends with something a user can see. Phases map onto the existing Phas
 
 ### E3: play and stop (7.5 play mode)
 
-- [ ] E3.1 **Play.** `snapshot()` on Play, scene systems on, world live.
-- [ ] E3.2 **Stop.** `restore()` on Stop, with the "keep changes" option.
-- [ ] E3.3 **Fidelity report.** Show what the snapshot does not cover in this game (resources not registered, events, engine state).
+- [x] E3.1 **Play.** `snapshot()` on Play, scene systems on, world live.
+  - _Done: `set_mode` in `crates/editor-link/src/handler.rs` (snapshot kept in `LinkState`); tests in `crates/editor-link/tests/protocol.rs`. `script_demo` now adds `EditorLink::from_env()`._
+- [x] E3.2 **Stop.** `restore()` on Stop, with the "keep changes" option.
+  - _Done: `set_mode edit {keep_changes}` and the strict `stop {keep_changes}` request (`no_snapshot` error when no play session); editor checkbox in `crates/editor/src/main.rs`._
+- [x] E3.3 **Fidelity report.** Show what the snapshot does not cover in this game (resources not registered, events, engine state).
+  - _Done: `fidelity` request (`crates/editor-link/src/protocol.rs`, `handler.rs`); the editor's Play panel filters engine-internal resources in `crates/editor/src/model.rs` (`game_gaps`)._
 - _Done when_ you press play, move an entity, press stop, and get the scene back.
 
 ### E4: live editing (7.4 editing, 6.4 inspector)
 
-- [ ] E4.1 **Set field.** `set_field` through the link; works in edit and play modes.
-- [ ] E4.2 **Spawn and despawn** entities from the editor, tagged `SceneOwned` so they are saved.
-- [ ] E4.3 **Inspector editing** for every schema type, using the field-type table above.
-- [ ] E4.4 **Undo and redo** for edits in edit mode (the editor records the old value and sends the inverse).
+- [x] E4.1 **Set field.** `set_field` through the link; works in edit and play modes.
+  - _Done: `Request::SetField` in `crates/editor-link/src/protocol.rs`, `set_field` / `prim_bytes` in `crates/editor-link/src/handler.rs` (engine task, byte-level write by schema type; errors `bad_value`, `unsupported_type`, `unknown_field`, `unknown_entity`, `readonly`; reply carries the old value). Core helper `Engine::types_and_world_mut`. Tests in `crates/editor-link/tests/protocol.rs`._
+- [x] E4.2 **Spawn and despawn** entities from the editor, tagged `SceneOwned` so they are saved.
+  - _Done: `Request::Spawn` / `Request::Despawn` and `spawn` / `despawn` in `crates/editor-link/src/handler.rs`; core `Engine::spawn_scene_owned` and `is_scene_owned` in `crates/core/src/engine/scene.rs`. Editor id auto-assigned (max + 1), duplicates rejected, despawn replies `owned` and the components it had. Editor: "Add entity" and "Delete entity" in `crates/editor/src/main.rs`._
+- [x] E4.3 **Inspector editing** for every schema type, using the field-type table above.
+  - _Done: `crates/editor/src/edit.rs` (schema parse, `input_kind`, `parse_scalar`, `parse_vector`) and `field_row` in `crates/editor/src/main.rs`: number and vector inputs, bool checkbox, entity picker over the Hierarchy, read-only with a note otherwise. Submit is Enter, or the user moving to another input, the selection or a mode button (iced's `text_input` has no blur event at the pinned rev). Server errors show in the Inspector. Strings and enums do not exist in the registry yet._
+- [x] E4.4 **Undo and redo** for edits in edit mode (the editor records the old value and sends the inverse).
+  - _Done: `inverse`, `UndoStack`, `history_blocked` in `crates/editor/src/edit.rs`; Undo/Redo buttons and Ctrl+Z / Ctrl+Shift+Z (also Ctrl+Y) in `crates/editor/src/main.rs`. Disabled in play mode with the reason shown; cleared when play starts, on scene load and on reconnect. Limit: an entity with no `EditorId` is addressed by raw bits, so its history is only good until it is respawned._
 - _Done when_ a value changed in play mode is still set after stop with "keep changes", and an edit in edit mode undoes cleanly.
 
 ### E5: build and run (7.5 toolchain)

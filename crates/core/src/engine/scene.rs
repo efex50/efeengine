@@ -518,6 +518,29 @@ impl Engine {
         self.scene_state.global.contains(name)
     }
 
+    /// The type registry and the world (mutable) together, for byte-level edits that cannot
+    /// borrow both through `types()` and `world_mut()`.
+    pub fn types_and_world_mut(&mut self) -> (&super::types::TypeRegistry, &mut hecs::World) {
+        (&self.state.types, &mut self.state.world)
+    }
+
+    /// Spawn an empty entity tagged [`SceneOwned`] by the active scene (so
+    /// [`capture_scene`](Self::capture_scene) and [`save_scene`](Self::save_scene) include it
+    /// and a scene switch despawns it). Without an active scene the tag has scene id 0 and an
+    /// empty name. Used by the editor link; add components with the registry afterwards.
+    pub fn spawn_scene_owned(&mut self) -> Entity {
+        let owned = match &self.scene_state.active {
+            Some(a) => SceneOwned { id: a.id, name: a.name.clone() },
+            None => SceneOwned { id: 0, name: Arc::from("") },
+        };
+        self.state.world.spawn((owned,))
+    }
+
+    /// `true` if `e` is alive and tagged [`SceneOwned`].
+    pub fn is_scene_owned(&self, e: Entity) -> bool {
+        self.state.world.get::<&SceneOwned>(e).is_ok()
+    }
+
     /// Name of the active scene, if one is loaded.
     pub fn current_scene(&self) -> Option<&str> {
         self.scene_state.active.as_ref().map(|a| &*a.name)

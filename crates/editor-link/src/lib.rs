@@ -1,6 +1,6 @@
 //! Editor link (docs/EDITOR.md phases E1 and E2): a localhost TCP listener that lets an editor
-//! read a running game, switch edit and play mode, and save and load scene files. Entity
-//! mutations come in E4.
+//! read a running game, switch edit and play mode, save and load scene files, and (E4) set
+//! fields, spawn and despawn entities.
 //!
 //! - Off unless `EFE_EDITOR=1`: [`EditorLink::from_env`] then adds nothing, so release games
 //!   never open a socket. The port is `EFE_EDITOR_PORT` (default 7878). It binds `127.0.0.1` only.

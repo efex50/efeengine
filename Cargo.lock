@@ -3260,6 +3260,7 @@ name = "script_demo"
 version = "0.1.0"
 dependencies = [
  "efeengine-core",
+ "efeengine-editor-link",
 ]
 
 [[package]]

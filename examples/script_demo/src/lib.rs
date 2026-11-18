@@ -269,6 +269,11 @@ fn main() {
             global_info(&format!("[script_demo] spawned 3 entities, {scripted} with the mover script"));
             log_progress(&mut engine, score);
             reload_on_r(&mut engine);
+            // Off unless EFE_EDITOR=1 (docs/EDITOR.md): then the editor can attach on 127.0.0.1.
+            #[cfg(not(target_family = "wasm"))]
+            if std::env::var_os("EFE_API_EXPORT").is_none() {
+                let _ = engine.add_plugin(efeengine_editor_link::EditorLink::from_env());
+            }
             engine.game_loop();
         }
         Err(e) => eprintln!("engine init failed: {e}"),

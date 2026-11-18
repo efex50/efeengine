@@ -38,9 +38,15 @@ fn every_message_round_trips() {
         Request::Components { entity: None, editor_id: Some("a".into()) },
         Request::Systems,
         Request::Scene,
-        Request::SetMode { mode: Mode::Edit },
+        Request::SetMode { mode: Mode::Edit, keep_changes: false },
+        Request::SetMode { mode: Mode::Play, keep_changes: true },
+        Request::Stop { keep_changes: true },
+        Request::Fidelity,
         Request::SaveScene { path: "a.ron".into() },
         Request::LoadScene { path: "a.ron".into() },
+        Request::SetField { entity: Some(1), editor_id: None, component: "Door".into(), field: "speed".into(), value: json!(2.5) },
+        Request::Spawn { components: Default::default(), editor_id: Some("3".into()) },
+        Request::Despawn { entity: None, editor_id: Some("3".into()) },
     ] {
         round_trip(ClientMessage::Request { id: 3, request: r });
     }
@@ -56,8 +62,12 @@ fn every_message_round_trips() {
         Reply::Systems { stages: vec![StageInfo { stage: "Update".into(), systems: vec![SystemInfo { name: "s".into(), enabled: true, global: false }] }] },
         Reply::Scene { name: Some("a".into()), path: None, mode: Mode::Play, project_dir: ".".into() },
         Reply::Mode { mode: Mode::Edit },
+        Reply::Fidelity { gaps: vec!["a::B".into()], not_covered: vec!["events".into()], snapshot: true },
         Reply::Saved { path: "a.ron".into() },
         Reply::Loaded { path: "a.ron".into(), entities: 2 },
+        Reply::FieldSet { entity: 1, old: json!([1.0, 2.0]) },
+        Reply::Spawned { entity: 1, editor_id: "4".into() },
+        Reply::Despawned { owned: true, editor_id: None, components: vec![] },
     ] {
         round_trip(ServerMessage::Reply { id: 1, reply: r });
     }
@@ -341,7 +351,7 @@ fn set_mode_edit_and_play() {
     };
 
     // Play mode: load the scene (enables scene_sys), then enter edit mode.
-    let r = go(&mut e, vec![Request::LoadScene { path: "a.ron".into() }, Request::SetMode { mode: Mode::Edit }]);
+    let r = go(&mut e, vec![Request::LoadScene { path: "a.ron".into() }, Request::SetMode { mode: Mode::Edit, keep_changes: false }]);
     assert_eq!(r[0], Reply::Loaded { path: "a.ron".into(), entities: 1 });
     assert_eq!(r[1], Reply::Mode { mode: Mode::Edit });
     assert_eq!(e.is_system_enabled("plain_sys"), Some(false));
@@ -354,7 +364,7 @@ fn set_mode_edit_and_play() {
     assert_eq!(global.load(Relaxed), g0 + 5);
 
     // The link still answers in edit mode; scene info reports the mode; reloading keeps edit mode.
-    let r = go(&mut e, vec![Request::Scene, Request::LoadScene { path: "a.ron".into() }, Request::SetMode { mode: Mode::Edit }]);
+    let r = go(&mut e, vec![Request::Scene, Request::LoadScene { path: "a.ron".into() }, Request::SetMode { mode: Mode::Edit, keep_changes: false }]);
     match &r[0] {
         Reply::Scene { name, path, mode, .. } => {
             assert_eq!((name.as_deref(), path.as_deref(), *mode), (Some("a"), Some("a.ron"), Mode::Edit));
@@ -366,7 +376,7 @@ fn set_mode_edit_and_play() {
     assert_eq!(e.is_system_enabled("scene_sys"), Some(false), "a scene switch in edit mode must not run systems");
 
     // Back to play: the scene's system and the previously enabled one run again.
-    let r = go(&mut e, vec![Request::SetMode { mode: Mode::Play }]);
+    let r = go(&mut e, vec![Request::SetMode { mode: Mode::Play, keep_changes: false }]);
     assert_eq!(r[0], Reply::Mode { mode: Mode::Play });
     assert_eq!(e.is_system_enabled("plain_sys"), Some(true));
     assert_eq!(e.is_system_enabled("scene_sys"), Some(true));
@@ -419,4 +429,201 @@ fn save_and_load_scene_and_rejected_paths() {
     let saved = std::fs::read_to_string(dir.join("out.ron")).unwrap();
     assert!(saved.contains("2.5") && saved.contains("4"), "{saved}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+struct Unregistered(#[allow(dead_code)] u32);
+
+fn door_speeds(e: &Engine) -> Vec<f32> {
+    e.world().query::<&Door>().iter().map(|d| d.speed).collect()
+}
+
+fn set_door_speed(e: &mut Engine, v: f32) {
+    for d in e.world_mut().query_mut::<&mut Door>() {
+        d.speed = v;
+    }
+}
+
+#[test]
+fn play_then_stop_restores_and_keep_changes_keeps() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let dir = temp_project("play");
+    let (mut e, port) = mode_engine(&dir);
+    let port = port.load(Relaxed);
+    e.world_mut().spawn((Door { speed: 1.0, ..Default::default() },));
+    let go = |e: &mut Engine, req: Request| -> Reply {
+        drive(e, move || {
+            let mut s = connect(port);
+            hello(&mut s);
+            ask(&mut s, 1, req)
+        })
+    };
+    let edit = Request::SetMode { mode: Mode::Edit, keep_changes: false };
+    let play = Request::SetMode { mode: Mode::Play, keep_changes: false };
+    assert_eq!(go(&mut e, edit.clone()), Reply::Mode { mode: Mode::Edit });
+
+    // play, change, stop: back to the old value.
+    assert_eq!(go(&mut e, play.clone()), Reply::Mode { mode: Mode::Play });
+    assert_eq!(go(&mut e, play.clone()), Reply::Mode { mode: Mode::Play }, "play while playing is a no-op");
+    set_door_speed(&mut e, 9.0);
+    assert_eq!(go(&mut e, Request::Stop { keep_changes: false }), Reply::Mode { mode: Mode::Edit });
+    assert_eq!(door_speeds(&e), vec![1.0]);
+    assert_eq!(e.is_system_enabled("editor_link_drain"), Some(true));
+
+    // play, change, stop with keep_changes: the change stays.
+    assert_eq!(go(&mut e, play.clone()), Reply::Mode { mode: Mode::Play });
+    set_door_speed(&mut e, 9.0);
+    assert_eq!(go(&mut e, Request::SetMode { mode: Mode::Edit, keep_changes: true }), Reply::Mode { mode: Mode::Edit });
+    assert_eq!(door_speeds(&e), vec![9.0]);
+
+    // The snapshot is gone: stop is an error and changes nothing.
+    let r = go(&mut e, Request::Stop { keep_changes: false });
+    assert_eq!(err_code(&r), "no_snapshot");
+    assert_eq!(door_speeds(&e), vec![9.0]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stop_without_play_is_an_error() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let dir = temp_project("stop");
+    let (mut e, port) = mode_engine(&dir);
+    let port = port.load(Relaxed);
+    let r = drive(&mut e, move || {
+        let mut s = connect(port);
+        hello(&mut s);
+        ask(&mut s, 1, Request::Stop { keep_changes: false })
+    });
+    assert_eq!(err_code(&r), "no_snapshot");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn fidelity_lists_unregistered_resources() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let dir = temp_project("fid");
+    let (mut e, port) = mode_engine(&dir);
+    let port = port.load(Relaxed);
+    e.insert_resource(Unregistered(1));
+    let r = drive(&mut e, move || {
+        let mut s = connect(port);
+        hello(&mut s);
+        ask(&mut s, 1, Request::Fidelity)
+    });
+    match r {
+        Reply::Fidelity { gaps, not_covered, snapshot } => {
+            assert!(gaps.iter().any(|g| g.ends_with("Unregistered")), "{gaps:?}");
+            assert!(!not_covered.is_empty());
+            assert!(!snapshot);
+        }
+        o => panic!("{o:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn set_field_req(entity: u64, component: &str, field: &str, value: serde_json::Value) -> Request {
+    Request::SetField { entity: Some(entity), editor_id: None, component: component.into(), field: field.into(), value }
+}
+
+fn door_of(e: &Engine, ent: Entity) -> (bool, f32) {
+    let d = e.world().get::<&Door>(ent).unwrap();
+    (d.open.get(), d.speed)
+}
+
+#[test]
+fn set_field_in_edit_and_play_and_rejections() {
+    let (mut e, port) = engine();
+    let port = port.load(std::sync::atomic::Ordering::Relaxed);
+    let door = e.world_mut().spawn((EditorId { id: 5 }, Door { open: false.into(), _pad: [0; 3], speed: 1.0 }, Transform::default()));
+    let other = e.world_mut().spawn((EditorId { id: 6 },));
+    let bits = entity_to_bits(door);
+    let gone = e.world_mut().spawn(());
+    let gone_bits = entity_to_bits(gone);
+    e.world_mut().despawn(gone).unwrap();
+    let replies = drive(&mut e, move || {
+        let mut s = connect(port);
+        hello(&mut s);
+        vec![
+            ask(&mut s, 1, Request::SetMode { mode: Mode::Edit, keep_changes: false }),
+            ask(&mut s, 2, set_field_req(bits, "Door", "speed", json!(2.5))),
+            ask(&mut s, 3, Request::SetField { entity: None, editor_id: Some("5".into()), component: "Door".into(), field: "open".into(), value: json!(true) }),
+            ask(&mut s, 4, Request::SetMode { mode: Mode::Play, keep_changes: false }),
+            ask(&mut s, 5, set_field_req(bits, "Door", "speed", json!(4.0))),
+            // rejections
+            ask(&mut s, 6, set_field_req(bits, "Door", "speed", json!("fast"))),
+            ask(&mut s, 7, set_field_req(bits, "Door", "speed", json!([1, 2]))),
+            ask(&mut s, 8, set_field_req(bits, "Door", "open", json!(7))),
+            ask(&mut s, 9, set_field_req(bits, "Door", "nope", json!(1))),
+            ask(&mut s, 10, set_field_req(gone_bits, "Door", "speed", json!(1))),
+            ask(&mut s, 11, set_field_req(bits, "Nope", "speed", json!(1))),
+            ask(&mut s, 12, set_field_req(entity_to_bits(other), "Door", "speed", json!(1))),
+            ask(&mut s, 13, set_field_req(bits, "Transform", "position", json!([1.0, 2.0]))),
+            ask(&mut s, 14, set_field_req(bits, "Transform", "position", json!([1.0]))),
+            ask(&mut s, 15, set_field_req(bits, "EditorId", "id", json!(6))),
+        ]
+    });
+    assert!(matches!(replies[1], Reply::FieldSet { old: ref o, .. } if *o == json!(1.0)), "{:?}", replies[1]);
+    assert!(matches!(replies[2], Reply::FieldSet { old: ref o, .. } if *o == json!(false)), "{:?}", replies[2]);
+    assert!(matches!(replies[4], Reply::FieldSet { old: ref o, .. } if *o == json!(2.5)), "{:?}", replies[4]);
+    assert_eq!(err_code(&replies[5]), "unsupported_type");
+    assert_eq!(err_code(&replies[6]), "bad_value");
+    assert_eq!(err_code(&replies[7]), "bad_value");
+    assert_eq!(err_code(&replies[8]), "unknown_field");
+    assert_eq!(err_code(&replies[9]), "unknown_entity");
+    assert_eq!(err_code(&replies[10]), "unknown_component");
+    assert_eq!(err_code(&replies[11]), "missing_component");
+    assert!(matches!(replies[12], Reply::FieldSet { .. }), "{:?}", replies[12]);
+    assert_eq!(err_code(&replies[13]), "bad_value");
+    assert_eq!(err_code(&replies[14]), "duplicate_editor_id");
+    assert_eq!(door_of(&e, door), (true, 4.0));
+    assert_eq!(e.world().get::<&Transform>(door).unwrap().position.to_array()[..2], [1.0, 2.0]);
+}
+
+#[test]
+fn spawn_and_despawn_over_the_socket() {
+    let (mut e, port) = engine();
+    let port = port.load(std::sync::atomic::Ordering::Relaxed);
+    let plain = e.world_mut().spawn((EditorId { id: 9 },));
+    let plain_bits = entity_to_bits(plain);
+    let replies = drive(&mut e, move || {
+        let mut s = connect(port);
+        hello(&mut s);
+        let comps = json!({"Door": {"open": true, "speed": 3.0}}).as_object().unwrap().clone();
+        vec![
+            ask(&mut s, 1, Request::Spawn { components: comps.clone(), editor_id: None }),
+            ask(&mut s, 2, Request::Spawn { components: comps.clone(), editor_id: Some("9".into()) }),
+            ask(&mut s, 3, Request::Spawn { components: comps.clone(), editor_id: Some("20".into()) }),
+            ask(&mut s, 4, Request::Spawn { components: json!({"Door": {"bogus": 1}}).as_object().unwrap().clone(), editor_id: None }),
+            ask(&mut s, 5, Request::Despawn { entity: None, editor_id: Some("20".into()) }),
+            ask(&mut s, 6, Request::Despawn { entity: Some(plain_bits), editor_id: None }),
+            ask(&mut s, 7, Request::Despawn { entity: Some(plain_bits), editor_id: None }),
+        ]
+    });
+    let auto = match &replies[0] {
+        Reply::Spawned { entity, editor_id } => {
+            assert_eq!(editor_id, "10", "max existing (9) + 1");
+            *entity
+        }
+        o => panic!("{o:?}"),
+    };
+    assert_eq!(err_code(&replies[1]), "duplicate_editor_id");
+    assert!(matches!(&replies[2], Reply::Spawned { editor_id, .. } if editor_id == "20"));
+    assert_eq!(err_code(&replies[3]), "unknown_field");
+    match &replies[4] {
+        Reply::Despawned { owned, editor_id, components } => {
+            assert!(*owned);
+            assert_eq!(editor_id.as_deref(), Some("20"));
+            let door = components.iter().find(|c| c.name == "Door").unwrap();
+            assert_eq!(door.fields["speed"], json!(3.0));
+        }
+        o => panic!("{o:?}"),
+    }
+    assert!(matches!(&replies[5], Reply::Despawned { owned: false, .. }), "{:?}", replies[5]);
+    assert_eq!(err_code(&replies[6]), "unknown_entity");
+    // The spawned entity is scene-owned and shows up in the captured scene.
+    let auto_e = efeengine_core::engine::types::entity_from_bits(auto).unwrap();
+    assert!(e.is_scene_owned(auto_e));
+    assert_eq!(door_of(&e, auto_e), (true, 3.0));
+    let ron = e.capture_scene("t").to_ron();
+    assert!(ron.contains("Door") && ron.contains("EditorId"), "{ron}");
+    assert_eq!(e.capture_scene("t").entities.len(), 1, "only the owned entity: {ron}");
 }

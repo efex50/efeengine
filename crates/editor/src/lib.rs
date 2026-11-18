@@ -3,5 +3,6 @@
 //! `main.rs`; everything testable without a window is here.
 
 pub mod conn;
+pub mod edit;
 pub mod model;
 pub mod worker;

@@ -11,8 +11,14 @@
 //!
 //! Requests: `"stats"`, `"schema"`, `"entities"`, `{"components":{"entity":bits}}` (or
 //! `{"components":{"editor_id":"..."}}`; an editor id is the decimal `EditorId.id`),
-//! `{"logs":{"count":50}}`, `"systems"`, `"scene"`, `{"set_mode":{"mode":"edit"|"play"}}`,
+//! `{"logs":{"count":50}}`, `"systems"`, `"scene"`, `{"set_mode":{"mode":"edit"|"play","keep_changes":false}}`, `{"stop":{"keep_changes":false}}`, `"fidelity"`,
 //! `{"save_scene":{"path":"levels/a.ron"}}`, `{"load_scene":{"path":"levels/a.ron"}}`.
+//! Edits (E4): `{"set_field":{"entity"|"editor_id":..,"component":"Door","field":"speed","value":2.5}}`,
+//! `{"spawn":{"components":{"Door":{"speed":1.0}},"editor_id":"7"}}` and
+//! `{"despawn":{"entity"|"editor_id":..}}`. They run as engine tasks (end of the stage), in edit
+//! and play mode. Error codes: `unknown_entity`, `unknown_editor_id`, `unknown_component`,
+//! `unknown_field`, `missing_component`, `readonly`, `bad_value`, `unsupported_type` (a string
+//! for a non-entity field: the registry has no string fields) and `duplicate_editor_id`.
 //! Failures are replies: `{"error":{"code":"...","message":"..."}}`.
 //!
 //! # Modes
@@ -25,7 +31,14 @@
 //! switch would otherwise enable its systems). `set_mode play` restores the recorded flags
 //! (adjusted for scene switches made in edit mode) and enables the systems the active scene
 //! lists, as `load_scene` does (global systems are never touched). Setting the mode already
-//! active is a no-op that still replies. Edit mode never mutates entities.
+//! active is a no-op that still replies.
+//!
+//! Entering play (from edit) takes `Engine::snapshot()` before any system is enabled. Leaving
+//! play calls `Engine::restore` on it unless `keep_changes` is true (then it is dropped); a
+//! failed restore replies `scene_error` and stays in play with the snapshot kept. `stop` is
+//! `set_mode edit` that replies `no_snapshot` when no play session was started by `play`
+//! (`set_mode edit` from the initial play state just enters edit mode). `fidelity` lists
+//! `Engine::snapshot_gaps` and the fixed list of state a snapshot never covers. Edit mode never mutates entities.
 //!
 //! # Scene files
 //!
@@ -79,11 +92,52 @@ pub enum Request {
     Systems,
     /// The active scene, the last saved or loaded path and the mode.
     Scene,
-    SetMode { mode: Mode },
+    /// Switch mode. `play` takes a snapshot; `edit` restores it unless `keep_changes`.
+    SetMode {
+        mode: Mode,
+        #[serde(default)]
+        keep_changes: bool,
+    },
+    /// Leave play mode (like `set_mode edit`), but an error (`no_snapshot`) when no play
+    /// session is running.
+    Stop {
+        #[serde(default)]
+        keep_changes: bool,
+    },
+    /// What a snapshot does not cover in this game.
+    Fidelity,
     /// Save the scene-owned entities to a file under the project directory.
     SaveScene { path: String },
     /// Load a scene file from the project directory (switches the scene).
     LoadScene { path: String },
+    /// Set one field of one component (edit and play mode). `value` is JSON converted by the
+    /// field's schema type: a number, a bool, an array for vectors, entity bits or an editor
+    /// id string for `entity`. Reply: `field_set` with the old value.
+    SetField {
+        #[serde(default)]
+        entity: Option<u64>,
+        #[serde(default)]
+        editor_id: Option<String>,
+        component: String,
+        field: String,
+        value: Value,
+    },
+    /// Spawn a scene-owned entity. `components` maps a component name to `{field: value}`
+    /// (missing fields are zero). An `EditorId` is always set: `editor_id`, else the one in
+    /// `components`, else the largest existing plus one.
+    Spawn {
+        #[serde(default)]
+        components: serde_json::Map<String, Value>,
+        #[serde(default)]
+        editor_id: Option<String>,
+    },
+    /// Despawn an entity. The reply carries what it had, so the editor can respawn it.
+    Despawn {
+        #[serde(default)]
+        entity: Option<u64>,
+        #[serde(default)]
+        editor_id: Option<String>,
+    },
 }
 
 /// Edit mode runs only global systems; play mode runs what the scene activated.
@@ -146,8 +200,17 @@ pub enum Reply {
     Systems { stages: Vec<StageInfo> },
     Scene { name: Option<String>, path: Option<String>, mode: Mode, project_dir: String },
     Mode { mode: Mode },
+    /// `gaps`: type names of resources not registered for snapshots (engine ones included);
+    /// `not_covered`: kinds of state no snapshot covers; `snapshot`: a play snapshot is held.
+    Fidelity { gaps: Vec<String>, not_covered: Vec<String>, snapshot: bool },
     Saved { path: String },
     Loaded { path: String, entities: usize },
+    /// `old`: the field's value before the change (same JSON shape as `components`).
+    FieldSet { entity: u64, old: Value },
+    Spawned { entity: u64, editor_id: String },
+    /// `owned`: the entity carried `SceneOwned` (saved with the scene). `components` are its
+    /// writable registered components, ready to feed back into `spawn`.
+    Despawned { owned: bool, editor_id: Option<String>, components: Vec<ComponentInfo> },
     Error { code: String, message: String },
 }
 

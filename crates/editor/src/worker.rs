@@ -62,11 +62,12 @@ pub fn spawn(port: u16) -> Handle {
     Handle { tx, rx: Mutex::new(rx), stop, thread: Some(thread) }
 }
 
-/// Drop repeated identical requests from one batch, keeping the first of each, in order.
+/// Drop repeated identical read requests from one batch, keeping the first of each, in order.
+/// Requests that change the game are always kept (each one gets its own reply).
 pub fn dedupe(batch: Vec<Request>) -> Vec<Request> {
     let mut out: Vec<Request> = Vec::with_capacity(batch.len());
     for r in batch {
-        if !out.contains(&r) {
+        if crate::edit::is_mutation(&r) || !out.contains(&r) {
             out.push(r);
         }
     }
@@ -160,8 +161,10 @@ mod tests {
 
     #[test]
     fn dedupe_keeps_first_of_each_in_order() {
-        let v = dedupe(vec![Request::Stats, Request::Entities, Request::Stats, Request::SetMode { mode: Mode::Edit }, Request::Entities]);
-        assert_eq!(v, vec![Request::Stats, Request::Entities, Request::SetMode { mode: Mode::Edit }]);
+        let v = dedupe(vec![Request::Stats, Request::Entities, Request::Stats, Request::SetMode { mode: Mode::Edit, keep_changes: false }, Request::Entities]);
+        assert_eq!(v, vec![Request::Stats, Request::Entities, Request::SetMode { mode: Mode::Edit, keep_changes: false }]);
+        let d = Request::Despawn { entity: Some(1), editor_id: None };
+        assert_eq!(dedupe(vec![d.clone(), d.clone()]), vec![d.clone(), d]);
     }
 
     fn wait_for(h: &Handle, mut pred: impl FnMut(&Event) -> bool) -> Event {

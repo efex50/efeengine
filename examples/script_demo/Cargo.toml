@@ -19,3 +19,4 @@ dependencies = ["sdl3"]
 
 [dependencies]
 efeengine-core = { path = "../../crates/core" }
+efeengine-editor-link = { path = "../../crates/editor-link" }
