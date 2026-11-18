@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 efeengine-editor-link = { path = "../editor-link" }
+efeengine-project = { path = "../project" }
 serde_json = "1.0.145"
 # The same iced commit as crates/ui. `tokio` gives `iced::time::every` for the poll tick.
 iced = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", features = ["tokio"] }

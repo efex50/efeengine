@@ -50,6 +50,9 @@ enum Cmd {
     Run(BuildArgs),
     /// Build an example without running it.
     Build(BuildArgs),
+    /// Run an example with the editor link on (EFE_EDITOR=1) and the editor window in front of it.
+    /// The port is EFE_EDITOR_PORT (default 7878). Ends the game when the editor closes.
+    Editor(EditorArgs),
     /// Build an example natively and write its API index (.efapi), the file scripts are checked against.
     ApiExport {
         example: Option<String>,
@@ -132,6 +135,18 @@ struct BuildArgs {
 }
 
 #[derive(Args, Clone)]
+struct EditorArgs {
+    /// Example name (directory under examples/). Asked for if omitted.
+    example: Option<String>,
+    /// Optimised build.
+    #[arg(long)]
+    release: bool,
+    /// Build SDL3 from source and link statically.
+    #[arg(long = "static")]
+    static_sdl: bool,
+}
+
+#[derive(Args, Clone)]
 struct ServerArgs {
     /// Web server port.
     #[arg(long, default_value_t = 8080)]
@@ -151,6 +166,8 @@ enum Target {
 enum Action {
     Build,
     Run,
+    /// Run the game with the editor link on, then the editor window in front of it.
+    Editor,
 }
 
 fn main() -> ExitCode {
@@ -186,6 +203,7 @@ fn real_main(cli: Cli) -> Result<()> {
     match cmd {
         Cmd::Run(a) => build_or_run(Action::Run, a, preflight),
         Cmd::Build(a) => build_or_run(Action::Build, a, preflight),
+        Cmd::Editor(a) => editor_cmd(a, preflight),
         Cmd::ApiExport { example, output, release, static_sdl } => {
             let project = Project::load()?;
             let ex = pick_example(&project, example.as_deref())?;
@@ -327,6 +345,7 @@ fn dispatch(
                     Ok(())
                 }
                 Action::Run => serve::serve(&out, &server.host, server.port),
+                Action::Editor => bail!("the editor attaches to native builds only"),
             }
         }
     }
@@ -396,7 +415,7 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
         let mut c = cargo();
         c.args(["build", "-p", &ex.package, "--lib"]).args(&extra);
         run(c)?;
-        if action == Action::Run {
+        if action != Action::Build {
             bail!("example '{}' has no binary target, nothing to run (library was built)", ex.dir);
         }
         return Ok(());
@@ -412,6 +431,9 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
     let scripts = api::after_native_build(project, ex, release)?;
     let profile = api::profile_dir(project, release);
     mods::install_native(project, ex, &profile.join(format!("{}.efapi", ex.dir)), &profile.join("mods"))?;
+    if action == Action::Editor {
+        return editor_session(project, ex, release, scripts);
+    }
     if action == Action::Run {
         step(format!("native run: {} ({desc})", ex.package));
         let mut c = cargo();
@@ -422,6 +444,73 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
         run(c)?;
     }
     Ok(())
+}
+
+/// Start the game with the editor link on, run the editor in front of it, and stop the game
+/// when the editor closes. The game binary is started directly so that stopping it kills the game
+/// and not a `cargo run` wrapper.
+fn editor_session(project: &Project, ex: &Example, release: bool, scripts: Option<PathBuf>) -> Result<()> {
+    let port = std::env::var("EFE_EDITOR_PORT").unwrap_or_else(|_| "7878".into());
+    let profile = api::profile_dir(project, release);
+    let game = profile.join(format!("{}{}", ex.package, std::env::consts::EXE_SUFFIX));
+    let editor_build = {
+        let mut c = cargo();
+        c.args(["build", "-p", "efeengine-editor", "--bin", "efe-editor"]);
+        if release {
+            c.arg("--release");
+        }
+        c
+    };
+    run(editor_build)?;
+    let editor_run = || {
+        let mut c = cargo();
+        c.args(["run", "-p", "efeengine-editor", "--bin", "efe-editor", "--", "--port", &port]);
+        if release {
+            c.arg("--release");
+        }
+        c
+    };
+    step(format!("editor: {} on port {port}", ex.package));
+    if dry_run() {
+        println!("[dry-run] EFE_EDITOR=1 EFE_EDITOR_PORT={port} {} &", game.display());
+        return run(editor_run());
+    }
+    let mut g = std::process::Command::new(&game);
+    g.current_dir(root()).env("EFE_EDITOR", "1").env("EFE_EDITOR_PORT", &port);
+    if let Some(dir) = scripts {
+        g.env("EFE_SCRIPT_DIR", dir);
+    }
+    let mut child = g.spawn().with_context(|| format!("could not start {}", game.display()))?;
+    let result = run(editor_run());
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+/// True when the example's sources start the editor link (`EditorLink::from_env`).
+fn links_editor(ex: &Example) -> bool {
+    let src = root().join("examples").join(&ex.dir).join("src");
+    std::fs::read_dir(src).map(|rd| {
+        rd.flatten().any(|e| {
+            std::fs::read_to_string(e.path()).map(|t| t.contains("EditorLink")).unwrap_or(false)
+        })
+    }).unwrap_or(false)
+}
+
+fn editor_cmd(a: EditorArgs, preflight: bool) -> Result<()> {
+    let project = Project::load()?;
+    let ex = pick_example(&project, a.example.as_deref())?;
+    if !ex.native_bin {
+        bail!("example '{}' has no binary target, so there is no game to attach the editor to", ex.dir);
+    }
+    if !links_editor(&ex) {
+        bail!(
+            "example '{}' does not start the editor link: add EditorLink::from_env() to its engine setup (examples/script_demo does this)",
+            ex.dir
+        );
+    }
+    let server = ServerArgs { port: 8080, host: "127.0.0.1".into() };
+    dispatch(&project, &ex, Target::Native, Action::Editor, a.release, a.static_sdl, &server, preflight)
 }
 
 // -------------------------------------------------------------- other commands --

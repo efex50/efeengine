@@ -32,6 +32,26 @@ dependencies, else `ModError::NotGranted`. `Grant` also carries the VM `budget` 
 (256 bytes), see [Mod components](#mod-components). The default policy (`DefaultPolicy`) grants nothing, and nothing is loaded
 unless you register a source or call `load`.
 
+## Consent: inspect, then load with a grant (planned)
+
+Planned, not built (see `NATIVE_MODS.md`, N0). The engine never shows a prompt. The game developer
+does, using two calls:
+
+```text
+inspect_mod(bytes) -> ModInspection   // no side effects: manifest, requested capabilities,
+                                      // native libraries with hashes, level of each, package hash
+load_mod(bytes, grant: Grant)         // loads only if the grant covers the request and its hash
+                                      // equals the bytes' hash
+```
+
+- Nothing loads unless the developer calls `load_mod`. A game that never calls it loads no mods.
+- A `Grant` is serialisable; the developer stores it. The engine keeps no decisions.
+- Capabilities are checked at load (imports and events must be granted) and on every host call
+  (each host function carries its capability, and a call without it is refused and logged).
+- `revoke_capability(mod_id, cap)` reloads the mod without that capability.
+
+Until N0 is built, `set_mod_policy` (below) and `load` are the only way in.
+
 ## `Engine::load` and `load_input`
 
 ```rust

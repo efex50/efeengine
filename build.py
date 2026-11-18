@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,9 @@ Usage: build.py [--dry-run] [--no-preflight] [<command> ...]
   ./build.py run   [<example>] [native|web] [--release] [--static] [--port N]
   ./build.py build [<example>] [native|web] [--release] [--static]
   ./build.py dist  [<example>]                web publish folder (scripts/web.py dist)
+  ./build.py editor [<example>] [--release] [--static]
+                                              run the game with the editor link (EFE_EDITOR=1),
+                                              then the editor window; port: EFE_EDITOR_PORT (7878)
   ./build.py list                             list examples
   ./build.py check                            cargo check --workspace + wasm check of core/examples
   ./build.py test                             cargo test for calc, efepages, efescript
@@ -373,6 +377,63 @@ def cmd_doctor(_a):
 
 
 # ---------------------------------------------------------------- main ----
+def links_editor(ex):
+    """True when the example's sources start the editor link (EditorLink::from_env)."""
+    src_dir = ROOT / "examples" / ex / "src"
+    if not src_dir.is_dir():
+        return False
+    return any("EditorLink" in f.read_text(errors="ignore") for f in src_dir.glob("*.rs"))
+
+
+def do_editor(ex, release, static):
+    """Run the game with the editor link on (EFE_EDITOR=1), then the editor in front of it."""
+    pkg = web.package_name(ex)
+    need_cargo()
+    preflight_native(static)
+    if not has_native_bin(ex):
+        raise Fail(f"example '{ex}' has no binary target, so there is no game to attach the editor to")
+    if not links_editor(ex):
+        raise Fail(f"example '{ex}' does not start the editor link: add EditorLink::from_env() "
+                   "to its engine setup (examples/script_demo does this)")
+    port = os.environ.get("EFE_EDITOR_PORT", "7878")
+    extra = (["--release"] if release else []) + (["--features", "efeengine-core/static"] if static else [])
+    profile = "release" if release else "debug"
+    target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+    if not target.is_absolute():
+        target = ROOT / target
+    game = target / profile / (pkg + (".exe" if os.name == "nt" else ""))
+    editor_cmd = ["cargo", "run", "-p", "efeengine-editor", "--bin", "efe-editor", "--", "--port", port]
+    step(f"editor: {pkg} ({'release' if release else 'debug'}) on port {port}")
+    run(["cargo", "build", "-p", pkg, "--bin", pkg] + extra)
+    run(["cargo", "build", "-p", "efeengine-editor", "--bin", "efe-editor"] + (["--release"] if release else []))
+    if Ctx.dry:
+        print(f"[dry-run] EFE_EDITOR=1 EFE_EDITOR_PORT={port} {game} &")
+        run(editor_cmd)
+        return
+    env = dict(os.environ, EFE_EDITOR="1", EFE_EDITOR_PORT=port)
+    proc = subprocess.Popen([str(game)], cwd=str(ROOT), env=env)
+    # SIGTERM (e.g. `timeout`) should stop the game too: raise the same interrupt as Ctrl+C,
+    # so the editor's child process and the game are cleaned up below.
+    def _interrupt(*_):
+        raise KeyboardInterrupt
+    previous = signal.signal(signal.SIGTERM, _interrupt)
+    try:
+        run(editor_cmd)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+def cmd_editor(a):
+    ex = pick_example(a.example)
+    do_editor(ex, a.release, a.static)
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="build.py", add_help=False)
     p.add_argument("-h", "--help", action="store_true")
@@ -394,6 +455,10 @@ def build_parser():
         sub.add_parser(name, add_help=False)
     dv = sub.add_parser("dev", add_help=False)
     dv.add_argument("target")
+    ed = sub.add_parser("editor", add_help=False)
+    ed.add_argument("example", nargs="?")
+    ed.add_argument("--release", action="store_true")
+    ed.add_argument("--static", action="store_true")
     c = sub.add_parser("clean", add_help=False)
     c.add_argument("example", nargs="?")
     return p

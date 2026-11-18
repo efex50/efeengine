@@ -1116,6 +1116,7 @@ name = "efeengine-editor"
 version = "0.1.0"
 dependencies = [
  "efeengine-editor-link",
+ "efeengine-project",
  "iced",
  "serde_json",
 ]
@@ -1136,6 +1137,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "efeengine-project"
+version = "0.1.0"
+dependencies = [
+ "quick-xml",
+ "toml",
 ]
 
 [[package]]

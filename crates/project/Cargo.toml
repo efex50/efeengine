@@ -1,0 +1,10 @@
+[package]
+name = "efeengine-project"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "The efeengine project file (.efproj): parse, write, find, check and scaffold."
+
+[dependencies]
+quick-xml = "0.41.0"
+toml = "1.2.1"
