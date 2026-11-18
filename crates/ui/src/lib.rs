@@ -9,6 +9,8 @@ pub mod bindings;
 pub mod capture;
 pub mod css;
 pub mod dom_plan;
+#[cfg(all(feature = "fallback", not(target_arch = "wasm32")))]
+pub mod fallback;
 pub mod headless;
 pub mod id;
 pub mod journal;
