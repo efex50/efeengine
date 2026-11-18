@@ -23,6 +23,8 @@
 
 use efeengine_core::prelude::*;
 
+pub mod menu;
+
 const TILE: f32 = 16.0;
 const MAP_W: i32 = 40;
 const MAP_H: i32 = 30;
@@ -195,7 +197,8 @@ fn player_input(ctx: &ParCtx<'_>) {
     let Some(game) = ctx.try_res::<Game>() else { return };
     let (player, autoplay) = (game.player, game.autoplay);
     drop(game);
-    let input = ctx.input;
+    // the game's view of the input: empty while the UI captures the keyboard
+    let input = ctx.game_input();
     let held = |a: KeyCode, b: KeyCode| input.pressed(a) || input.pressed(b);
     let mut dir = Vec2::new(
         held(KeyCode::D, KeyCode::Right) as i32 as f32 - held(KeyCode::A, KeyCode::Left) as i32 as f32,
@@ -394,17 +397,20 @@ pub fn setup(engine: &mut Engine) {
             .write::<Velocity>()
             .write::<Sprite>(),
         player_input,
-    );
+    )
+    .run_if(menu::running);
     engine.add_par_system(
         Stage::Update,
         Access::new().named("patrol").read::<Transform>().write::<Velocity>().write::<Patrol>().write::<Sprite>(),
         patrol,
-    );
+    )
+    .run_if(menu::running);
     engine.add_par_system(
         Stage::Update,
         Access::new().named("animate_coins").write::<Transform>().write::<Sprite>().read::<Coin>(),
         animate_coins,
-    );
+    )
+    .run_if(menu::running);
     engine.add_par_system(
         Stage::Update,
         Access::new()
@@ -415,7 +421,8 @@ pub fn setup(engine: &mut Engine) {
             .read::<Coin>()
             .read::<Patrol>(),
         collisions,
-    );
+    )
+    .run_if(menu::running);
     engine.add_system(Stage::Update, follow_camera);
     engine.add_system(Stage::Update, status);
 }
@@ -425,6 +432,12 @@ fn main() {
     match Engine::new("coin dash") {
         Ok(mut engine) => {
             setup(&mut engine);
+            // menus: main menu, settings, pause (Esc); see menu.rs
+            let autoplay = engine.resources().get::<Game>().is_some_and(|g| g.autoplay);
+            if let Err(e) = engine.add_plugin(menu::plugin()) {
+                eprintln!("ui plugin failed: {e}");
+            }
+            menu::setup(&mut engine, autoplay);
             engine.set_renderer_2d(SpriteRenderer::new());
             global_info("[coin_dash] WASD / arrows to move: collect the coins, avoid the red enemies");
             engine.game_loop();
