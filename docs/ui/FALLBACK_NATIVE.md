@@ -1,159 +1,266 @@
-# Fallback native UI backend: taffy + glyphon + own widgets
+# Fallback native UI backend: taffy + cosmic-text through Draw2D
 
-> **Status:** Design and roadmap, not implemented. Built only if the iced backend is blocked
-> (wgpu lock, missing features, size) or as a lighter option for small games.\
-> **Date:** 2026-11-17\
+> **Status:** the backend is built and tested (`crates/ui/src/fallback`, feature `fallback`,
+> roadmap 4C.6 phases F1 to F3). It draws into any `Draw2D`, so it works in the wgpu and in the SDL
+> rendering mode. **Not wired into the engine yet:** the engine hook that hands a `Draw2D` to an
+> overlay, `UiPlugin::fallback()` and the automatic choice in SDL mode are Stage 2 (section 9),
+> waiting for the multi-window work in `crates/core` and `crates/ui/src/plugin.rs`.\
+> **Date:** 2026-11-18\
 > **Implements:** the common API in [`API.md`](API.md). Game code does not change when switching.\
-> **Feature:** `efeengine-ui/ui-fallback` (native only)
-
-> **Revision planned (2026-11-18):** per [`../RENDERER_PLAN.md`](../RENDERER_PLAN.md) (section 3.5,
-> phase 4C.6) this backend will draw through the shared `Draw2D` API instead of its own WGSL
-> pipeline, so it also runs in the SDL rendering mode (no wgpu): rounded rectangles as triangle
-> meshes or nine-slice textures, glyphs rasterised on the CPU (cosmic-text + swash) into an atlas
-> texture instead of glyphon. Sections 1, 4 and 6 below describe the original wgpu-only design and
-> will be rewritten at that point.
+> **Feature:** `efeengine-ui/fallback` (native only; wasm uses the DOM backend)
 
 ## 1. Pieces
 
 | Part | Crate | Job |
 |---|---|---|
-| Layout | `taffy` 0.15 | Flexbox over a mirror of the `UiTree` |
-| Text | `glyphon` 0.12 (cosmic-text + swash), wgpu 30 | Shaping, line breaking, glyph atlas, text drawing, text editing (`cosmic_text::Editor`) |
-| Shapes | own WGSL pipeline | Rounded rectangles with border, images |
-| Widgets | own code | Button, checkbox, slider, text input, scroll, container, text, image |
-| Input | engine `InputEvent`s | Hit testing on layout rectangles, focus, capture |
+| Layout | `taffy` 0.15 (flexbox only) | One tree per layer, built from the model on every `sync` |
+| Text | `cosmic-text` (the fork and rev `iced_wgpu` uses, so both backends compile it once; features `std`, `swash`, no fontconfig) | Shaping, wrapping, hit testing, `Editor` for text inputs; swash rasterises glyphs on the CPU |
+| Glyph atlas | own (`text.rs`) | 1024x1024 RGBA8 image, shelf packed, one bitmap per glyph and sub-pixel bin; the host owns the texture |
+| Shapes | own (`shapes.rs`) | Rounded rectangles, borders, rails and circles as triangle meshes with a feathered edge |
+| Widgets | own (`input.rs`, `edit.rs`) | Button, checkbox, slider, text input, scroll, container, text, image |
+| Output | `efeengine_core::render::Draw2D` | Everything is a `triangles` call plus `set_clip` / `set_filter`, recorded into a `DrawList` |
 
-Same wgpu major as the engine (30), so everything shares the engine's device, queue and surface
-texture.
+Nothing talks to wgpu or SDL: the backend produces a `DrawList` (plain data, physical pixels) and
+the host replays it on whatever `Draw2D` it has (`WgpuDraw2D` after a `DrawList`, `SdlDraw2D`
+directly). `GpuView` nodes need a wgpu pass of their own and are not drawn; a faint outline marks
+their place.
 
 ## 2. Data flow per frame
 
 ```text
-UiTree + journal ──► sync: update taffy nodes, resolved styles, text buffers
+UiTree + journal ──► sync: Model (styles resolved per state, text props inherited), layout dirty
                           │
-input filter (raw events) ─► hit test on last layout ─► widget state machines ─► UiSignal
-                          │
-PostUpdate end ──► layout (taffy compute_layout with text measure) only if dirty
-                          │
-overlay pass ──► quads + images + text, per layer, in z order, with scissor clips
+input filter (raw events) ─► hit test on the last layout ─► widget state machines ─► UiSignal
+                          │                                   (values edited locally, plugin writes back)
+host, once per frame:
+  prepare()            ─► layout if dirty, record the frame into a DrawList (only when something changed)
+  take_atlas_image()   ─► Some(image) when glyphs were added: replace the atlas texture
+  draw(&mut dyn Draw2D)─► replay the list
 ```
+
+The two-step frame exists so the host can upload the atlas **before** the list is drawn (SDL draws
+immediately). `prepare` returns `false` when nothing changed (the list is kept; hosts that clear
+the target every frame still replay it). Counters: `counters()` returns (layout passes, recorded
+frames).
 
 ## 3. Layout (taffy)
 
-- One `taffy::NodeId` per `WidgetId`, kept in a map. `Created`/`Removed`/`Moved` journal entries
-  add, remove and re-parent taffy nodes. `Style`/`Classes`/`Theme` entries re-resolve the node's
-  style and convert it to `taffy::Style` (direction, justify, align, gap, padding, size, min/max,
-  `flex_grow` for `Fill`/`Portion`).
-- Layers are taffy roots sized to the window (logical px) with the anchor turned into an
-  alignment of the layer's single child.
-- **Text measure:** text, button labels, checkbox labels and text inputs are leaf nodes with a
-  measure function: given the available width, shape the cosmic-text `Buffer` with that width and
-  return its size. Results are cached per (node, width) until the text or font changes.
-- Layout runs once per frame, only when something marked it dirty (tree change, resize, scale
-  change, font load). The result is a rectangle per node in logical px, converted to physical px for
-  drawing.
+- The model (`model.rs`) is an owned, theme-resolved copy of the visible tree, rebuilt on every
+  `sync` (same idea as the iced backend). Text, hover, focus and scroll state live in maps keyed by
+  `WidgetId`, so they survive a rebuild; entries of removed nodes are dropped.
+- Layout uses the **normal** style only (a hover style never changes the layout). Everything is
+  laid out in logical px with taffy rounding off; drawing multiplies by the scale factor and snaps
+  to physical pixels.
+- Mapping (same rules as the iced column of API.md section 5): `Auto` is the intrinsic size;
+  `Fill` / `Portion(n)` get `flex_grow` (1 / n) with basis 0 when the parent's size on that axis is
+  definite, and stay intrinsic in an intrinsically sized parent; `Px` never shrinks; `justify`,
+  `align`, `gap` are the flexbox properties; padding is inside the size; a border takes no layout
+  space; `Scroll` has `overflow: scroll` (its children never shrink).
+- Leaves with a measure function: text, button labels, checkboxes (box + gap + label), text
+  inputs (one line high), sliders (16 px high), images (pixel size, aspect kept when one side is
+  given). Text is shaped at the logical size with line height 1.3 (iced's default) and wraps at
+  the available width; min-content is the longest word.
+- A layer is a window-sized wrapper whose alignment is the anchor; `Fill` makes the root grow and
+  stretch. The layer `offset` shifts the root away from the anchored edge (inwards), like iced.
+- Layout runs only when the model or the window size/scale changed.
 
 ## 4. Drawing
 
-- **Quad pipeline:** one instanced draw per batch. Instance = rect, background color, border
-  width, border color, radius, clip rect. The fragment shader draws the rounded rectangle and border
-  with a signed distance function (anti-aliased edges). Checkbox marks and slider tracks/thumbs are
-  quads too (the check mark can be a glyph from the bundled font).
-- **Images:** the same pipeline with a texture bind group, from the backend's own texture table,
-  filled from the engine's `TextureChanges`.
-- **Text:** glyphon `TextRenderer` per layer, `TextArea`s with position, bounds (the clip rect) and
-  color.
-- **Order:** for each visible layer in z order: quads and images in tree order, then that layer's
-  text. Text inside one layer is always above that layer's quads. That covers normal UI (labels on
-  buttons and panels). Overlapping widgets that need text below a quad go in a higher layer.
-- **Clipping:** `Scroll` nodes push a clip rect (intersection with the parent's). Quads carry the
-  clip in the instance (discard in the shader). Text uses `TextArea::bounds`. No stencil needed.
-- **DPI:** everything is laid out in logical px and multiplied by the scale factor when drawing.
-  glyphon gets the physical font size, so text is sharp at 2x.
+- **Order:** layers by z, nodes in tree order; each node draws its background, border, then its
+  content, then its children. The glyph quads of a text come right after the box they belong to,
+  so text sits where the tree puts it (an overlapping later widget covers it), unlike the
+  one-text-pass-per-layer limit of the original design.
+- **Shapes (`shapes.rs`):** a rounded rectangle is a convex polygon (corner arcs of 3 to 16
+  segments). A fill is a fan plus a one pixel ring whose outer vertices have alpha 0, so edge
+  pixels get their coverage under `Blend::Alpha`; a border is a four-row strip (fade in, solid,
+  solid, fade out) of the same ring pair. Radii under 1 px and plain rectangles are pixel snapped
+  and not feathered. `set_antialias(false)` (used for SDL's **software** renderer, which
+  rasterises on integer vertices) gives hard edges at whole-pixel coordinates instead.
+- **Text:** glyph quads (`Nearest`, integer positions, sub-pixel bins) from the atlas texture,
+  tinted by the vertex colour; colour glyphs (emoji) are drawn untinted. One `triangles` call per
+  text. Glyphs that do not fit are skipped and the atlas is cleared and re-recorded on the next
+  frame (also when it is 90% used).
+- **Images:** one textured quad (`Filter::Linear`) with uv cropped for `Cover` / `None`, clipped
+  to the node.
+- **Clipping:** `Scroll` and text inputs use `Draw2D::set_clip` (the clip is flushed between
+  geometry and text so draw order is kept); the scrollbar thumb is drawn over the content.
+- **Colours** are the style's sRGB values, straight alpha, `opacity` folded into the alpha.
+  wgpu blends the feathered edges in linear space and SDL in encoded space, so borders look a
+  little brighter on wgpu (measured: 0.7% of the pixels of the demo menu differ by more than 64
+  between the two modes, mean 0.9/255).
+- **DPI:** the list is physical pixels; glyphs are rasterised at `font_size * scale`, so text is
+  sharp at 2x. `resize(logical, scale)` re-layouts nothing but the list (and the layout, which
+  uses logical px, is unchanged apart from the window size).
+- **Fonts:** the bundled Inter (regular, bold) and the fonts the game loads
+  (`UiTree::load_font`, journal `Font`). System fonts are opt-in (`with_system_fonts(true)`,
+  slower start); without them a script Inter lacks shows missing-glyph boxes.
 
 ## 5. Widgets
 
-Each widget is a small state machine fed by input events and the node's data:
-
 | Widget | State | Signals |
 |---|---|---|
-| Button | normal, hovered, pressed, focused, disabled | `Click` on release inside after a press inside; Enter/Space when focused |
-| Checkbox | as button + checked | `Changed(Bool)` |
-| Slider | normal, hovered, dragging, focused | `Changed(F32)` while dragging (value snapped to `step`); arrows when focused |
-| TextInput | cosmic-text `Editor`: cursor, selection, scroll offset, IME preedit | `Changed(Text)` per edit, `Submit` on Enter, `Focus` |
-| Scroll | offset, dragging thumb | none (wheel and thumb drag scroll it) |
+| Button | normal, hovered, pressed, focused (keyboard), disabled | `Click` on release inside after a press inside; Enter / Space when focused |
+| Checkbox | as button + checked | `Changed(Bool)` on release inside, Space / Enter |
+| Slider | normal, hovered, dragging, focused | `Changed(F32)` while dragging (snapped to `step`), Left / Right / Up / Down / Home / End |
+| TextInput | `cosmic_text::Editor`: cursor, selection, scroll offset, IME preedit | `Changed(Text)` per edit, `Submit` on Enter, `Focus` |
+| Scroll | offset per node; thumb drag | none |
 | Container, Text, Image | none | `Hover` if opted in |
+| GpuView | not drawn | `Pointer` signals when `pointer` is set |
 
-- **Hit testing:** walk visible layers from the top, nodes in reverse tree order, skipping
-  invisible and clipped-out parts. The first enabled interactive node under the pointer gets the
-  event. A visible modal layer stops the walk.
-- **Focus:** click to focus, Tab / Shift+Tab in tree order, Escape blurs a text input. Keyboard
-  capture while a text input is focused.
-- **Text input details:**
-  - editing through `cosmic_text::Editor` (insert, delete, cursor moves, word moves with Ctrl,
-    selection with Shift, select all);
-  - clipboard copy/cut/paste through SDL3's clipboard (a small window-trait addition);
-  - IME: needs the `TextEditing` input event and `set_text_input_area` from the API doc
-    (section 11); the preedit text is drawn underlined at the cursor;
-  - `password` draws bullets, `max_len` counts characters;
-  - text input mode is enabled on the window only while a text input is focused.
-- **Scroll:** wheel scrolls the main axis, a thin thumb is drawn when content overflows and can be
-  dragged; focus moving into a hidden child scrolls it into view.
+- **Hit testing:** layers from the top (a modal layer ends the walk), children in reverse tree
+  order, `Scroll` nodes clip and shift. A node blocks the pointer when it is not a plain
+  Container / Text (or has a background or border). The topmost interactive node under the pointer
+  is the target; disabled ones capture but do nothing.
+- **Capture** (API.md section 10): pointer while over a blocking node, a modal layer is visible or
+  a drag is active; keyboard while a text input has focus or a modal layer is visible. Keys the UI
+  used (Tab, Escape with a focus, Enter / Space on a focused widget) are captured too, and so is
+  their release.
+- **Focus:** clicking a text input or slider focuses it; Tab / Shift+Tab walk enabled buttons,
+  checkboxes, sliders and text inputs in tree order (inside the topmost modal layer only);
+  Escape blurs. The focus ring (the theme's `focused` style) shows on buttons and checkboxes only
+  for keyboard focus. Tab scrolls the widget into view in its `Scroll` ancestors.
+- **Text input:** `cosmic_text::Editor` does insertion, deletion, grapheme / word motions and
+  selection; Shift extends, a plain arrow collapses; Ctrl+A / C / X / V use
+  `efeengine_core::clipboard`; double click selects a word; `max_len` counts characters and cuts
+  inserted text; newlines become spaces; `password` draws bullets, caret and selection are mapped
+  between the real and the drawn text, copy and cut are disabled. The IME preedit (`TextEditing`)
+  is drawn at the caret with an underline; `take_text_input` reports the field's area
+  (logical px) while one has focus. The caret blinks (530 ms) unless switched off.
+- **Scroll:** the wheel scrolls the main axis (one line = 40 logical px, pixel wheels are divided
+  by the scale), the thumb is a 6 px bar at the right edge shown when the content overflows and can
+  be dragged.
+- Values edited by the user are written into the backend's model at once and reported as
+  `Changed`; the plugin writes them back into the tree (API.md section 7).
 
 ## 6. Size and cost
 
-- New dependencies: taffy, glyphon (cosmic-text, swash, fontdb, etagere, lru). Measure binary size
-  and compile time in phase F1 and record them next to the iced spike numbers.
-- Expected frame cost: layout only on change; one quad batch and one text batch per layer; glyph
-  atlas uploads only for new glyphs.
-- Code estimate: about 3-5k lines for layout sync, renderer, widgets and text input. The text input
-  (editing, clipboard, IME) is the largest single piece.
+- **New dependencies:** `taffy` (+ `slotmap`, `serde` as taffy's own dependency) and `cosmic-text`
+  (already in the tree through iced; with iced off it brings `fontdb`, `swash`, `skrifa`,
+  `harfrust`, `unicode-*`).
+- **Binary size** (release, stripped, measured 2026-11-18): a probe binary that builds a tree,
+  runs the backend for one frame and replays the `DrawList` is 4.45 MB against 0.77 MB for the
+  same probe with the headless backend, so the fallback adds about **3.7 MB** (of which the two
+  bundled Inter faces are 0.83 MB; the rest is cosmic-text / swash / harfrust / skrifa,
+  taffy and the backend). The spike measured the iced backend at +3.9 MB on `ui_demo` (iced,
+  wgpu glue and its own cosmic-text), so the sizes are comparable; with both features on the
+  shared cosmic-text is compiled once. `ui_demo`'s own binary does not grow until the plugin
+  wires the backend in (Stage 2), the linker drops it.
+- **Frame cost:** layout only when the model or window changed; the frame is recorded only when
+  something visible changed (hover, press, focus, edit, scroll, caret phase, new model); one
+  `triangles` call per box mesh run and one per text; atlas uploads only when glyphs were added
+  (whole texture replace, 4 MB; a sub-rect update would cut that).
+- **Code:** about 2.8k lines in `crates/ui/src/fallback` and 750 lines of tests.
 
-## 7. Roadmap
+## 7. API of the backend (what a host calls)
 
-### F0: decide whether it is needed
+```rust
+let mut b = FallbackBackend::new();            // or with_system_fonts(true)
+b.init(&mut cx);                               // UiBackend: init / input / sync / drain_signals / capture / resize / take_*
+b.set_atlas_texture(handle);                   // a texture the host created for the glyph atlas
+// every frame:
+b.prepare();                                   // layout + record; false = nothing changed
+if let Some(img) = b.take_atlas_image() { /* replace the atlas texture with img */ }
+b.draw(&mut draw2d);                           // replay onto a Draw2D (or read b.draw_list())
+```
 
-- [ ] After the iced spike (UI roadmap phase 0), compare: iced works with the engine's wgpu? binary
-  size? frame cost? If iced is fine, F1+ waits. F1 can still run as a small proof that the API is
-  backend-neutral.
+Also: `set_caret_blink(false)`, `set_antialias(false)` (software renderer), `widget_rect(id)`
+(absolute logical rectangle, for tests and focus rings), `counters()`, and
+`fallback::offscreen::{record, render_sdl, render_wgpu}` which run the whole path into an
+offscreen target and return RGBA8 pixels (used by the tests and the screenshots).
 
-### F1: static UI
+## 8. Tests and screenshots
 
-- [ ] `taffy` mirror of the `UiTree`, journal-driven sync, style conversion.
-- [ ] Quad pipeline (rounded rect + border, SDF), images, glyphon text, per-layer order, DPI.
-- [ ] Container, Text, Image; layers and anchors.
-- [ ] Overlay pass through the engine's `add_render_overlay` (API doc section 12).
+- `crates/ui/tests/fallback.rs` (29, headless): layout (column gap/padding, Fill/Portion,
+  justify/align, anchors and offsets, wrapping, image size, hidden nodes), recording (atlas and
+  geometry commands, clip of a scroll node, image uv for Cover, scale factor, no re-record when
+  idle), interaction (click on release inside, disabled, hover / press colours, capture, modal,
+  checkbox, slider drag and keys, Tab / Enter / Space, hover signals, wheel, thumb drag,
+  scroll-into-view) and text input (typing, Backspace / Delete, selection, clipboard, `max_len`,
+  caret placement by click, password, IME request, cursor icon, removed widgets, glyph cache).
+- `crates/ui/tests/fallback_pixels.rs`: pixel checks through SDL's software renderer (runs
+  anywhere, 1x and 2x) and, `#[ignore]`d, through wgpu on a GPU plus the wgpu/SDL comparison.
+- `examples/ui_demo/tests/fallback_screenshot.rs`: PNGs of the demo menu
+  (`EFE_FALLBACK_SDL=...`, `EFE_FALLBACK_WGPU=...`; the wgpu one is `#[ignore]`d).
+- Unit tests in `shapes.rs`, `paint.rs`, `edit.rs`.
 
-**Exit:** a static panel with text and an image draws correctly at 1x and 2x and on resize.
+Compared with the iced screenshot the layout, colours, rounded panel, checkbox, slider and text
+input match closely; differences are a 1 to 3 px vertical drift of some rows (text metrics), the
+slider rail drawn the full width (as iced), and the GPU view shown as an outline.
 
-### F2: interaction
+## 9. Stage 2: wiring it into the engine (plan)
 
-- [ ] Input filter, hit testing, capture flags, modal layers.
-- [ ] Button, Checkbox, Slider with all states and theme state styles.
-- [ ] Focus and Tab order, keyboard activation.
+Waiting for the multi-window work (it owns `crates/core` window / render / input / `engine.rs` and
+`crates/ui/src/{plugin,backend,web,native}`).
 
-**Exit:** the API doc's settings menu (minus the text input) works and passes the shared
-conformance tests.
+1. **Core hook, both modes.** A `RenderOverlay`-like trait that hands out a `Draw2D`:
+   `trait Draw2DOverlay { fn render(&mut self, cx: &mut Overlay2D); }` with `Overlay2D { window,
+   size, scale_factor, draw: &mut dyn Draw2D, textures: &mut dyn OverlayTextures }` and
+   `Engine::add_draw2d_overlay`. wgpu mode records a `DrawList` per window and draws it with a
+   `WgpuDraw2D` + `GpuTextures` after the renderers and the normal overlays, before present; SDL
+   mode passes the `SdlDraw2D` itself after the sprites, before `present` (and drops the
+   "overlays need wgpu" warning for these).
+2. **Textures of the overlay.** The glyph atlas is created once through `Textures::add` (so the
+   handle exists in the CPU store); later updates must not wait for the next frame's
+   `TextureChanges`, so `OverlayTextures::replace(handle, &Image)` uploads straight into the
+   active table (`GpuTextures::upload` / `SdlDraw2D` texture upload). Whole-texture replace is
+   enough for now; a sub-rect update (`Textures::update_rect`, `queue.write_texture`,
+   `SDL_UpdateTexture` with a rect) is the optimisation when the 4 MB re-upload shows up in
+   profiles.
+3. **Backend trait.** `UiBackend::draw2d(&mut self, cx: &mut Overlay2D)` next to the wgpu
+   `render`; the plugin registers the Draw2D overlay when the backend is the fallback (per window:
+   one backend instance per window already exists with the multi-window work).
+4. **`UiPlugin`.** Feature `fallback`, `UiPlugin::fallback()`, and `UiPlugin::new()` picks:
+   wgpu mode -> iced (if on) else fallback; SDL mode -> fallback (iced cannot draw there), with a
+   log line. `set_antialias(false)` when the SDL renderer name is `software`.
+5. **Input.** Already shaped like the iced backend (`input` from the core input filter, capture,
+   `take_text_input`, `take_cursor_icon`); nothing extra.
+6. **Verify.** coin_dash menus in `EFE_GPU_MODE=sdl` (pause menu, settings), a window screenshot,
+   `cargo xtask` run of ui_demo with `--features fallback`.
 
-### F3: text input and scroll
+## 10. Measurements
 
-- [ ] TextInput with `cosmic_text::Editor`, selection, clipboard, password, max length.
-- [ ] IME: `TextEditing` event and `set_text_input_area` in core, preedit drawing.
-- [ ] Scroll with clipping, wheel, thumb drag, scroll-into-view.
+| What | Value |
+|---|---|
+| Probe binary, headless backend | 0.77 MB |
+| Probe binary, fallback backend | 4.45 MB (+3.7 MB) |
+| wgpu vs SDL (software) pixels, demo scene | 0.66% of the pixels differ by more than 64/255, mean 0.93/255 |
 
-**Exit:** the full settings menu works, including typing a name with an IME.
+## 11. Roadmap
 
-### F4: polish
+### F1: static UI (done)
 
-- [ ] Font loading at runtime, bold, text alignment, opacity.
-- [ ] Screenshot comparison against the web and iced backends for the example menus.
-- [ ] Performance check with a large list (1000 rows in a scroll).
+- [x] taffy mirror of the tree, journal-driven rebuild, style conversion.
+- [x] Rounded rect + border meshes, images, cosmic-text glyph atlas, DPI.
+- [x] Container, Text, Image; layers and anchors.
+- [ ] Overlay pass through the engine (Stage 2).
 
-## 8. Risks
+### F2: interaction (done)
+
+- [x] Hit testing, capture flags, modal layers.
+- [x] Button, Checkbox, Slider with state styles.
+- [x] Focus and Tab order, keyboard activation.
+
+### F3: text input and scroll (done)
+
+- [x] TextInput with `cosmic_text::Editor`, selection, clipboard, password, max length.
+- [x] IME preedit drawing and area request (needs the `TextEditing` event and
+  `set_text_input_area` that the plugin already forwards).
+- [x] Scroll with clipping, wheel, thumb drag, scroll-into-view.
+
+### F4: polish (open)
+
+- [ ] Opacity on images in a scroll, per-widget font loading at runtime is done (journal `Font`).
+- [ ] Shaped-text cache across rebuilds for very large lists (cells are kept per node already).
+- [ ] 1000-row scroll performance check (layout is O(n) per change; painting culls by clip).
+- [ ] Sub-rect atlas update; premultiplied atlas to blend correctly in `Premultiplied` mode.
+- [ ] RTL caret placement (caret x uses the first glyph of the cluster).
+- [ ] `GpuView` through a render-to-texture path (needs wgpu; not available in SDL mode).
+
+## 12. Risks
 
 | Risk | Plan |
 |---|---|
-| Text input and IME take longer than expected | It is the last phase; F1-F2 are useful without it |
-| glyphon API changes between versions | Pin the version; glyphon is small and easy to follow |
-| Draw order limits (text above quads per layer) | Documented; a widget that needs more uses a higher layer |
-| Look differs from web and iced | Same theme resolution code; screenshot comparison in F4 |
+| SDL's software renderer rasterises on integer vertices | `set_antialias(false)`: hard-edged shapes, text and images unaffected |
+| Look differs from web and iced | Same theme resolution; screenshot comparison in section 8 |
+| Atlas re-upload cost | Whole-texture replace only when glyphs were added; sub-rect update is the planned fix |
+| cosmic-text fork pinned to iced's rev | Same rev, compiled once with iced on; move both together |

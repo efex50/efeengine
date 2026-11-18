@@ -146,7 +146,7 @@ work in both modes, with one implementation.
   overlay hook. _Done when_ coin_dash runs in both modes and screenshots of the two match closely
   (same sprites, layers, alpha; filtering may differ).
 - [x] **4C.5 `auto` mode fallback.** No wgpu adapter → SDL mode, with a log line saying so.
-- [ ] **4C.6 Fallback UI on Draw2D.** Revise `FALLBACK_NATIVE.md`, then implement its phases on `Draw2D`.
+- [ ] **4C.6 Fallback UI on Draw2D.** `FALLBACK_NATIVE.md` revised; the backend (F1 to F3) is built in `crates/ui/src/fallback` and renders the ui_demo menu in both modes offscreen. Open: the engine overlay hook that hands out a `Draw2D`, plugin selection, coin_dash menus in SDL mode.
 - [ ] **4C.7 PS Vita (homebrew).** Rust target `armv7-sony-vita-newlibeabihf` (tier 3, nightly
   `build-std`), VitaSDK, `cargo-vita` for `.vpk`, SDL3's Vita port. Pre-built `.efvm` scripts (no `.efa`
   compile on 444 MHz). _Done when_ coin_dash runs in the Vita3K emulator, then on hardware.
