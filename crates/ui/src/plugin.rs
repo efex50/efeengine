@@ -111,6 +111,9 @@ impl Plugin for UiPlugin {
         engine.insert_resource(tree);
         engine.insert_resource(UiBindings::new());
         engine.add_event::<UiSignal>();
+        if let Some(scripts) = crate::scripting::register(engine) {
+            crate::scripting::add_systems(engine, scripts);
+        }
 
         let mut bcx = UiBackendCx::new((0.0, 0.0), 1.0);
         backend.init(&mut bcx);
