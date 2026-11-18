@@ -5,7 +5,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use wasm_bindgen::prelude::*;
 
 use crate::{debug_info, engine::{config::{EngineConfig, Threads}, error::EngineError, events::EventRegistry, parallel::Executor, input::{Filter, InputFilter, GamepadState, InputEvent, InputEventKind, InputState, WindowEvent, WindowId}, messages::Message, resources::{Res, Resources}, schedule::{Access, Ctx, EngineCommand, Commands, ParCtx, Schedule, ScheduleError, Stage, SystemEntry}, plugin::{Plugin, PluginError}, scripting::{CacheConfig, CacheDir, CacheStats, ScriptCache, CACHE_FORMAT, AssetHandler, LoadError, LoadInput, Loaded, ModSource, LoadReport, Reloaded, UnloadReport, ModError, ModOptions, ModPolicy, ModuleId, PackageInfo, ScriptError, ScriptEvent, Scripting}, time::Time, types::{ScriptType, TypeError, TypeRegistry}, window::{GameWindowManager, WindowDesc}}, log::{LogCrateLogger, Logger, NewDefaultLogger}, recv_messages};
-use crate::engine::components::{Camera, GlobalTransform, MeshHandle, Parent, Sprite, TextureHandle, Transform, Velocity, Visibility};
+use crate::engine::components::{Camera, EditorId, GlobalTransform, MeshHandle, Parent, Sprite, TextureHandle, Transform, Velocity, Visibility};
 use crate::engine::render::{self as rendering, gpu::GpuContext, CustomRenderer, RenderFrame, RenderOverlay, RenderWarnings, Renderer2D, Renderer3D, Renderers, Textures};
 use crate::{global_info, thread_pool::{init_global_pool, init_global_pool_auto}};
 pub mod window;
@@ -32,6 +32,7 @@ pub mod config;
 pub mod input;
 pub mod scripting;
 pub mod scene;
+pub mod schema;
 
 pub static WASM_PATH:OnceCell<String> =OnceCell::new();
 #[cfg(target_family = "wasm")]
@@ -273,6 +274,7 @@ impl Engine {
         engine.register::<Visibility>().expect("built-in components register");
         engine.register::<Parent>().expect("built-in components register");
         engine.register::<GlobalTransform>().expect("built-in components register");
+        engine.register::<EditorId>().expect("built-in components register");
         Ok(engine)
     }
 
@@ -869,6 +871,12 @@ impl Engine {
         std::fs::write(path, self.export_api_index())
     }
 
+    /// Write the component schema ([`export_schema`](Self::export_schema)) to `path`.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn write_schema(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.export_schema())
+    }
+
     /// Make `game_loop` write the API index to `path` and return without running frames (what
     /// `EFE_API_EXPORT=<path>` does at creation). `None` turns it off.
     #[cfg(not(target_family = "wasm"))]
@@ -1160,6 +1168,11 @@ impl Engine {
         for c in cmds {
             match c {
                 EngineCommand::Quit => self.request_shutdown(),
+                EngineCommand::Task(t) => {
+                    if let Some(f) = t.take() {
+                        f(self);
+                    }
+                }
                 EngineCommand::SetTitle(t) => self.windows.set_title(WindowId::MAIN, t),
                 EngineCommand::SetFrameRate(f) => self.set_frame_rate(f),
                 // Cursor shape / visibility go to the window the pointer is in; grab and text input to the focused one.
@@ -1663,6 +1676,12 @@ impl Engine {
                 match self.write_api_index(&path) {
                     Ok(()) => self.logger.info(&format!("API index written to {}", path.display())),
                     Err(e) => self.logger.error(&format!("cannot write the API index to {}: {e}", path.display())),
+                }
+                // the component schema goes next to it: `<path>` with the extension `efschema.json`
+                let schema = schema::schema_path(&path);
+                match self.write_schema(&schema) {
+                    Ok(()) => self.logger.info(&format!("component schema written to {}", schema.display())),
+                    Err(e) => self.logger.error(&format!("cannot write the schema to {}: {e}", schema.display())),
                 }
                 return;
             }

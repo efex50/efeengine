@@ -25,6 +25,7 @@
 //! Loading validates the whole file before it spawns anything: a bad file changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::any::{Any, TypeId};
 use std::sync::Arc;
 use std::fmt;
 use std::path::Path;
@@ -35,6 +36,7 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::Engine;
+use super::resources::Resources;
 use super::schedule::Stage;
 use super::types::TypeEntry;
 
@@ -147,6 +149,8 @@ pub enum SceneError {
     Insert { scene: String, entity: usize, component: String, msg: String },
     #[error("scene `{scene}`: entity {entity}: id {id} is used by an earlier entity")]
     DuplicateId { scene: String, entity: usize, id: u64 },
+    #[error("scene `{scene}`: entity {entity}: EditorId {id} is used by an earlier entity")]
+    DuplicateEditorId { scene: String, entity: usize, id: u64 },
     #[error("snapshot is inconsistent: {0}")]
     Snapshot(String),
     #[error("scene file `{path}`: {msg}")]
@@ -223,7 +227,10 @@ fn write_prim(p: Prim, v: &SceneValue, out: &mut [u8]) -> Result<(), String> {
         }
         Prim::Bool => match v {
             SceneValue::Bool(b) => out[0] = u8::from(*b),
-            _ => return Err(format!("expected true or false, got {v:?}")),
+            _ => match int_of(v) {
+                Some(i @ (0 | 1)) => out[0] = i as u8,
+                _ => return Err(format!("expected true, false, 0 or 1, got {v:?}")),
+            },
         },
     }
     Ok(())
@@ -340,8 +347,41 @@ pub(crate) struct ActiveScene {
     systems: BTreeSet<String>,
 }
 
+/// A resource the game opted in to snapshots (E0.4). Resources have no byte layout, so they
+/// cannot go through the type registry like components. Instead the game registers a resource
+/// type `T: Clone` with [`Engine::register_snapshot_resource`]; a snapshot then keeps a clone
+/// of the value in memory (never in scene files) and `restore` puts the clone back, replacing
+/// the current value. The cost of a snapshot is therefore visible and opt-in per resource.
+/// Resources not registered are untouched by restore and listed by [`Engine::snapshot_gaps`].
+pub(crate) struct SnapResource {
+    id: TypeId,
+    name: &'static str,
+    capture: fn(&Resources) -> Option<ResourceCopy>,
+    put_back: fn(&mut Resources, &ResourceCopy),
+}
+
+impl fmt::Debug for SnapResource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name)
+    }
+}
+
+/// One cloned resource value inside a [`Snapshot`].
+#[derive(Clone)]
+pub struct ResourceCopy {
+    id: TypeId,
+    value: Arc<dyn Any + Send + Sync>,
+}
+
+impl fmt::Debug for ResourceCopy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ResourceCopy")
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct SceneState {
+    snap_resources: Vec<SnapResource>,
     active: Option<ActiveScene>,
     next_id: u32,
     global: BTreeSet<String>,
@@ -481,6 +521,12 @@ impl Engine {
     /// Name of the active scene, if one is loaded.
     pub fn current_scene(&self) -> Option<&str> {
         self.scene_state.active.as_ref().map(|a| &*a.name)
+    }
+
+    /// The system names the active scene lists (`plugin:` entries expanded), sorted; empty
+    /// without an active scene.
+    pub fn scene_systems(&self) -> Vec<String> {
+        self.scene_state.active.as_ref().map(|a| a.systems.iter().cloned().collect()).unwrap_or_default()
     }
 
     /// Switch to `scene` (docs/SCENES.md, "Switching rules"):
@@ -626,7 +672,12 @@ impl Engine {
         }
         let mut out = Vec::with_capacity(scene.entities.len());
         let mut ids = BTreeSet::new();
+        let mut editor_ids = BTreeSet::new();
         for (i, ent) in scene.entities.iter().enumerate() {
+            let editor_id = ent.components.get("EditorId").and_then(|f| f.get("id")).and_then(int_of);
+            if let Some(id) = editor_id.filter(|id| !editor_ids.insert(*id)) {
+                return Err(SceneError::DuplicateEditorId { scene: name.clone(), entity: i, id: id as u64 });
+            }
             if let Some(id) = ent.id.filter(|id| !ids.insert(*id)) {
                 return Err(SceneError::DuplicateId { scene: name.clone(), entity: i, id });
             }
@@ -674,16 +725,68 @@ pub struct Snapshot {
     /// The world's change tick when the snapshot was taken (informational: change ticks only
     /// move forward, so restore does not rewind them).
     pub tick: u32,
+    /// Clones of the resources registered with [`Engine::register_snapshot_resource`] that were
+    /// present at snapshot time. In memory only.
+    pub resources: Vec<ResourceCopy>,
+    /// Type names of resources that were present but not registered: restore leaves them as
+    /// they are, so they are not part of the play-mode fidelity (docs/EDITOR.md).
+    pub gaps: Vec<String>,
     active: Option<(u32, String, BTreeSet<String>)>,
     next_id: u32,
 }
 
 impl Engine {
+    /// Opt resource `T` in to snapshots: `snapshot()` clones it, `restore()` puts the clone
+    /// back (replacing the current value, or inserting it if it was removed). Registering twice
+    /// is a no-op. A resource that is absent at snapshot time is not recorded, and restore then
+    /// leaves the current one alone.
+    pub fn register_snapshot_resource<T: Clone + Send + Sync + 'static>(&mut self) -> &mut Self {
+        let id = TypeId::of::<T>();
+        if self.scene_state.snap_resources.iter().any(|r| r.id == id) {
+            return self;
+        }
+        self.scene_state.snap_resources.push(SnapResource {
+            id,
+            name: std::any::type_name::<T>(),
+            capture: |res| res.get::<T>().map(|v| ResourceCopy { id: TypeId::of::<T>(), value: Arc::new((*v).clone()) }),
+            put_back: |res, copy| {
+                if let Some(v) = copy.value.downcast_ref::<T>() {
+                    res.insert(v.clone());
+                }
+            },
+        });
+        self
+    }
+
+    /// Type names of the resources present now that are not registered for snapshots: what
+    /// `restore` will not rewind. Includes the engine's own resources. Sorted.
+    pub fn snapshot_gaps(&self) -> Vec<String> {
+        let mut gaps: Vec<String> = self
+            .state
+            .resources
+            .type_names()
+            .filter(|(id, _)| !self.scene_state.snap_resources.iter().any(|r| r.id == *id))
+            .map(|(_, n)| n.to_string())
+            .collect();
+        gaps.sort();
+        gaps
+    }
+
+    /// The entity whose [`EditorId`](super::components::EditorId) is `id`, if any. O(n) over
+    /// the entities that have the component (editors call it on selection changes, not per
+    /// frame). If a world holds duplicates (scene loading rejects them) the first found wins.
+    pub fn entity_by_editor_id(&self, id: u64) -> Option<Entity> {
+        self.world().query::<(Entity, &super::components::EditorId)>().iter().find(|(_, e)| e.id == id).map(|(e, _)| e)
+    }
+
     /// Capture the scene state of the world in memory (see [`Snapshot`]): every entity with a
     /// registered, writable component or a [`SceneOwned`] tag, the enabled flag of every system,
     /// the world's tick and which scene is current.
     ///
-    /// Not captured: resources, read-only components, Rust components without a registered
+    /// Resources are captured only when registered with
+    /// [`register_snapshot_resource`](Self::register_snapshot_resource).
+    ///
+    /// Not captured: other resources, read-only components, Rust components without a registered
     /// layout, the global-system set and event queues.
     pub fn snapshot(&self) -> Snapshot {
         let mut list: Vec<(u64, Entity)> = self.captured_entities(false).into_iter().map(|e| (super::types::entity_to_bits(e), e)).collect();
@@ -714,6 +817,8 @@ impl Engine {
             owners,
             systems,
             tick: self.change_tick().get(),
+            resources: self.scene_state.snap_resources.iter().filter_map(|r| (r.capture)(&self.state.resources)).collect(),
+            gaps: self.snapshot_gaps(),
             active,
             next_id: self.scene_state.next_id,
         }
@@ -748,6 +853,13 @@ impl Engine {
         self.spawn_decoded(&snap.scene, &decoded, &owners)?;
         for (st, n, en) in &snap.systems {
             self.schedule.set_enabled_in(*st, n, *en);
+        }
+        let tick = self.state.world.increment_change_tick();
+        self.state.resources.set_tick(tick);
+        for copy in &snap.resources {
+            if let Some(r) = self.scene_state.snap_resources.iter().find(|r| r.id == copy.id) {
+                (r.put_back)(&mut self.state.resources, copy);
+            }
         }
         self.scene_state.active = snap.active.as_ref().map(|(id, name, systems)| ActiveScene { id: *id, name: Arc::from(name.as_str()), systems: systems.clone() });
         self.scene_state.next_id = self.scene_state.next_id.max(snap.next_id);

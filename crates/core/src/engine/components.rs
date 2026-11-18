@@ -227,6 +227,17 @@ impl Visibility {
     pub const HIDDEN: Visibility = Visibility { visible: 0 };
 }
 
+/// A stable identity chosen by the editor (or taken from the scene index), never a raw entity
+/// id: entity ids change on `restore`, an `EditorId` does not. It is a normal registered
+/// component, so scene files and snapshots keep its value. Ids must be unique per world; a
+/// scene (file or snapshot) with two entities of the same `EditorId` is rejected with
+/// `SceneError::DuplicateEditorId`. Look entities up with `Engine::entity_by_editor_id`.
+#[script_component]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct EditorId {
+    pub id: u64,
+}
+
 /// The entity this one is attached to: its `Transform` is relative to the parent's. A parent
 /// that is gone (or has no `Transform`) makes this entity a root.
 #[script_component]

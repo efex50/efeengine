@@ -149,3 +149,63 @@ fn invalid_snapshot_changes_nothing() {
     assert!(e.restore(&snap).is_err());
     assert_eq!(e.snapshot().scene.to_ron(), before);
 }
+
+// ---- E0.3 editor ids, E0.4 resource snapshots ----
+
+#[derive(Clone, Debug, PartialEq)]
+struct Score(u32);
+
+#[derive(Clone, Debug, PartialEq)]
+struct Unregistered(u32);
+
+#[test]
+fn editor_id_survives_restore_and_lookup_works() {
+    let mut e = engine();
+    e.load_scene_str(r#"Scene(format: 1, name: "ed", entities: [
+        (components: { "EditorId": { "id": 77 }, "Coin": { "value": 1 } }),
+        (components: { "EditorId": { "id": 5 }, "Coin": { "value": 2 } }),
+    ])"#)
+    .unwrap();
+    let before = e.entity_by_editor_id(77).unwrap();
+    assert_eq!(e.world().get::<&Coin>(before).unwrap().value, 1);
+    let snap = e.snapshot();
+    assert!(snap.scene.entities.iter().any(|x| x.components.contains_key("EditorId")));
+    e.world_mut().despawn(before).unwrap();
+    assert!(e.entity_by_editor_id(77).is_none());
+    e.restore(&snap).unwrap();
+    let after = e.entity_by_editor_id(77).unwrap();
+    assert_eq!(e.world().get::<&EditorId>(after).unwrap().id, 77);
+    assert_eq!(e.world().get::<&Coin>(after).unwrap().value, 1);
+    assert_eq!(e.world().get::<&Coin>(e.entity_by_editor_id(5).unwrap()).unwrap().value, 2);
+    assert!(e.entity_by_editor_id(6).is_none());
+}
+
+#[test]
+fn duplicate_editor_id_is_an_error() {
+    let mut e = engine();
+    let err = e
+        .load_scene_str(r#"Scene(format: 1, name: "dup", entities: [
+            (components: { "EditorId": { "id": 3 } }),
+            (components: { "EditorId": { "id": 3 } }),
+        ])"#)
+        .unwrap_err();
+    assert!(err.to_string().contains("EditorId 3"), "{err}");
+    assert_eq!(e.world().iter().count(), 0);
+}
+
+#[test]
+fn registered_resource_is_restored_and_gaps_are_listed() {
+    let mut e = engine();
+    e.insert_resource(Score(1));
+    e.insert_resource(Unregistered(1));
+    e.register_snapshot_resource::<Score>();
+    let snap = e.snapshot();
+    assert!(snap.gaps.iter().any(|n| n.ends_with("Unregistered")));
+    assert!(!snap.gaps.iter().any(|n| n.ends_with("Score")));
+    assert!(e.snapshot_gaps().iter().any(|n| n.ends_with("Unregistered")));
+    e.resources_mut().get_mut::<Score>().unwrap().0 = 9;
+    e.resources_mut().get_mut::<Unregistered>().unwrap().0 = 9;
+    e.restore(&snap).unwrap();
+    assert_eq!(e.resources().get::<Score>().as_deref(), Some(&Score(1)));
+    assert_eq!(e.resources().get::<Unregistered>().as_deref(), Some(&Unregistered(9)));
+}

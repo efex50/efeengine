@@ -89,24 +89,35 @@ Each phase ends with something a user can see. Phases map onto the existing Phas
 
 ### E0: foundations (7.2, prerequisites)
 
-- [ ] E0.1 **[S] Schema export.** `EFE_API_EXPORT` also writes the component schema (7.2). _Done when_ `Transform` and a game component appear in the exported file.
-- [ ] E0.2 **[S] `bool` in `ScriptType`.** Needed for inspector editing and for scene files with flags.
-- [ ] E0.3 **[S] Stable editor ids.** An `EditorId` component (or use of the scene index), with the rule that editor selection never stores a raw entity id.
-- [ ] E0.4 **[S] Resource registration for snapshots.** Resources a game opts in to are recorded and restored by `snapshot()` / `restore()`.
+- [x] E0.1 **[S] Schema export.** `EFE_API_EXPORT` also writes the component schema (7.2). _Done when_ `Transform` and a game component appear in the exported file.
+  - _Done: `crates/core/src/engine/schema.rs` (format in its docs; `<path>.efschema.json` next to the index), tests in `crates/core/tests/api_index.rs`._
+- [x] E0.2 **[S] `bool` in `ScriptType`.** Needed for inspector editing and for scene files with flags.
+  - _Done: `ScriptBool` (one-byte Pod wrapper, `Prim::Bool`) and `set_bool`/`field_bool`/checked `set_field` in `crates/core/src/engine/types.rs`; scene writes accept 0/1 in `scene.rs`._
+- [x] E0.3 **[S] Stable editor ids.** An `EditorId` component (or use of the scene index), with the rule that editor selection never stores a raw entity id.
+  _Done: `EditorId` in crates/core/src/engine/components.rs, `Engine::entity_by_editor_id` (O(n)) and `SceneError::DuplicateEditorId` in crates/core/src/engine/scene.rs; tests in crates/core/tests/snapshot.rs._
+- [x] E0.4 **[S] Resource registration for snapshots.** Resources a game opts in to are recorded and restored by `snapshot()` / `restore()`.
+  _Done: `Engine::register_snapshot_resource::<T: Clone>`, `Engine::snapshot_gaps`, `Snapshot::{resources, gaps}` in crates/core/src/engine/scene.rs; tests in crates/core/tests/snapshot.rs._
 - [ ] E0.5 **Prerequisite: iced platform check (6.1, 6.2, 6.3).** The editor UI is iced. Panels depend on the UI pass and input ownership.
+  - _Note (deviation): the editor is a standalone iced application in its own window (`crates/editor`, package `efeengine-editor`, native only), not embedded in the game's wgpu surface, so the 6.2/6.3 prerequisite (UI pass and input ownership inside the game surface) does not apply. This box stays open until the embedded viewport (E7.1) needs it._
 
 ### E1: link and read-only viewer (7.4, 6.4 stats/log)
 
-- [ ] E1.1 **[N] `efeengine-editor-link` plugin.** Localhost socket, versioned handshake, request drain at a fixed point per frame, `Commands` for every change.
-- [ ] E1.2 **[S] Protocol messages.** Entity list, component values (polled on request), logs, stats; no mutation yet.
-- [ ] E1.3 **[N] Editor app skeleton.** Connects, shows Hierarchy, Inspector (read-only), Stats and Log panels.
+- [x] E1.1 **[N] `efeengine-editor-link` plugin.** Localhost socket, versioned handshake, request drain at a fixed point per frame, `Commands` for every change.
+  _Done: `crates/editor-link` (`EditorLink::from_env()`, off unless `EFE_EDITOR=1`, port `EFE_EDITOR_PORT` default 7878, 127.0.0.1 only); drain system in `PostUpdate` at `order::LATE + 100`. Reads only._
+- [x] E1.2 **[S] Protocol messages.** Entity list, component values (polled on request), logs, stats; no mutation yet.
+  _Done: `crates/editor-link/src/protocol.rs` (messages, framing), `src/handler.rs` (requests, log ring buffer); tests in `crates/editor-link/tests/protocol.rs`. `editor_id` is filled from the `EditorId` component and `components` accepts an editor id (the decimal `EditorId.id`) since E2; the lookup in the handler repeats `Engine::entity_by_editor_id` over `ctx.world` because a system has no `Engine`._
+- [x] E1.3 **[N] Editor app skeleton.** Connects, shows Hierarchy, Inspector (read-only), Stats and Log panels.
+  _Done: `crates/editor` (`src/main.rs` window and panels; `src/worker.rs` connection thread with automatic reconnect; `src/conn.rs` reconnect state machine; `src/model.rs` formatting and input checks). Run `cargo run -p efeengine-editor -- --port 7878` against a game started with `EFE_EDITOR=1`. Polling: stats about 3 times a second, open entity every 0.5 s, lists and log every second. Not run against `script_demo` in this step (no display); the worker is tested against a fake game and the link tests run over real sockets. Also shows Scene (E2.2) and Systems (E2.3) panels and an Edit/Play switch._
 - _Done when_ the editor shows the live entity list, one entity's components and the log of a running `script_demo`, and disconnecting and reconnecting works.
 
 ### E2: edit mode and scene save (7.5 edit mode)
 
-- [ ] E2.1 **Edit mode.** Disable all non-global systems; re-enable the scene's on exit. Uses `set_global_system` and `set_system_enabled`.
-- [ ] E2.2 **Save.** Save the scene through `save_scene` (S1); load a scene from the Scene panel (`load_scene`, S2).
-- [ ] E2.3 **Systems panel.** Lists systems and their enabled and global flags.
+- [x] E2.1 **Edit mode.** Disable all non-global systems; re-enable the scene's on exit. Uses `set_global_system` and `set_system_enabled`.
+  _Done: request `set_mode` (`crates/editor-link/src/handler.rs`, behaviour documented in `src/protocol.rs`; tests in `crates/editor-link/tests/protocol.rs`). Deviations: (1) it needed a small core addition, `Commands::engine_task` / `EngineCommand::Task` (`crates/core/src/engine/commands.rs`, run in `Engine::apply_commands`) and `Engine::scene_systems()` (`scene.rs`), because a system only has `Ctx`, not `Engine`. (2) Leaving edit mode restores the enabled flags recorded on entry first, then enables the scene's listed systems, so systems that no scene lists are not left disabled; a `load_scene` made in edit mode re-disables non-global systems and updates the recorded flags. The link's own `editor_link_drain` is marked global._
+- [x] E2.2 **Save.** Save the scene through `save_scene` (S1); load a scene from the Scene panel (`load_scene`, S2).
+  _Done: requests `save_scene` / `load_scene` / `scene` in `crates/editor-link/src/handler.rs` (paths relative to `EditorLink::with_project_dir`, else `EFE_EDITOR_PROJECT`, else the working directory; absolute paths, `..`, empty paths rejected as `bad_path`; engine failures reply `scene_error`); Scene panel in `crates/editor/src/main.rs`. Symlinks inside the project directory are not resolved or checked._
+- [x] E2.3 **Systems panel.** Lists systems and their enabled and global flags.
+  _Done: request `systems` (`handler.rs`), panel in `crates/editor/src/main.rs`, formatting in `crates/editor/src/model.rs`._
 - _Done when_ you can open a scene, see its entities, save it, and reopen it with the same content.
 
 ### E3: play and stop (7.5 play mode)

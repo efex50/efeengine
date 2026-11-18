@@ -4,6 +4,8 @@ members = [
     "crates/core",
     "crates/core/macros",
     "crates/ui",
+    "crates/editor-link",
+    "crates/editor",
     "crates/efescript",
     "crates/efescript/proc_macros",
     "crates/efescript/strtohx",

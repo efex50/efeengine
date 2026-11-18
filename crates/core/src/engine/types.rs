@@ -114,6 +114,55 @@ macro_rules! scalar_fields {
 }
 scalar_fields!(u8 => U8, i8 => I8, u16 => U16, i16 => I16, u32 => U32, i32 => I32, u64 => U64, i64 => I64, f32 => F32, f64 => F64);
 
+/// A `bool` field of a script-visible struct. Rust's `bool` is not `Pod` (only 0 and 1 are valid
+/// values), so a `ScriptType` uses this one-byte wrapper instead; it has the layout of a `u8` and
+/// shows up as `bool` in the layout and the schema. A byte other than 0 or 1 (written by raw
+/// code) reads as `true`; the checked write paths ([`DynComponentMut::set_field`],
+/// [`DynComponentMut::set_bool`], scene files) accept only 0, 1, `false` and `true`.
+///
+/// ```
+/// use efeengine_core::prelude::*;
+/// #[script_component(name = "Door")]
+/// #[derive(Default)]
+/// struct Door { open: ScriptBool, _pad: [u8; 3], speed: f32 }
+/// assert_eq!(Door::layout().fields[0].ty, efeengine_core::efevm::Prim::Bool);
+/// assert!(ScriptBool::from(true).get());
+/// ```
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ScriptBool(pub u8);
+
+impl ScriptBool {
+    pub const FALSE: ScriptBool = ScriptBool(0);
+    pub const TRUE: ScriptBool = ScriptBool(1);
+    pub fn get(self) -> bool {
+        self.0 != 0
+    }
+}
+
+impl From<bool> for ScriptBool {
+    fn from(b: bool) -> Self {
+        ScriptBool(u8::from(b))
+    }
+}
+
+impl From<ScriptBool> for bool {
+    fn from(b: ScriptBool) -> Self {
+        b.get()
+    }
+}
+
+impl std::fmt::Debug for ScriptBool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.get(), f)
+    }
+}
+
+impl ScriptField for ScriptBool {
+    const PRIM: Prim = Prim::Bool;
+    const COUNT: u32 = 1;
+}
+
 impl<T: ScriptField, const N: usize> ScriptField for [T; N] {
     const PRIM: Prim = T::PRIM;
     const COUNT: u32 = T::COUNT * N as u32;
@@ -379,6 +428,10 @@ impl<'a> DynComponent<'a> {
     pub fn field_i32(&self, name: &str) -> Option<i32> {
         self.scalar(name, Prim::I32).and_then(|_| self.field::<i32>(name))
     }
+    /// A scalar `bool` field (a byte other than 0 reads as `true`).
+    pub fn field_bool(&self, name: &str) -> Option<bool> {
+        self.scalar(name, Prim::Bool).and_then(|_| self.field::<u8>(name)).map(|b| b != 0)
+    }
     /// A scalar `u32` field.
     pub fn field_u32(&self, name: &str) -> Option<u32> {
         self.scalar(name, Prim::U32).and_then(|_| self.field::<u32>(name))
@@ -405,6 +458,9 @@ impl DynView<'_> {
     pub fn field_f32(&self, name: &str) -> Option<f32> {
         self.get().field_f32(name)
     }
+    pub fn field_bool(&self, name: &str) -> Option<bool> {
+        self.get().field_bool(name)
+    }
 }
 
 /// The borrow behind [`TypeRegistry::view_mut`].
@@ -421,6 +477,9 @@ impl DynViewMut<'_> {
     pub fn set_field<T: bytemuck::Pod>(&mut self, name: &str, value: T) -> bool {
         self.get_mut().set_field(name, value)
     }
+    pub fn set_bool(&mut self, name: &str, value: bool) -> bool {
+        self.get_mut().set_bool(name, value)
+    }
 }
 
 /// A mutable typed view of a mod-defined component (see [`DynComponent`]).
@@ -434,6 +493,10 @@ impl<'a> DynComponentMut<'a> {
     /// there is no such field or the size differs.
     pub fn set_field<T: bytemuck::Pod>(&mut self, name: &str, value: T) -> bool {
         let Some(f) = field_of(self.desc, name, size_of::<T>()) else { return false };
+        // a `bool` field holds only 0 or 1
+        if f.ty == Prim::Bool && bytemuck::bytes_of(&value).iter().any(|&b| b > 1) {
+            return false;
+        }
         let at = f.offset as usize;
         match self.bytes.get_mut(at..at + size_of::<T>()) {
             Some(dst) => {
@@ -441,6 +504,14 @@ impl<'a> DynComponentMut<'a> {
                 true
             }
             None => false,
+        }
+    }
+    /// Write the scalar `bool` field `name`. `false` if there is no such field or it is not a
+    /// single `bool`.
+    pub fn set_bool(&mut self, name: &str, value: bool) -> bool {
+        match self.desc.field_named(name) {
+            Some(f) if f.ty == Prim::Bool && f.count == 1 => self.set_field(name, u8::from(value)),
+            _ => false,
         }
     }
     /// Read-only access to the same bytes.

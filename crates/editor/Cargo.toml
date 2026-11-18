@@ -1,0 +1,20 @@
+[package]
+name = "efeengine-editor"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Standalone iced editor for efeengine games. Talks to a running game over the editor-link protocol (docs/EDITOR.md). Native only."
+
+[lib]
+name = "efeengine_editor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "efe-editor"
+path = "src/main.rs"
+
+[dependencies]
+efeengine-editor-link = { path = "../editor-link" }
+serde_json = "1.0.145"
+# The same iced commit as crates/ui. `tokio` gives `iced::time::every` for the poll tick.
+iced = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", features = ["tokio"] }

@@ -12,9 +12,38 @@ use crate::engine::types::TypeRegistry;
 use crate::engine::input::WindowId;
 use crate::engine::window::{CursorIcon, WindowDesc};
 
+/// A one-shot closure that gets `&mut Engine` when the stage's commands apply (see
+/// [`Commands::engine_task`]). Cloning shares the closure; it runs at most once.
+#[derive(Clone)]
+pub struct EngineTask(std::sync::Arc<std::sync::Mutex<Option<TaskFn>>>);
+
+/// The closure an [`EngineTask`] runs.
+pub type TaskFn = Box<dyn FnOnce(&mut crate::engine::Engine) + Send>;
+
+impl EngineTask {
+    /// Take the closure (the first caller gets it, later ones `None`).
+    pub fn take(&self) -> Option<TaskFn> {
+        self.0.lock().ok().and_then(|mut g| g.take())
+    }
+}
+
+impl std::fmt::Debug for EngineTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EngineTask")
+    }
+}
+
+impl PartialEq for EngineTask {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 /// A control request a system makes of the engine; applied after the stage ends.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineCommand {
+    /// Run a closure with the whole engine (`Commands::engine_task`).
+    Task(EngineTask),
     Quit,
     SetTitle(String),
     SetFrameRate(f32),
@@ -114,6 +143,12 @@ impl Commands {
     /// Unload the active scene at the end of the current stage (see `Engine::unload_scene`).
     pub fn unload_scene(&mut self) {
         self.list.push(EngineCommand::UnloadScene);
+    }
+    /// Run `f` with `&mut Engine` when the stage's commands apply, after the world changes and
+    /// the other control requests queued before it. For tools (the editor link) that need
+    /// engine-level calls such as `save_scene` or `set_system_enabled` from inside a system.
+    pub fn engine_task(&mut self, f: impl FnOnce(&mut crate::engine::Engine) + Send + 'static) {
+        self.list.push(EngineCommand::Task(EngineTask(std::sync::Arc::new(std::sync::Mutex::new(Some(Box::new(f)))))));
     }
     pub fn quit(&mut self) {
         self.list.push(EngineCommand::Quit);

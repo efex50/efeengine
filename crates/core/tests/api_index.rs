@@ -137,7 +137,7 @@ fn every_registered_component_is_in_the_index_with_its_layout() {
     e.register_struct(desc).unwrap();
 
     let idx = e.api_index();
-    assert_eq!(e.types().entries().len(), 11); // 9 built-ins + Follow + ModStat
+    assert_eq!(e.types().entries().len(), 12); // 10 built-ins + Follow + ModStat
     for entry in e.types().entries() {
         let t = idx.struct_type(entry.name()).unwrap_or_else(|| panic!("{} is registered but not in the index", entry.name()));
         assert_eq!(t, entry.desc());
@@ -169,7 +169,7 @@ fn every_registered_component_is_in_the_index_with_its_layout() {
     assert_eq!(idx.struct_type("ModStat").unwrap().owner, "somemod");
     // a duplicate does not leave a half-registered type behind
     assert!(e.register_component::<Follow>().is_err());
-    assert_eq!(e.api_index().types.len(), 11);
+    assert_eq!(e.api_index().types.len(), 12);
 }
 
 #[test]
@@ -398,4 +398,89 @@ fn every_registered_event_is_in_the_index_with_a_doc_and_vice_versa() {
     e.unload_module(id).unwrap();
     check(&e, &["game.hit", "game.over"]);
     assert_eq!(e.api_index(), before);
+}
+
+/// A component with a `bool`, for the schema and the byte-level path.
+#[script_component(name = "Door")]
+#[derive(Default, Debug, PartialEq)]
+struct Door {
+    /// Is it open.
+    open: ScriptBool,
+    _pad: [u8; 3],
+    speed: f32,
+}
+
+fn schema_field<'a>(c: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    c["fields"].as_array().unwrap().iter().find(|f| f["name"] == name).unwrap_or_else(|| panic!("no field {name}"))
+}
+
+fn schema_component<'a>(s: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    s["components"].as_array().unwrap().iter().find(|c| c["name"] == name).unwrap_or_else(|| panic!("no component {name}"))
+}
+
+#[test]
+fn schema_lists_transform_and_game_components() {
+    let mut e = engine();
+    e.register::<Door>().unwrap();
+    e.register_component::<Follow>().unwrap();
+    let s: serde_json::Value = serde_json::from_str(&e.export_schema()).unwrap();
+    assert_eq!(s["format"], "efe-schema");
+    assert_eq!(s["version"], 1);
+    assert_eq!(s["game"], "index_game");
+
+    let t = schema_component(&s, "Transform");
+    assert_eq!(t["owner"], "engine");
+    let pos = schema_field(t, "position");
+    assert_eq!((pos["type"].as_str(), pos["count"].as_u64(), pos["offset"].as_u64()), (Some("f32"), Some(2), Some(0)));
+    assert_eq!(t["size"].as_u64().unwrap(), Transform::layout().size as u64);
+
+    let f = schema_component(&s, "Follow");
+    assert_eq!(schema_field(f, "target")["type"], "entity");
+    assert_eq!(schema_field(f, "speed")["type"], "f32");
+    assert_eq!(schema_field(f, "speed")["offset"], 8);
+
+    let d = schema_component(&s, "Door");
+    assert_eq!(schema_field(d, "open")["type"], "bool");
+    assert_eq!(schema_field(d, "open")["size"], 1);
+    assert_eq!(schema_field(d, "open")["doc"], "Is it open.");
+    assert_eq!(schema_field(d, "speed")["offset"], 4);
+}
+
+#[test]
+fn schema_is_written_next_to_the_index() {
+    let dir = std::env::temp_dir().join(format!("efe_schema_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut e = engine();
+    e.register::<Door>().unwrap();
+    let api = dir.join("game.efapi");
+    e.set_api_export_path(Some(api.clone()));
+    e.game_loop();
+    assert!(api.exists());
+    let s: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("game.efschema.json")).unwrap()).unwrap();
+    assert_eq!(schema_field(schema_component(&s, "Door"), "open")["type"], "bool");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn bool_field_reads_and_writes_checked() {
+    let desc = Door::layout();
+    let mut bytes = vec![0u8; desc.size as usize];
+    let mut m = efeengine_core::engine::types::DynComponentMut { desc: &desc, bytes: &mut bytes };
+    assert_eq!(m.as_view().field_bool("open"), Some(false));
+    assert!(m.set_bool("open", true));
+    assert_eq!(m.as_view().field_bool("open"), Some(true));
+    assert!(m.set_field("open", 0u8));
+    assert_eq!(m.as_view().field_bool("open"), Some(false));
+    assert!(m.set_field("open", 1u8));
+    // invalid: not 0 or 1; the byte stays as it was
+    assert!(!m.set_field("open", 2u8));
+    assert!(!m.set_field("open", 255u8));
+    assert_eq!(m.as_view().field_bool("open"), Some(true));
+    // not a bool field
+    assert!(!m.set_bool("speed", true));
+    assert_eq!(m.as_view().field_bool("speed"), None);
+    // the Rust side
+    let mut w = World::new();
+    let en = w.spawn((Door { open: true.into(), _pad: [0; 3], speed: 2.0 },));
+    assert!(w.get::<&Door>(en).unwrap().open.get());
 }

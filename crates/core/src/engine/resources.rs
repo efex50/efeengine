@@ -17,11 +17,12 @@ use hecs::Tick;
 struct Slot {
     lock: RwLock<Box<dyn Any + Send + Sync>>,
     changed: AtomicU32,
+    name: &'static str,
 }
 
 impl Slot {
     fn new<T: Send + Sync + 'static>(value: T, now: Tick) -> Self {
-        Self { lock: RwLock::new(Box::new(value)), changed: AtomicU32::new(now.get()) }
+        Self { lock: RwLock::new(Box::new(value)), changed: AtomicU32::new(now.get()), name: std::any::type_name::<T>() }
     }
 }
 
@@ -204,6 +205,11 @@ impl Resources {
         let boxed = slot.lock.get_mut().unwrap_or_else(|_| poisoned::<T>());
         let any: &mut (dyn Any + Send + Sync) = &mut **boxed;
         any.downcast_mut::<T>().expect("type map invariant")
+    }
+
+    /// `(type id, type name)` of every stored resource, in no particular order.
+    pub(crate) fn type_names(&self) -> impl Iterator<Item = (TypeId, &'static str)> + '_ {
+        self.map.iter().map(|(id, slot)| (*id, slot.name))
     }
 
     /// Returns the number of resources currently stored.
