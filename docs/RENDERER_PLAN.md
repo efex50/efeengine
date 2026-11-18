@@ -1,6 +1,6 @@
 # Renderer plan: separate 2D and 3D renderers, GPU modes, SDL fallback
 
-> **Status:** 4C.1, 4C.2 and 4C.3 built (see section 8); 4C.4 onward not started\
+> **Status:** 4C.1 to 4C.5 built (see sections 8, 8.1, 8.2); 4C.6 onward not started\
 > **Date:** 2026-11-18\
 > **Current design:** [`RENDERING.md`](RENDERING.md) (one `Renderer` slot, `RenderFrame`, built-in `SpriteRenderer`)\
 > **Roadmap:** `ROADMAP.md` Phase 4 (4A 2D, 4B 3D) and the new Phase 4C below
@@ -141,11 +141,11 @@ work in both modes, with one implementation.
 - [x] **4C.2 Native GL fallback for wgpu.** `PRIMARY | GL` with GL last, downlevel limits on GL, config
   switch. _Done when_ coin_dash runs with the GL backend forced natively.
 - [x] **4C.3 Draw2D.** The trait, the wgpu implementation, 2D debug draw (ROADMAP 4A.17) on top of it.
-- [ ] **4C.4 SDL mode.** `graphics = sdl` startup path (SDL creates an `SDL_Renderer` for the window,
+- [x] **4C.4 SDL mode.** `graphics = sdl` startup path (SDL creates an `SDL_Renderer` for the window,
   no wgpu context), the SDL `Renderer2D` and `Draw2D`, texture table from `TextureChanges`, the
   overlay hook. _Done when_ coin_dash runs in both modes and screenshots of the two match closely
   (same sprites, layers, alpha; filtering may differ).
-- [ ] **4C.5 `auto` mode fallback.** No wgpu adapter → SDL mode, with a log line saying so.
+- [x] **4C.5 `auto` mode fallback.** No wgpu adapter → SDL mode, with a log line saying so.
 - [ ] **4C.6 Fallback UI on Draw2D.** Revise `FALLBACK_NATIVE.md`, then implement its phases on `Draw2D`.
 - [ ] **4C.7 PS Vita (homebrew).** Rust target `armv7-sony-vita-newlibeabihf` (tier 3, nightly
   `build-std`), VitaSDK, `cargo-vita` for `.vpk`, SDL3's Vita port. Pre-built `.efvm` scripts (no `.efa`
@@ -267,3 +267,38 @@ Not expressible in SDL and therefore not in Draw2D: custom shaders, per-draw tra
 with depth. Colour-space differences: SDL does no sRGB conversion, so for equal output the SDL backend draws vertex colours as is and
 the sprite tint conversion must match (tints are linear in wgpu; SDL must convert them to sRGB). Plan the parity test around
 opaque sprites first.
+
+## 8.2 SDL mode and the `auto` fallback (4C.4, 4C.5)
+
+Files: `render/sdl_draw2d.rs`, `window/*` (`sdl_window_ptr`), `engine.rs` (`init_graphics`, `init_sdl_mode`,
+`render_frame_to_surface`), `render/gpu.rs` (test hook). User docs: `RENDERING.md` ("GPU mode", "SDL mode").
+
+Decisions (deviations from sections 3.2 / 8):
+
+- **No `GpuCx` / `Target` enum.** The wgpu traits (`Renderer2D`, `Renderer3D`, `CustomRenderer`, `RenderOverlay`) keep taking
+  `&Gpu` and stay wgpu-only. Making them enums would have forced every renderer (and `examples/custom_renderer`) to match a
+  variant it can never see. SDL mode is a second, engine-owned path instead: `Engine` has `gpu: Option<GpuContext>` and
+  `sdl: Option<SdlMode>`, exactly one is set after `init_graphics`. `SdlMode` = `SdlDraw2D` (Draw2D on the window's
+  `SDL_Renderer` plus the texture table) + `SdlSpriteRenderer` (the built-in 2D renderer for this mode).
+- **Sprites in SDL mode go through `Draw2D`** (four vertices through `triangles`, CPU transform in the shader's order, 1/256 px
+  snap), not through an instanced pipeline; the wgpu `SpriteRenderer` keeps its instanced path unchanged.
+- **Unsupported things warn once and are skipped**: `CustomRenderer`, a user-installed wgpu `Renderer2D` (the built-in
+  `SpriteRenderer` installed explicitly is recognised by `TypeId` and not warned about), 3D cameras, overlays. The UI crate needed
+  no change: its overlay is only reached through `RenderOverlay::init`, which SDL mode never calls.
+- **Colour**: tints and the clear colour are encoded linear -> sRGB in the SDL renderer; vertex colours and texture bytes are
+  already encoded. Blending of translucent pixels is in encoded space (wgpu: linear).
+- **`auto`**: `GpuContext::new` fails (no adapter / surface for `PRIMARY` and `GL`) -> `init_sdl_mode` with a warning log line;
+  only for non-headless windows, native only. `wgpu` / `wgpu-gl` fail instead (error logged, engine keeps ticking without
+  rendering, as before). `sdl` goes straight to SDL mode. On the web `sdl` warns and uses wgpu.
+- **Test hook**: `EFE_TEST_NO_WGPU=1` makes the native adapter search fail.
+- **Window**: `InnerWindow::sdl_window_ptr()` (null for headless) lets the engine create the `SDL_Renderer`; the renderer is
+  declared before `windows` in `Engine`, so it drops first. Vsync is on (`SDL_SetRenderVSync(1)`); SDL picks the driver
+  (opengl on the dev machine; `SDL_RENDER_DRIVER` overrides).
+- **Offscreen**: `SdlDraw2D::offscreen(size)` = `SDL_CreateSoftwareRenderer` on an RGBA32 `SDL_Surface`; verified to work with no
+  window and no video driver. Parity test `coin_dash_wgpu_and_sdl_match` (`#[ignore]`, needs a GPU): 960x600 frame 32,
+  0.107% of the pixels differ by more than 4/255 (all around animated sprites at fractional positions), mean error 0.12/255;
+  PNGs with `EFE_SCREENSHOT_DIR`. `coin_dash_frame_through_sdl_renderer` runs everywhere. Before the 1/256 snap the SDL
+  rasteriser left hairline seams between tiles (5.4% of pixels off).
+- **Not done / next**: fallback UI on Draw2D (4C.6), so UI-only screens (the coin_dash menu) show nothing in SDL mode yet;
+  `with_linear_filtering` is ignored in SDL mode; sub-rect texture updates; runtime window screenshot of SDL mode was not taken
+  (headless offscreen parity only).

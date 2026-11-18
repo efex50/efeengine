@@ -17,10 +17,11 @@ impl Renderers {
         Self { r2: Box::new(SpriteRenderer::new()), r3: None, custom: None, r2_installed: false }
     }
 
-    /// Install a 2D renderer (drops a custom renderer). `gpu` is `Some` when the GPU is up.
-    pub fn set_2d(&mut self, r: Box<dyn Renderer2D>, gpu: Option<&Gpu>) {
+    /// Install a 2D renderer (drops a custom renderer). `builtin` is true for `SpriteRenderer` (SDL mode
+    /// has an equivalent, so it is not reported as unsupported). `gpu` is `Some` when the GPU is up.
+    pub fn set_2d(&mut self, r: Box<dyn Renderer2D>, builtin: bool, gpu: Option<&Gpu>) {
         self.custom = None;
-        self.r2_installed = true;
+        self.r2_installed = !builtin;
         self.r2 = r;
         if let Some(g) = gpu {
             self.r2.init(g);

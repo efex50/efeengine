@@ -230,8 +230,8 @@ Plan and design: [`docs/RENDERER_PLAN.md`](docs/RENDERER_PLAN.md). 2D and 3D bec
 - [x] 4C.1 Split the frame and traits (`Frame2D`/`Frame3D`, camera kinds, `CustomRenderer` for full wgpu renderers).
 - [x] 4C.2 Native GL fallback for wgpu (`PRIMARY | GL`, GL last, config switch).
 - [x] 4C.3 `Draw2D` (shared 2D drawing API) with the wgpu implementation; 2D debug draw (4A.17) on it.
-- [ ] 4C.4 SDL mode: `SDL_Renderer` 2D backend; coin_dash matches in both modes.
-- [ ] 4C.5 `auto` mode falls back to SDL mode when no wgpu adapter exists.
+- [x] 4C.4 SDL mode: `SDL_Renderer` 2D backend; coin_dash matches in both modes.
+- [x] 4C.5 `auto` mode falls back to SDL mode when no wgpu adapter exists.
 - [ ] 4C.6 Fallback UI drawn through `Draw2D` (works in both modes).
 - [ ] 4C.7 PS Vita homebrew build of coin_dash (Vita3K, then hardware).
 

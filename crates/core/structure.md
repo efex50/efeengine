@@ -59,6 +59,7 @@ crates/core
         ├── render/draw2d.rs `Draw2D` trait (set_clip / set_blend / set_filter / triangles + provided fill_rect, quad, rect_outline, line, polyline), `DrawList` recorder, `Vertex2D`, `Rect`, `RectI`, `Blend`, `Filter`
         ├── render/draw2d_wgpu.rs + draw2d.wgsl  `GpuTextures` (shared GPU texture table), `WgpuDraw2D` (triangle pipeline per blend, scissor per command)
         ├── render/debug_draw.rs `DebugDraw2D` resource (world / screen lines, rects, circles; one frame of life)
+        ├── render/sdl_draw2d.rs SDL mode (native): `SdlDraw2D` (Draw2D on `SDL_Renderer` + texture table, window or offscreen software renderer), `SdlSpriteRenderer`, `SdlMode` (engine-side: sync textures, draw, present, once-only warnings)
         ├── render/offscreen.rs `OffscreenGpu` (window-less device + target, native only), `encode_png`, `write_png`
         ├── render/textures.rs Image, Textures store, TextureChanges
         ├── transform.rs    velocity system (FixedUpdate), transform propagation (PostUpdate)
@@ -239,7 +240,7 @@ Example games: `examples/test_example/src/lib.rs` creates `Engine::new("hello")`
 ## Platform notes
 - Workspace root `.cargo/config.toml` sets, for `wasm32-unknown-unknown`, rustflags: `+atomics`, `+bulk-memory`, `--shared-memory`, `--import-memory`, `--max-memory=2147483648` (2 GB), and exports of `__wasm_init_tls`, `__tls_size`, `__tls_align`, `__tls_base`, `__heap_base`, `__data_end` (needed by the wasm-bindgen threads transform). Atomics require a nightly toolchain with `-Z build-std` (std must be rebuilt with atomics); the page must be cross-origin isolated (COOP/COEP) for `SharedArrayBuffer`, otherwise the pool degrades to a single worker (and without `wasmJsPath` it has no workers at all).
 - Native needs SDL3. By default it links a system SDL3 (on Windows through vcpkg: `build.rs` uses the `vcpkg` crate, `VCPKGRS_DYNAMIC=1`; `[package.metadata.vcpkg]` has a hard-coded Scoop vcpkg root `C:/Users/efe/scoop/apps/vcpkg/current`). The `static` feature builds SDL3 from source and links it statically.
-- wgpu backends: native `PRIMARY` (Vulkan/Metal/DX12) then `GL` (one instance each; `GpuMode` from `StartupConfig::gpu_mode` / env `EFE_GPU_MODE`: `auto`, `wgpu`, `wgpu-gl`, `sdl` reserved for 4C.4); wasm picks WebGPU or WebGL2 per `graphicsBackend` (see Renderer; `auto` means WebGL2 on desktop Linux). The wasm surface is found by the canvas id from the startup config (default `"canvas"`). The unused `RendererState` still hard-codes `GL | BROWSER_WEBGPU` on wasm.
+- wgpu backends: native `PRIMARY` (Vulkan/Metal/DX12) then `GL` (one instance each; `GpuMode` from `StartupConfig::gpu_mode` / env `EFE_GPU_MODE`: `auto` (falls back to SDL mode when wgpu has no adapter), `wgpu`, `wgpu-gl`, `sdl` (SDL_Renderer, `Engine::sdl`, 2D only; `EFE_TEST_NO_WGPU=1` fakes a missing adapter)); wasm picks WebGPU or WebGL2 per `graphicsBackend` (see Renderer; `auto` means WebGL2 on desktop Linux). The wasm surface is found by the canvas id from the startup config (default `"canvas"`). The unused `RendererState` still hard-codes `GL | BROWSER_WEBGPU` on wasm.
 - Native `Kill` (or a close request) breaks the loop so `game_loop` returns; wasm just stops requesting frames.
 - Several log strings and comments are in Turkish.
 

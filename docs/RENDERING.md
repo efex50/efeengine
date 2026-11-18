@@ -99,11 +99,45 @@ No `Send` bound: the engine and the renderers stay on the main thread (the web h
 ## GPU mode
 
 Startup config `gpuMode` (`StartupConfig::gpu_mode`, `GpuMode`) or, on native when the config says `auto`, the
-environment variable `EFE_GPU_MODE`: `auto` (default), `wgpu`, `wgpu-gl`, `sdl`. Native `auto` / `wgpu` try wgpu on
-Vulkan / Metal / DX12 first and then on GL (one instance per backend set, so GL is really last); `wgpu-gl` uses GL only
-(GL 3.3+ / GLES 3.0, downlevel limits, display handle given to the instance, needed on Wayland). `sdl` is reserved
-for Phase 4C.4 and currently fails graphics init with a clear error. The web ignores it (`graphicsBackend` picks
-WebGPU or WebGL2). The log line `graphics backend: Gl (...)` shows what was chosen.
+environment variable `EFE_GPU_MODE`: `auto` (default), `wgpu`, `wgpu-gl`, `sdl`.
+
+- `auto`: wgpu on Vulkan / Metal / DX12 first, then on GL (one instance per backend set, so GL is really last); if no
+  wgpu adapter or surface can be created at all, **SDL mode** with a log line (`no usable wgpu graphics (...); falling
+  back to SDL mode (2D only)`). Headless engines never fall back.
+- `wgpu`: same wgpu order, never SDL; without an adapter graphics init fails (`graphics init failed: ...` is logged
+  as an error, the engine keeps ticking without rendering).
+- `wgpu-gl`: GL only (GL 3.3+ / GLES 3.0, downlevel limits, display handle given to the instance, needed on Wayland).
+- `sdl`: SDL mode at once, no wgpu context.
+- The web ignores it (`graphicsBackend` picks WebGPU or WebGL2); `sdl` there logs a warning and uses wgpu, because
+  `SDL_Renderer` is native only.
+- Test hook: `EFE_TEST_NO_WGPU=1` makes wgpu adapter creation fail, so the `auto` -> SDL fallback (and the `wgpu`
+  error) can be tried on a machine that has a GPU.
+
+The log line `graphics backend: Gl (...)` / `graphics backend: SDL_Renderer (opengl)` shows what was chosen.
+
+### SDL mode
+
+2D only, on the window's `SDL_Renderer` (SDL picks the driver: opengl, vulkan, gpu, software; `SDL_RENDER_DRIVER`
+overrides; vsync on). The engine owns an `SdlMode` (`SdlDraw2D` + `SdlSpriteRenderer`) instead of a `GpuContext`.
+
+- Drawn: the 2D camera's clear colour, sprites (layer order, tint, flip, uv rectangles, textures from the same
+  `TextureChanges`), and `frame.d2.draw` (debug draw and anything else recorded into a `DrawList`).
+- **Not available** (each logs once, nothing panics): `Renderer3D` and 3D cameras (ignored), `CustomRenderer` and a
+  user-installed wgpu `Renderer2D` (the built-in SDL renderer is used instead; `SpriteRenderer` set explicitly is
+  fine, but `with_linear_filtering()` is not honoured: SDL mode samples nearest), `RenderOverlay`s (the iced UI and GPU
+  views are not drawn; the fallback UI on `Draw2D` is Phase 4C.6, so a menu-only UI game shows no UI yet).
+  `UiPlugin::new()` still works: the overlay is just never initialised.
+- Colour: SDL does no sRGB conversion. Sprite tints and the clear colour are linear in the engine, so the SDL renderer
+  encodes them to sRGB; texture bytes and `Draw2D` vertex colours are already encoded. Opaque sprites match wgpu mode;
+  blending of translucent pixels happens on encoded values in SDL and in linear space in wgpu, so soft edges differ
+  slightly.
+- Parity measured on coin_dash frame 32 at 960x600 (`coin_dash_wgpu_and_sdl_match`, `EFE_SCREENSHOT_DIR=dir` writes
+  `coin-wgpu.png`, `coin-sdl.png`, `coin-diff.png`): 0.107% of the pixels differ by more than 4/255 (all around the
+  animated sprites that sit at fractional positions, where nearest sampling rounds differently), mean error 0.12/255.
+- Sprite quads are converted on the CPU in the shader's order (`view_projection * (world * local)`) and snapped to 1/256
+  pixel; without the snap the SDL rasteriser leaves one-pixel seams between tiles whose shared edges differ by float noise.
+- Offscreen: `SdlDraw2D::offscreen(size)` is a software renderer on an `SDL_Surface` (works without a window or a video
+  driver); `SdlSpriteRenderer::render(&mut draw, &frame.d2)` then `read_rgba8()`.
 
 ## `SpriteRenderer` (built in)
 

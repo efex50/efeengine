@@ -943,9 +943,10 @@ impl Engine {
     /// Install the 2D renderer (replaces the default [`SpriteRenderer`](rendering::SpriteRenderer)
     /// and any [`CustomRenderer`]). If the GPU is already up, `init` runs at once; otherwise
     /// when it comes up.
-    pub fn set_renderer_2d(&mut self, renderer: impl Renderer2D) {
+    pub fn set_renderer_2d<R2: Renderer2D>(&mut self, renderer: R2) {
         let gpu = self.gpu.as_ref().map(|g| g.gpu());
-        self.renderer.set_2d(Box::new(renderer), gpu.as_ref());
+        let builtin = std::any::TypeId::of::<R2>() == std::any::TypeId::of::<rendering::SpriteRenderer>();
+        self.renderer.set_2d(Box::new(renderer), builtin, gpu.as_ref());
     }
 
     /// Install the 3D renderer (replaces any [`CustomRenderer`]). It runs before the 2D one on
