@@ -1,6 +1,6 @@
 # Renderer plan: separate 2D and 3D renderers, GPU modes, SDL fallback
 
-> **Status:** 4C.1 and 4C.2 built (see section 8); 4C.3 onward not started\
+> **Status:** 4C.1, 4C.2 and 4C.3 built (see section 8); 4C.4 onward not started\
 > **Date:** 2026-11-18\
 > **Current design:** [`RENDERING.md`](RENDERING.md) (one `Renderer` slot, `RenderFrame`, built-in `SpriteRenderer`)\
 > **Roadmap:** `ROADMAP.md` Phase 4 (4A 2D, 4B 3D) and the new Phase 4C below
@@ -83,6 +83,8 @@ pub trait Renderer3D: 'static {
 
 ### 3.3 Draw2D: the shared 2D drawing surface
 
+> Built differently from this sketch: see section 8.1 (pixel coordinates, no transform, `DrawList`).
+
 A small immediate API both 2D backends implement, used by the 2D renderers themselves and by
 anything else that draws 2D on top (debug draw, the fallback UI):
 
@@ -138,7 +140,7 @@ work in both modes, with one implementation.
   work unchanged in behaviour.
 - [x] **4C.2 Native GL fallback for wgpu.** `PRIMARY | GL` with GL last, downlevel limits on GL, config
   switch. _Done when_ coin_dash runs with the GL backend forced natively.
-- [ ] **4C.3 Draw2D.** The trait, the wgpu implementation, 2D debug draw (ROADMAP 4A.17) on top of it.
+- [x] **4C.3 Draw2D.** The trait, the wgpu implementation, 2D debug draw (ROADMAP 4A.17) on top of it.
 - [ ] **4C.4 SDL mode.** `graphics = sdl` startup path (SDL creates an `SDL_Renderer` for the window,
   no wgpu context), the SDL `Renderer2D` and `Draw2D`, texture table from `TextureChanges`, the
   overlay hook. _Done when_ coin_dash runs in both modes and screenshots of the two match closely
@@ -172,7 +174,7 @@ work in both modes, with one implementation.
 | Shared 2D drawing | `Draw2D`, used by both 2D renderers, debug draw and the fallback UI |
 | Custom renderers | `CustomRenderer` (wgpu mode only), replaces 2D and 3D |
 
-## 8. As built (4C.1, 4C.2)
+## 8. As built (4C.1, 4C.2, 4C.3)
 
 Deviations and decisions:
 
@@ -198,3 +200,70 @@ Deviations and decisions:
 - **Result:** coin_dash runs natively in Vulkan (default) and with `EFE_GPU_MODE=wgpu-gl` (log: `graphics backend: Gl (Mesa
   Intel UHD 620)`), on Wayland and with `SDL_VIDEODRIVER=x11`, no panics or wgpu errors. No pixel comparison was made (the game
   has no offscreen screenshot path).
+
+### 8.1 Draw2D (4C.3)
+
+Files: `render/draw2d.rs` (API, `DrawList`), `draw2d_wgpu.rs` + `draw2d.wgsl` (wgpu backend), `debug_draw.rs`,
+`offscreen.rs`. Deviations from the sketch in 3.3:
+
+```rust
+pub trait Draw2D {
+    fn set_clip(&mut self, rect: Option<RectI>);
+    fn set_blend(&mut self, blend: Blend);          // None | Alpha | Add | Premultiplied
+    fn set_filter(&mut self, filter: Filter);       // Nearest | Linear
+    fn triangles(&mut self, texture: Option<TextureHandle>, verts: &[Vertex2D], indices: &[u32]);
+    // provided on top of `triangles`: fill_rect, quad(texture, rect, uv, color), rect_outline, line, polyline
+}
+pub struct Vertex2D { pub pos: [f32; 2], pub uv: [f32; 2], pub color: [f32; 4] }
+```
+
+- **No transform and no `Affine2` on quads.** Everything is in **target pixels** (physical, origin top-left, y down); callers
+  convert world to pixels on the CPU (the debug draw does, in the extract). `SDL_Renderer` has no vertex transform either, so
+  this is the common subset. Rotated quads are just four vertices through `triangles`.
+- **`DrawList`** (plain data, `Clone`) implements `Draw2D` and records batched commands: consecutive calls with the same
+  state (texture, blend, filter, clip) merge, each command has a vertex range and indices relative to its first vertex (so an
+  SDL backend passes the slices straight to `SDL_RenderGeometry`). `replay(&mut dyn Draw2D)` and `append` exist. A backend
+  either consumes a `DrawList` (wgpu does: `WgpuDraw2D::prepare` + `draw` inside a pass, or `render` for a pass of its own) or
+  implements `Draw2D` directly (immediate; SDL can). Invalid calls (index out of range, count not a multiple of 3) are ignored.
+- **Colours** are straight RGBA, sRGB-encoded (what UI authors and SDL use); the wgpu vertex shader converts to linear when the
+  surface is sRGB. (`Camera::clear_color` and sprite tints stay linear as before.) Blending on an sRGB surface is therefore
+  done in linear space in wgpu; SDL blends the encoded values, so semi-transparent edges differ slightly between modes.
+- **Textures** are handles of the engine `Textures` store (straight-alpha RGBA8). A glyph atlas or nine-slice texture is added
+  with `Textures::add` and updated with `Textures::replace` (whole image; a sub-rectangle update is a later addition, SDL has
+  `SDL_UpdateTexture` with a rect). Unknown handles draw as white. `GpuTextures` is the shared wgpu table (one bind group per
+  filter), used by `SpriteRenderer` and `WgpuDraw2D`, so a texture is uploaded once.
+- **SpriteRenderer keeps its instanced sprite pipeline** (a world-matrix instanced quad is cheaper than CPU triangles and keeps
+  coin_dash byte-identical); only the texture table is shared. After the sprites, `frame.d2.draw` (a `DrawList`, new `Frame2D`
+  field, cleared and refilled every frame) is drawn in the same pass. SDL's `Renderer2D` will draw sprites as
+  `SDL_RenderGeometry` quads, converted on the CPU with the camera matrix.
+- **Debug draw (4A.17):** `DebugDraw2D` resource (also in the prelude): `line`, `rect`, `rect_filled`, `circle` in world units and
+  `screen_*` in pixels, `set_width` in pixels (default 1). Shapes live one frame: `render_extract` converts them with the 2D
+  camera (world shapes are dropped without one) into `frame.d2.draw` and empties the queue. Drawn over the sprites, in push order.
+- **Clip** is clamped to the target and becomes one scissor rectangle per command (SDL: `SDL_SetRenderClipRect`).
+- **Fallback UI (4C.6)** needs only this: rounded rects as triangle fans or nine-slice quads with per-vertex colour, glyph quads
+  from an atlas texture with `Filter::Linear`/`Nearest`, `set_clip` for scroll areas, `Premultiplied` for glyph atlases stored
+  premultiplied. Missing and wanted later: sub-rect texture update, a `RenderOverlay` hook that hands out a `Draw2D`.
+- **Tests:** unit tests for `DrawList`, clip clamping and the debug draw projection; `tests/render.rs` checks the extract; the
+  `#[ignore]`d GPU test `draw2d_pixels` (`cargo test -p efeengine-core --lib draw2d_pixels -- --ignored`) draws rects, a
+  texture, clip, additive blend, a line, a vertex-coloured triangle and a sprite into an offscreen target and checks pixels.
+  `EFE_SCREENSHOT_DIR=dir` also writes `draw2d.png`.
+- **Offscreen screenshots:** `OffscreenGpu` (native only; own device, `Rgba8UnormSrgb` target) with `render_2d(renderer, frame,
+  changes)`, `read_rgba8`, and `write_png` / `encode_png` (uncompressed, no deps). `examples/coin_dash/tests/sprite_screenshot.rs`
+  (`#[ignore]`) runs coin_dash headless at 960x600, renders frame 32 through `SpriteRenderer` with a debug bounding box, asserts
+  determinism and writes a PNG (`EFE_SCREENSHOT=path`). That PNG is the reference for the 4C.4 SDL parity check.
+
+#### SDL_Renderer mapping (checked against the vendored SDL 3.4 headers)
+
+| Draw2D | SDL3 |
+|---|---|
+| `triangles` | `SDL_RenderGeometry(renderer, texture-or-NULL, SDL_Vertex[] {position, SDL_FColor color, tex_coord}, n, indices, m)`; one texture per call, matching `DrawCommand` |
+| `set_clip` | `SDL_SetRenderClipRect` (integer rect; `None` = `NULL`) |
+| `Blend::None / Alpha / Add / Premultiplied` | `SDL_BLENDMODE_NONE / BLEND / ADD / BLEND_PREMULTIPLIED` (set per texture with `SDL_SetTextureBlendMode`, for untextured geometry with `SDL_SetRenderDrawBlendMode`) |
+| `Filter` | `SDL_SetTextureScaleMode` (`NEAREST` / `LINEAR`), a property of the texture, set before the call |
+| textures | `SDL_CreateTexture(RGBA32, STATIC)` + `SDL_UpdateTexture` from `TextureChanges`; straight alpha |
+| lines | quads through `triangles` (not `SDL_RenderLines`, which is 1 px): same pixels in both modes |
+
+Not expressible in SDL and therefore not in Draw2D: custom shaders, per-draw transforms, non-RGBA formats, render-to-texture
+with depth. Colour-space differences: SDL does no sRGB conversion, so for equal output the SDL backend draws vertex colours as is and
+the sprite tint conversion must match (tints are linear in wgpu; SDL must convert them to sRGB). Plan the parity test around
+opaque sprites first.

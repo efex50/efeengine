@@ -140,3 +140,9 @@ Example: `examples/coin_dash` (tile ground from an atlas, an animated sprite she
 bindings and instance inputs. `src/lib.rs` spawns a camera, three generated textures and sprites (one parented, one
 moving with `Velocity`) and logs a `RenderFrame` summary once a second.
 Run: `cargo xtask run custom_renderer native`.
+
+## `Draw2D` and debug draw (built in)
+
+`Frame2D::draw` is a `DrawList` in screen pixels that `SpriteRenderer` draws over the sprites (the `Draw2D` API, `docs/RENDERER_PLAN.md`
+section 8.1). The `DebugDraw2D` resource fills it: push `line`, `rect`, `rect_filled`, `circle` (world units) or the `screen_*` variants (pixels)
+during a frame, they are drawn that frame only. A custom 2D renderer can draw `frame.d2.draw` with `WgpuDraw2D` and a shared `GpuTextures`.

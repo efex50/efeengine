@@ -202,7 +202,7 @@ Goal: a 2D renderer first (4A), then 3D (4B). Each one renders, animates and res
 - [x] 4A.14 **[S] Sprite sheets and animation.** Atlas rectangles (UVs) and frame timing from the `Time` resource (2.2). _Done when_ a sheet animates at its set frame rate, whatever the render rate. _Done in `coin_dash`: a 4-frame coin sheet animated by switching `uv_min`/`uv_max` from `Time` (8 fps); no engine-side animation component._
 - [x] 4A.15 **[S] Tilemaps.** A grid of tiles drawn as batched sprites from one atlas. _Done when_ a 100×100 map pans with the camera in one draw call per layer. _Done as a demo in `coin_dash`: a 40x30 grid of tile sprites from one atlas on a low layer (one draw per texture run). No tilemap type or culling; the "100x100 map" check is not done._
 - [ ] 4A.16 **[S] 2D text.** Glyph rendering with `glyphon` or `fontdue` for in-world text. _Done when_ a string draws in the same place natively and in both browsers.
-- [ ] 4A.17 **[S] 2D debug draw.** Lines and rects in world or screen space, drawn over the sprite pass. _Done when_ a bounding box can be drawn over a sprite.
+- [x] 4A.17 **[S] 2D debug draw.** Lines and rects in world or screen space, drawn over the sprite pass. _Done when_ a bounding box can be drawn over a sprite.
 - [ ] 4A.18 **[S] Cross-platform check.** Native, Chrome and Firefox all show the identical scene. Window and canvas resize and browser zoom reconfigure without errors. Returning to a background tab doesn't cause a huge delta-time jump.
 
 ### Phase 4B: 3D renderer (after 4A)
@@ -229,7 +229,7 @@ Plan and design: [`docs/RENDERER_PLAN.md`](docs/RENDERER_PLAN.md). 2D and 3D bec
 
 - [x] 4C.1 Split the frame and traits (`Frame2D`/`Frame3D`, camera kinds, `CustomRenderer` for full wgpu renderers).
 - [x] 4C.2 Native GL fallback for wgpu (`PRIMARY | GL`, GL last, config switch).
-- [ ] 4C.3 `Draw2D` (shared 2D drawing API) with the wgpu implementation; 2D debug draw (4A.17) on it.
+- [x] 4C.3 `Draw2D` (shared 2D drawing API) with the wgpu implementation; 2D debug draw (4A.17) on it.
 - [ ] 4C.4 SDL mode: `SDL_Renderer` 2D backend; coin_dash matches in both modes.
 - [ ] 4C.5 `auto` mode falls back to SDL mode when no wgpu adapter exists.
 - [ ] 4C.6 Fallback UI drawn through `Draw2D` (works in both modes).
