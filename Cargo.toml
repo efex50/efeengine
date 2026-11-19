@@ -14,6 +14,7 @@ members = [
     "crates/efepages/page_size_macro",
     "crates/calc",
     "crates/efevm",
+    "crates/efevm-jit",
     "crates/efa",
     "crates/efemod",
     "crates/efecs",
