@@ -11,7 +11,7 @@ use efemod::{Package, PackageError, ReadLimits};
 use efevm::{LoadError, Module};
 
 /// Version of the disk layout and key derivation. Older `efa/v*` directories are deleted.
-pub const CACHE_FORMAT: u32 = 1;
+pub const CACHE_FORMAT: u32 = 2;
 
 /// Total bytes the memory cache holds before it is cleared.
 const MEMORY_CAP: usize = 64 * 1024 * 1024;
