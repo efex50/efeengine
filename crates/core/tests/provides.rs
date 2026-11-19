@@ -453,7 +453,7 @@ fn arguments_are_placed_left_to_right_aligned_to_8_and_empty_ones_get_the_cursor
 #[test]
 fn the_copy_is_charged_to_the_providers_budget() {
     let (mut e, got) = engine();
-    // `add` runs 2 instructions; a call with no copy costs 1 + 2 = 3 units
+    // `add` is one block of 2 instructions; a call with no copy costs 1 + 2 = 3 units
     e.load_mod(&inv(None).encode(), ModOptions::new("inv").with_budget(10)).unwrap();
     let m = caller(&e, &[("inv", "add")], &[], |f, fns| {
         for _ in 0..4 {
@@ -462,7 +462,7 @@ fn the_copy_is_charged_to_the_providers_budget() {
         }
     });
     let (out, errs) = run_user(&mut e, &got, &m);
-    assert_eq!(out, [3, 3, 3], "the 4th call needs 3 units, 1 is left");
+    assert_eq!(out, [3, 3, 3], "the 4th call pays its 1 unit and has nothing left to run the block with");
     assert!(errs[0].contains("out of budget in `inv.add`"), "{errs:?}");
 
     // `len` of 1000 bytes: 1 + 1000/256 = 4 units to copy, 1 to run (`ret`)
@@ -479,8 +479,9 @@ fn the_copy_is_charged_to_the_providers_budget() {
             assert!(errs[0].contains("out of budget in `inv.len`"), "{errs:?}");
         }
     }
-    // `bytes` count twice (in and out): 1 + 2*512/256 = 5 units to copy, 3 to run fill
-    for (budget, ok) in [(8u64, true), (7, false)] {
+    // `bytes` count twice (in and out): 1 + 2*512/256 = 5 units to copy, then `fill` is one
+    // block of 3: it runs whole with any positive budget left (6, 7), and not with 0 (5)
+    for (budget, ok) in [(8u64, true), (7, true), (6, true), (5, false)] {
         let (mut e, got) = engine();
         e.load_mod(&inv(None).encode(), ModOptions::new("inv").with_budget(budget)).unwrap();
         let m = caller(&e, &[("inv", "fill")], &[], |f, fns| {
