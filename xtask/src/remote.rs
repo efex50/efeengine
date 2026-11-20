@@ -8,6 +8,7 @@
 //! * host: `--remote=HOST`, else `$EFE_REMOTE_HOST`, else `EFE_REMOTE_HOST` in `remotes.env`
 //! * directory: `$EFE_REMOTE_DIR` / `remotes.env`, default `remote-builds/<repo folder>`
 //! * jobs: `$EFE_REMOTE_JOBS` / `remotes.env`
+//! * `EFE_REMOTE_KEEP_DEBUG=1`: fetch executables with debug info (default: stripped remotely)
 //!
 //! `remotes.env` (repo root, git ignored; see `remotes.env.example`) holds `KEY=VALUE` lines.
 
@@ -37,6 +38,8 @@ pub struct Remote {
     pub host: String,
     pub dir: String,
     pub jobs: Option<String>,
+    /// `EFE_REMOTE_KEEP_DEBUG`: fetch executables with their debug info instead of stripped.
+    pub keep_debug: bool,
     synced: AtomicBool,
 }
 
@@ -101,7 +104,8 @@ impl Remote {
             format!("remote-builds/{}", root().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
         });
         let jobs = setting("EFE_REMOTE_JOBS");
-        Ok(Self { host, dir, jobs, synced: AtomicBool::new(false) })
+        let keep_debug = setting("EFE_REMOTE_KEEP_DEBUG").is_some_and(|v| !matches!(v.as_str(), "0" | "false" | "no"));
+        Ok(Self { host, dir, jobs, keep_debug, synced: AtomicBool::new(false) })
     }
 
     fn ssh_base(&self) -> Command {
@@ -148,7 +152,7 @@ impl Remote {
             bail!("cannot reach {}; try: python3 scripts/remote.py doctor", self.host);
         }
         let mut c = Command::new("rsync");
-        c.args(["-az", "--delete", "-e", &self.ssh_e()]);
+        c.args(["-az", "--compress-choice=zstd", "--delete", "-e", &self.ssh_e()]);
         c.args(EXCLUDES.iter().map(|e| format!("--exclude={e}")));
         c.arg(format!("{}/", root().display())).arg(format!("{}:{}/", self.host, self.dir));
         if dry_run() {
@@ -187,10 +191,11 @@ impl Remote {
 
     /// Copy the named executables of the remote `target/<profile>/` into `dest`.
     pub fn fetch(&self, profile: &str, dest: &Path, names: &[&str]) -> Result<()> {
-        step(format!("fetch {} from {}:target/{profile} -> {}", names.join(" "), self.host, dest.display()));
+        let src = if self.keep_debug { format!("target/{profile}") } else { self.stripped_copies(profile, names)? };
+        step(format!("fetch {} from {}:{src} -> {}", names.join(" "), self.host, dest.display()));
         let mut c = Command::new("rsync");
-        c.args(["-az", "-e", &self.ssh_e(), "--files-from=-"]);
-        c.arg(format!("{}:{}/target/{profile}/", self.host, self.dir)).arg(format!("{}/", dest.display()));
+        c.args(["-az", "--compress-choice=zstd", "-e", &self.ssh_e(), "--files-from=-"]);
+        c.arg(format!("{}:{}/{src}/", self.host, self.dir)).arg(format!("{}/", dest.display()));
         if dry_run() {
             println!("[dry-run] {} (files: {})", show(&c), names.join(" "));
             return Ok(());
@@ -204,6 +209,27 @@ impl Remote {
             bail!("fetching {} from {}:{}/target/{profile} failed (was it built there?)", names.join(" "), self.host, self.dir);
         }
         Ok(())
+    }
+
+    /// On the remote, copy each executable without its debug info into
+    /// `target/remote-fetch/<profile>/` (only when the build is newer); returns that path
+    /// relative to the remote tree. A debug build is mostly DWARF (coin_dash: 341 MB -> 74 MB),
+    /// so this keeps fetching fast on a slow link. Symbols stay, so backtraces still name
+    /// functions. Without `objcopy` on the remote the files are copied as they are.
+    fn stripped_copies(&self, profile: &str, names: &[&str]) -> Result<String> {
+        let rel = format!("target/remote-fetch/{profile}");
+        let (src, out) = (format!("{}/target/{profile}", self.dir), format!("{}/{rel}", self.dir));
+        let list = names.iter().map(|n| shell_quote(n)).collect::<Vec<_>>().join(" ");
+        let script = format!(
+            "mkdir -p {out} && for n in {list}; do [ -f {src}/\"$n\" ] || continue; \
+             [ {out}/\"$n\" -nt {src}/\"$n\" ] && continue; \
+             if command -v objcopy >/dev/null; then objcopy --strip-debug {src}/\"$n\" {out}/\"$n.tmp\"; \
+             else cp {src}/\"$n\" {out}/\"$n.tmp\"; fi && mv {out}/\"$n.tmp\" {out}/\"$n\"; done"
+        );
+        if !self.ssh_run(&script)? {
+            bail!("preparing {} for fetching failed on {}", names.join(" "), self.host);
+        }
+        Ok(rel)
     }
 
     /// True if the remote's nightly toolchain has this rustup target installed.
@@ -260,7 +286,7 @@ mod tests {
     }
 
     fn remote(jobs: Option<&str>) -> Remote {
-        Remote { host: "h".into(), dir: "remote-builds/x".into(), jobs: jobs.map(Into::into), synced: AtomicBool::new(false) }
+        Remote { host: "h".into(), dir: "remote-builds/x".into(), jobs: jobs.map(Into::into), keep_debug: false, synced: AtomicBool::new(false) }
     }
 
     #[test]

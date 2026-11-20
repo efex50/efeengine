@@ -29,6 +29,8 @@ ignored, so host names never reach git; copy remotes.env.example to start):
                                relative paths are under the remote user's home)
   EFE_REMOTE_JOBS=N            CARGO_BUILD_JOBS and RUST_TEST_THREADS on the remote
                                (default: the remote's core count minus 3, at least 1)
+  EFE_REMOTE_KEEP_DEBUG=1      fetch executables with their debug info (default: stripped on the
+                               remote first, about 5x smaller, so fetching is fast; symbols stay)
 
 Binaries built remotely link against the remote's glibc; `doctor` checks that it is not newer
 than the local one and that both sides have the same CPU architecture.
@@ -115,6 +117,8 @@ class Remote:
                               "(see remotes.env.example)")
         self.rdir = rdir or setting("EFE_REMOTE_DIR", self.root) or f"remote-builds/{self.root.name}"
         self.jobs = jobs or setting("EFE_REMOTE_JOBS", self.root)
+        # Fetch executables with their debug info (big; for a debugger with source lines).
+        self.keep_debug = (setting("EFE_REMOTE_KEEP_DEBUG", self.root) or "0") not in ("0", "", "false", "no")
         self.dry = dry
         self.synced = False
         self.ssh_cmd = ["ssh", *SSH_OPTS]
@@ -146,7 +150,7 @@ class Remote:
         log(f"sync -> {self.host}:{self.rdir}")
         if self.ssh(f"mkdir -p {self.rdir}") != 0:
             raise RemoteError(f"cannot reach {self.host}; try: scripts/remote.py doctor")
-        args = ["rsync", "-az", "--delete", "-e", shlex.join(self.ssh_cmd)]
+        args = ["rsync", "-az", "--compress-choice=zstd", "--delete", "-e", shlex.join(self.ssh_cmd)]
         args += [f"--exclude={e}" for e in EXCLUDES]
         args += [f"{self.root}/", f"{self.host}:{self.rdir}/"]
         if self.dry:
@@ -179,8 +183,11 @@ class Remote:
                 return dest
         names = list(names)
         shown = " ".join(names) if names else "executables"
-        log(f"fetch {shown} from {self.host}:target/{profile} -> {dest}")
-        args = ["rsync", "-az", "-e", shlex.join(self.ssh_cmd), "--files-from=-", f"{self.host}:{src}/", f"{dest}/"]
+        if not self.keep_debug:
+            src = self.stripped_copies(profile, names)
+        log(f"fetch {shown} from {self.host}:{src.removeprefix(self.rdir + '/')} -> {dest}")
+        args = ["rsync", "-az", "--compress-choice=zstd", "-e", shlex.join(self.ssh_cmd), "--files-from=-",
+                f"{self.host}:{src}/", f"{dest}/"]
         if self.dry:
             self._show(args + [f"(files: {shown})"])
             return dest
@@ -188,6 +195,22 @@ class Remote:
         if r.returncode != 0:
             raise RemoteError(f"fetching {shown} from {self.host}:{src} failed (was it built there?)")
         return dest
+
+    def stripped_copies(self, profile, names):
+        """On the remote, copy each executable without its debug info into
+        target/remote-fetch/<profile>/ (only when the build is newer) and return that directory.
+        A debug build is mostly DWARF (coin_dash: 341 MB -> 74 MB), so this is what makes fetching
+        over a slow link bearable. Symbols stay, so backtraces still name functions. Without
+        objcopy on the remote the files are copied as they are."""
+        src = f"{self.rdir}/target/{profile}"
+        out = f"{self.rdir}/target/remote-fetch/{profile}"
+        script = (f"mkdir -p {out} && for n in {' '.join(shlex.quote(n) for n in names)}; do "
+                  f'[ -f {src}/"$n" ] || continue; [ {out}/"$n" -nt {src}/"$n" ] && continue; '
+                  f'if command -v objcopy >/dev/null; then objcopy --strip-debug {src}/"$n" {out}/"$n.tmp"; '
+                  f'else cp {src}/"$n" {out}/"$n.tmp"; fi && mv {out}/"$n.tmp" {out}/"$n"; done')
+        if self.ssh(script) != 0:
+            raise RemoteError(f"preparing {' '.join(names)} for fetching failed on {self.host}")
+        return out
 
     def probe(self, cmd):
         """Run a shell command (login shell) on the remote; True when it exits 0 and printed text
