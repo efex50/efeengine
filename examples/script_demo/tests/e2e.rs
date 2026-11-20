@@ -169,3 +169,22 @@ fn the_native_binary_writes_the_index_with_efe_api_export() {
     }
     assert!(index.struct_type("Transform").is_some());
 }
+
+#[test]
+fn the_native_binary_writes_the_index_with_the_command_line_argument() {
+    let out = temp("binary_arg.efapi");
+    let _ = std::fs::remove_file(&out);
+    let mut arg = std::ffi::OsString::from("--efe-api-export=");
+    arg.push(&out);
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_script_demo"))
+        .arg(arg)
+        .env_remove("EFE_API_EXPORT")
+        .env_remove("EFE_SCRIPT_DIR")
+        .status()
+        .expect("run the native binary");
+    assert!(status.success(), "{status}");
+    let text = std::fs::read_to_string(&out).expect("the binary wrote the .efapi");
+    let _ = std::fs::remove_file(&out);
+    let index = ApiIndex::from_json(&text).expect("valid .efapi");
+    assert_eq!(index.game, "script_demo");
+}

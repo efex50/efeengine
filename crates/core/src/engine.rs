@@ -155,6 +155,28 @@ pub struct Engine{
     #[cfg(not(target_family = "wasm"))]
     api_export: Option<std::path::PathBuf>,
 }
+/// Where the API index should be exported at startup, if anywhere: the
+/// `--efe-api-export=<path>` / `--efe-api-export <path>` argument wins over `EFE_API_EXPORT`.
+/// Only that one engine-owned argument is read; the rest of the command line is the game's.
+#[cfg(not(target_family = "wasm"))]
+fn api_export_request(
+    env: Option<std::ffi::OsString>,
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    const FLAG: &str = "--efe-api-export";
+    let mut args = args.into_iter();
+    let mut from_args = None;
+    while let Some(a) = args.next() {
+        let Some(s) = a.to_str() else { continue };
+        if s == FLAG {
+            from_args = args.next();
+        } else if let Some(v) = s.strip_prefix(FLAG).and_then(|r| r.strip_prefix('=')) {
+            from_args = Some(v.into());
+        }
+    }
+    from_args.or(env).filter(|p| !p.is_empty()).map(std::path::PathBuf::from)
+}
+
 impl Engine {
 
     /// Create a new game instance with the given window title.
@@ -176,9 +198,14 @@ impl Engine {
     pub fn with_config(cfg: EngineConfig) -> Result<Engine, EngineError> {
         let mut cfg = cfg.merged_with_startup();
         cfg.validate()?;
-        // `EFE_API_EXPORT=<path>`: write the API index instead of running; never opens a window.
+        // `EFE_API_EXPORT=<path>` or `--efe-api-export=<path>`: write the API index instead of
+        // running; never opens a window. Off with `cfg.api_export = false`.
         #[cfg(not(target_family = "wasm"))]
-        let api_export = std::env::var_os("EFE_API_EXPORT").filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
+        let api_export = if cfg.api_export {
+            api_export_request(std::env::var_os("EFE_API_EXPORT"), std::env::args_os().skip(1))
+        } else {
+            None
+        };
         #[cfg(not(target_family = "wasm"))]
         if api_export.is_some() {
             cfg.headless = true;
@@ -1832,6 +1859,23 @@ fn request_animation_frame(f: &Closure<dyn FnMut(f64)>) -> bool {
 #[cfg(test)]
 mod tests{
     use std::{pin::Pin, sync::mpsc};
+
+    #[test]
+    #[cfg(not(target_family = "wasm"))]
+    fn api_export_request_reads_only_its_own_argument() {
+        use super::api_export_request;
+        use std::ffi::OsString;
+        let a = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        let p = |s: &str| Some(std::path::PathBuf::from(s));
+        assert_eq!(api_export_request(None, a(&["--level", "2"])), None);
+        assert_eq!(api_export_request(None, a(&["--efe-api-export=out.efapi"])), p("out.efapi"));
+        assert_eq!(api_export_request(None, a(&["-v", "--efe-api-export", "x.efapi", "--fast"])), p("x.efapi"));
+        assert_eq!(api_export_request(Some("env.efapi".into()), a(&[])), p("env.efapi"));
+        assert_eq!(api_export_request(Some("env.efapi".into()), a(&["--efe-api-export=arg.efapi"])), p("arg.efapi"));
+        assert_eq!(api_export_request(Some("".into()), a(&["--efe-api-export="])), None);
+        assert_eq!(api_export_request(None, a(&["--efe-api-export"])), None);
+        assert_eq!(api_export_request(None, a(&["--efe-api-exporter=x"])), None);
+    }
 
     #[test]
     #[cfg(not(target_family = "wasm"))]

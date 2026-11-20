@@ -167,6 +167,12 @@ pub struct EngineConfig {
     pub script_backend: ScriptBackend,
     /// Settings of the JIT when it is used.
     pub script_jit: JitConfig,
+    /// Allow exporting the API index at startup: `EFE_API_EXPORT=<path>` or the command-line
+    /// argument `--efe-api-export=<path>` (native only) make the engine headless and
+    /// `game_loop` write the index and return without running frames. Default `true`, so mod
+    /// authors can get the index from the shipped game. `false` ignores both;
+    /// [`Engine::set_api_export_path`](crate::prelude::Engine::set_api_export_path) still works.
+    pub api_export: bool,
 }
 
 /// Which backend runs the bytecode of scripts. The two produce the same results, memory,
@@ -216,6 +222,7 @@ impl Default for EngineConfig {
             script_cache: Default::default(),
             script_backend: ScriptBackend::default(),
             script_jit: JitConfig::default(),
+            api_export: true,
         }
     }
 }
