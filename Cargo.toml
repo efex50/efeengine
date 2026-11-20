@@ -20,12 +20,13 @@ members = [
     "crates/efa",
     "crates/efemod",
     "crates/efe-guest",
+    "crates/efe-wasm",
     "crates/efecs",
     "crates/efecs/macros",
     "examples/*",
     "xtask",
 ]
-exclude = ["crates/efa/fuzz", "crates/efecs/tests/no-std-test-crates"]
+exclude = ["crates/efa/fuzz", "crates/efecs/tests/no-std-test-crates", "examples/script_demo/wasm_mods/rust_mod"]
 
 [profile.optimize]
 inherits = "release"

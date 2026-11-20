@@ -1,0 +1,22 @@
+# A script_demo mod written in Rust (roadmap E7.4b example). Not a member of the efeengine
+# workspace (the empty [workspace] table below): it is built for wasm32-unknown-unknown by
+# tests/wasm_mods_e2e.rs or by hand, see ../README.md.
+[package]
+name = "wasm_rust_mod"
+version = "1.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+efe-guest = { path = "../../../../crates/efe-guest" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[workspace]

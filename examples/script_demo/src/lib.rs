@@ -20,6 +20,10 @@
 //! packs them into `.efmod` files against the game's API index (and each other's), and
 //! `tests/packages_e2e.rs` packs, loads and runs them headless under a game policy.
 //!
+//! `wasm_mods/` holds two example mods written in Rust and C and compiled to wasm (translated to
+//! efevm by `efe-wasm`, E7.4b); they are not packed by `cargo xtask mods`, see `wasm_mods/README.md`
+//! and `tests/wasm_mods_e2e.rs`.
+//!
 //! The end-to-end test (`tests/e2e.rs`) calls the same `setup` and `spawn_world`.
 
 use std::sync::{Arc, Mutex};

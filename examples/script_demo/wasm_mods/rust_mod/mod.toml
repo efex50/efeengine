@@ -1,0 +1,43 @@
+[mod]
+id = "wasm_rust"
+version = "1.0.0"
+name = "Wasm Rust"
+description = "script_demo mod written in Rust: calls game.score_add/report and inventory.give, reads inventory.given, provides sum_squares, checksum and boom."
+game = "script_demo"
+
+# inventory's namespace needs no grant (it is a dependency). engine.events is for the event
+# calls of the translated module; game.* for score_add and report.
+[dependencies]
+inventory = "^1"
+
+[permissions]
+namespaces = ["engine.events", "game"]
+
+# The wasm to translate (design doc section 8; `efescript pack` of wasm is E7.4c).
+[build]
+wasm = "target/wasm32-unknown-unknown/release/wasm_rust_mod.wasm"
+# The size of the scratch region (scratch! in src/lib.rs).
+scratch = 256
+
+# The provides, as the C mod must say them (design doc 4.4). A Rust mod carries the same in its
+# efe.provide section (efe-guest's provide!); the test checks that the two agree.
+[[provide]]
+name = "sum_squares"
+export = "efe_provide_sum_squares"
+doc = "Sum of the squares 1..=n, collected in a heap array; -1 unless n is in 0..=256."
+params = ["n: i32"]
+results = ["result: i64"]
+
+[[provide]]
+name = "checksum"
+export = "efe_provide_checksum"
+doc = "Weighted byte sum of `name`: the sum of (index + 1) * byte, over a heap copy of the text."
+params = ["name: str"]
+results = ["result: i64"]
+
+[[provide]]
+name = "boom"
+export = "efe_provide_boom"
+doc = "Traps when `code` is 13, else returns `code * 2`."
+params = ["code: i32"]
+results = ["result: i32"]
