@@ -1,6 +1,6 @@
 //! Tree operations, ids, keys, owners, layers and the journal.
 
-use efeengine_ui::*;
+use efeui_core::*;
 
 fn tree() -> (UiTree, WidgetId) {
     let mut ui = UiTree::new();

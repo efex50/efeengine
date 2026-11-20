@@ -4,6 +4,7 @@ members = [
     "crates/core",
     "crates/core/macros",
     "crates/ui",
+    "crates/ui-core",
     "crates/editor-link",
     "crates/editor",
     "crates/project",

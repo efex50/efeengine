@@ -4,13 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut, RangeInclusive};
 use std::sync::Arc;
 
-use efeengine_core::prelude::TextureHandle;
 use smallvec::SmallVec;
 
 use crate::bindings::{Bind, BindTarget, BoundValue, Erased, TextSrc};
 use crate::id::{Owner, WidgetId};
 use crate::journal::UiChange;
-use crate::node::{ClassId, ImageFit, Layer, Node, NodeKind, clamp_slider};
+use crate::node::{ClassId, ImageFit, ImageId, Layer, Node, NodeKind, clamp_slider};
 use crate::signal::UiValue;
 use crate::style::*;
 use crate::theme::{Theme, WidgetState};
@@ -41,7 +40,8 @@ struct Slot {
     node: Option<Node>,
 }
 
-pub(crate) struct PendingBind {
+#[doc(hidden)]
+pub struct PendingBind {
     pub id: WidgetId,
     pub target: BindTarget,
     pub eval: Erased,
@@ -63,7 +63,8 @@ pub struct UiTree {
     /// Nodes created since the last `take_changes`.
     fresh: HashSet<WidgetId>,
     removed_log: Vec<WidgetId>,
-    pub(crate) pending_binds: Vec<PendingBind>,
+    #[doc(hidden)]
+    pub pending_binds: Vec<PendingBind>,
 }
 
 impl Default for UiTree {
@@ -429,12 +430,14 @@ impl UiTree {
     }
 
     /// Whether the bindings system has anything to absorb (new registrations or removed ids).
-    pub(crate) fn has_binding_work(&self) -> bool {
+    #[doc(hidden)]
+    pub fn has_binding_work(&self) -> bool {
         !self.pending_binds.is_empty() || !self.removed_log.is_empty()
     }
 
     /// Ids removed since the last call (the bindings system drops their bindings).
-    pub(crate) fn take_removed(&mut self) -> Vec<WidgetId> {
+    #[doc(hidden)]
+    pub fn take_removed(&mut self) -> Vec<WidgetId> {
         std::mem::take(&mut self.removed_log)
     }
 
@@ -552,7 +555,7 @@ impl UiTree {
         self.create(parent, NodeKind::gpu_view(painter))
     }
 
-    pub fn image(&mut self, parent: WidgetId, texture: TextureHandle, fit: ImageFit) -> NodeRef<'_> {
+    pub fn image(&mut self, parent: WidgetId, texture: ImageId, fit: ImageFit) -> NodeRef<'_> {
         self.create(parent, NodeKind::Image { texture, fit })
     }
 
@@ -710,7 +713,7 @@ impl UiTree {
     }
 
     /// Changes the texture of an `Image` (fit unchanged).
-    pub fn set_image(&mut self, id: WidgetId, texture: TextureHandle) -> bool {
+    pub fn set_image(&mut self, id: WidgetId, texture: ImageId) -> bool {
         let Some(node) = self.get_mut(id) else { return false };
         let NodeKind::Image { texture: t, .. } = &mut node.kind else { return false };
         if *t != texture {
@@ -906,7 +909,7 @@ impl UiTree {
         self.bind(id, BindTarget::Class, b.erase(BoundValue::Text));
     }
 
-    pub fn bind_image(&mut self, id: WidgetId, b: Bind<TextureHandle>) {
+    pub fn bind_image(&mut self, id: WidgetId, b: Bind<ImageId>) {
         self.bind(id, BindTarget::Image, b.erase(BoundValue::Image));
     }
 }

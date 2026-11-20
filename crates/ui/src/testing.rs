@@ -66,7 +66,7 @@ impl UiTest {
     }
 
     pub fn capture(&self) -> UiCapture {
-        self.engine.input().capture()
+        crate::capture::ui_capture(self.engine.input().capture())
     }
 
     /// The journal entries the backend received so far.

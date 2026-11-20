@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 
 use efeengine_core::prelude::TextureHandle;
+
+use crate::backend::ImageIdExt;
 use taffy::prelude::*;
 use taffy::{AlignItems, JustifyContent, Overflow};
 
@@ -179,7 +181,7 @@ fn build(n: &mut VNode, parent: Parent, tree: &mut TaffyTree<Leaf>, cx: &LayoutC
         NodeKind::Text { text } => (item_style(&st, parent), Leaf::Text(n.id, text_spec(&st, text, true))),
         NodeKind::Button { label } => (item_style(&st, parent), Leaf::Text(n.id, text_spec(&st, label, true))),
         NodeKind::Image { texture, .. } => {
-            let (iw, ih) = cx.images.get(texture).copied().unwrap_or((0, 0));
+            let (iw, ih) = cx.images.get(&texture.texture()).copied().unwrap_or((0, 0));
             (item_style(&st, parent), Leaf::Image(iw as f32, ih as f32))
         }
         NodeKind::Checkbox { label, .. } => {

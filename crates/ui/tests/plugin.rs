@@ -502,8 +502,8 @@ fn modal_layer_captures_through_input_state() {
     let mut t = UiTest::new(|_| {});
     t.ui_mut().layer("m", Layer::fill(5).modal());
     t.step(1);
-    assert_eq!(t.engine.input().capture(), UiCapture { pointer: true, keyboard: true });
-    assert_eq!(t.capture(), t.engine.input().capture());
+    assert_eq!(efeengine_ui::capture::ui_capture(t.engine.input().capture()), UiCapture { pointer: true, keyboard: true });
+    assert_eq!(t.capture(), efeengine_ui::capture::ui_capture(t.engine.input().capture()));
 }
 
 #[test]
@@ -610,9 +610,9 @@ mod image_refresh {
         {
             let ui = engine.resources_mut().get_mut::<UiTree>().unwrap();
             let r = ui.layer("r", Layer::fill(0));
-            a = ui.image(r, tex, ImageFit::Contain).id();
-            b = ui.image(r, tex, ImageFit::Fill).id();
-            c = ui.image(r, other, ImageFit::Fill).id();
+            a = ui.image(r, tex.image_id(), ImageFit::Contain).id();
+            b = ui.image(r, tex.image_id(), ImageFit::Fill).id();
+            c = ui.image(r, other.image_id(), ImageFit::Fill).id();
         }
         engine.run_frames(1, 1.0 / 60.0);
         {

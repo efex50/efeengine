@@ -21,6 +21,7 @@ use iced_core::{Background, Border, Color as IColor, Font, Length, Padding, Them
 use iced_widget::{button, checkbox, container, mouse_area, opaque, scrollable, slider, space, stack, text, text_input};
 use iced_wgpu::Renderer;
 
+use crate::backend::ImageIdExt;
 use crate::id::WidgetId;
 use crate::node::{Anchor, ImageFit, NodeKind};
 use crate::style::{Align, Color, Direction, Edges, Justify, Size, Style, TextAlign};
@@ -241,7 +242,7 @@ fn node_el<'a>(n: &'a VNode, parent: Parent, fill: bool, a: &'a Assets) -> Eleme
         }
         NodeKind::Image { texture, fit } => {
             let (w, h) = dims(st, parent);
-            match a.images.get(texture) {
+            match a.images.get(&texture.texture()) {
                 Some(handle) => iced_widget::image(handle.clone())
                     .content_fit(match fit {
                         ImageFit::Contain => ContentFit::Contain,

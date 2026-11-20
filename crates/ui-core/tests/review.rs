@@ -1,6 +1,6 @@
 //! Regressions from the independent review of the crate.
 
-use efeengine_ui::*;
+use efeui_core::*;
 
 fn tree() -> (UiTree, WidgetId) {
     let mut ui = UiTree::new();
@@ -9,21 +9,20 @@ fn tree() -> (UiTree, WidgetId) {
     (ui, root)
 }
 
-fn sync(be: &mut HeadlessBackend, tree: &UiTree, changes: &[UiChange]) {
-    let mut cx = UiBackendCx::new((800.0, 600.0), 1.0);
-    be.sync(tree, changes, tree.theme(), &mut cx);
+fn sync(be: &mut HeadlessModel, tree: &UiTree, changes: &[UiChange]) {
+    be.sync(tree, changes);
 }
 
 /// Takes the journal and checks it with the headless backend (which knows the ids from `seen`).
-fn check(be: &mut HeadlessBackend, h: &HeadlessHandle, ui: &mut UiTree) -> Vec<UiChange> {
+fn check(be: &mut HeadlessModel, h: &HeadlessHandle, ui: &mut UiTree) -> Vec<UiChange> {
     let ch = ui.take_changes();
     sync(be, ui, &ch);
     assert!(h.errors().is_empty(), "{:?} for {ch:?}", h.errors());
     ch
 }
 
-fn synced(ui: &mut UiTree) -> (HeadlessBackend, HeadlessHandle) {
-    let (mut be, h) = HeadlessBackend::new();
+fn synced(ui: &mut UiTree) -> (HeadlessModel, HeadlessHandle) {
+    let (mut be, h) = HeadlessModel::new();
     // Make the backend aware of every live node.
     let created: Vec<UiChange> = ui.iter().map(|(id, _)| UiChange::Created(id)).collect();
     sync(&mut be, ui, &created);

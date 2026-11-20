@@ -1,5 +1,8 @@
 //! The Elm-style view layer (API.md section 16), built on the retained tree.
 //!
+//! The element descriptions and the reconciler are `efeui_core::view`; the runtime that runs
+//! the views every frame (`UiView`) is here.
+//!
 //! ```ignore
 //! use efeengine_ui::view::*;
 //! use efeengine_ui::{column, Layer};
@@ -35,11 +38,10 @@
 //! - `PostUpdate`, `order::LATE + 11`: the views (after bindings, deterministic), then the
 //!   plugin's sync at `LATE + 20` hands the journal to the backend.
 
-mod el;
 mod plugin;
-mod reconcile;
 
-pub use el::{
-    El, IntoChildren, button, button_with, checkbox, column, container, gpu_view, image, row, scroll, slider, slot, text, text_input,
+pub use efeui_core::view::{
+    El, IntoChildren, button, button_with, checkbox, column, container, el, gpu_view, image, reconcile, row, scroll, slider, slot, text,
+    text_input,
 };
 pub use plugin::{RunCondition, UiView, UiViews, ViewCx, changed};

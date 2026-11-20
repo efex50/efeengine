@@ -21,6 +21,7 @@ use web_sys::{
 };
 
 use crate::backend::{UiBackend, UiBackendCx};
+use crate::backend::ImageIdExt;
 use crate::capture::UiCapture;
 use crate::css;
 use crate::dom_plan::{self, Decl};
@@ -800,7 +801,7 @@ impl Inner {
                         ImageFit::None => "none",
                     },
                 );
-                if let Some((_, img)) = cx.images.iter().find(|(h, _)| h == texture) {
+                if let Some((_, img)) = cx.images.iter().find(|(h, _)| *h == texture.texture()) {
                     draw_image(&e.el, img.size(), img.rgba8());
                 }
             }

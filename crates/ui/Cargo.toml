@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 efeengine-core = { path = "../core" }
+efeui-core = { path = "../ui-core" }
 smallvec = "1.16.5"
 thiserror = "2.0.21"
 

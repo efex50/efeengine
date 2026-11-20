@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use efeengine_core::prelude::TextureHandle;
 use smallvec::SmallVec;
 
 use crate::id::{Owner, WidgetId};
@@ -11,6 +10,11 @@ use crate::style::Style;
 /// Interned class name (see [`UiTree::class_id`](crate::UiTree::class_id)).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ClassId(pub u32);
+
+/// Opaque key of an image the host provides (the adapter maps it to its own texture or asset
+/// handle). The tree never looks inside.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct ImageId(pub u32);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ImageFit {
@@ -26,7 +30,7 @@ pub enum NodeKind {
     /// Flex box: row or column (`Style::direction`).
     Container,
     Text { text: String },
-    Image { texture: TextureHandle, fit: ImageFit },
+    Image { texture: ImageId, fit: ImageFit },
     /// A label, or children instead (icon + text).
     Button { label: String },
     Checkbox { label: String, checked: bool },

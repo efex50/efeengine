@@ -1,0 +1,11 @@
+[package]
+name = "efeui-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Engine-agnostic UI model: retained tree, journal, styles, themes, signals, bindings, view layer"
+
+# No engine, renderer or windowing dependencies: adapters (efeengine-ui, a Bevy one) build on this.
+[dependencies]
+smallvec = "1.16.5"
+thiserror = "2.0.21"

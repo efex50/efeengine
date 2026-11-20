@@ -1,6 +1,6 @@
 # efeengine-ui: the common UI API
 
-> **Status:** Implemented in `crates/ui`: sections 1 to 8, 10, 12 (capture, same-frame events), 13 to 16; not yet: scripts and mods (9), native backends (11 fonts bundled, 13 render); the web backend is done except fonts (Phase 2)\
+> **Status:** Implemented in `crates/ui` (the engine adapter) on top of `crates/ui-core` (package `efeui-core`: tree, node, id, journal, style, theme, css, dom_plan, signal types, bindings, `El` and the reconciler, the headless checker; no engine dependency; `efeengine-ui` re-exports it under the same module paths): sections 1 to 8, 10, 12 (capture, same-frame events), 13 to 16; not yet: scripts and mods (9), native backends (11 fonts bundled, 13 render); the web backend is done except fonts (Phase 2)\
 > **Date:** 2026-11-17\
 > **Roadmap:** [`ui-roadmap.md`](../../ui-roadmap.md)\
 > **Backends:** web (HTML + CSS), native iced, native fallback ([`FALLBACK_NATIVE.md`](FALLBACK_NATIVE.md)), headless (tests)

@@ -12,7 +12,7 @@ use efeengine_core::render::Image;
 use efeengine_ui::view::*;
 pub mod shape;
 
-use efeengine_ui::{EngineUiExt, ImageFit, PointerEvent, Layer, Size, Style, UiPlugin, column, row};
+use efeengine_ui::{EngineUiExt, ImageFit, TextureExt, PointerEvent, Layer, Size, Style, UiPlugin, column, row};
 
 /// The game state, read by both views and changed by the update system.
 #[derive(Debug, Clone, PartialEq)]
@@ -77,7 +77,7 @@ fn menu_view(s: &Settings) -> El<Msg> {
     column![
         text("UI demo").class("title").key("title"),
         s.logo
-            .map(|t| image(t, ImageFit::Contain).key("logo").style(Style::new().width(Size::Px(64.0)).height(Size::Px(64.0))))
+            .map(|t| image(t.image_id(), ImageFit::Contain).key("logo").style(Style::new().width(Size::Px(64.0)).height(Size::Px(64.0))))
             .unwrap_or_else(|| container().key("logo")),
         gpu_view("demo_shape").key("shape").width(Size::Px(160.0)).height(Size::Px(120.0)).on_pointer(Msg::Shape),
         row![

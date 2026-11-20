@@ -203,7 +203,7 @@ fn images_take_their_pixel_size_and_hidden_nodes_no_space() {
     let img = TextureHandle { id: 5 };
     let mut tree = UiTree::new();
     let root = tree.layer("l", Layer::top_left(0));
-    tree.image(root, img, ImageFit::Contain).key("img");
+    tree.image(root, img.image_id(), ImageFit::Contain).key("img");
     tree.text(root, "hidden").key("hid").visible(false);
     tree.text(root, "after").key("after");
     let mut b = FallbackBackend::new();
@@ -275,7 +275,7 @@ fn image_quads_carry_uvs_for_cover() {
     let img = TextureHandle { id: 5 };
     let mut tree = UiTree::new();
     let root = tree.layer("l", Layer::top_left(0));
-    tree.image(root, img, ImageFit::Cover).style(Style::new().width(Size::Px(100.0)).height(Size::Px(50.0))).key("i");
+    tree.image(root, img.image_id(), ImageFit::Cover).style(Style::new().width(Size::Px(100.0)).height(Size::Px(50.0))).key("i");
     let mut b = FallbackBackend::new();
     let mut cx = UiBackendCx::new((200.0, 200.0), 1.0);
     cx.images = vec![(img, std::sync::Arc::new(Image::solid(50, 50, [255, 0, 0, 255])))];

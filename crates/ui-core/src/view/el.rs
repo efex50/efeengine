@@ -3,9 +3,8 @@
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
-use efeengine_core::prelude::TextureHandle;
 
-use crate::node::{ImageFit, NodeKind};
+use crate::node::{ImageFit, ImageId, NodeKind};
 use crate::signal::{PointerEvent, UiSignalKind, UiValue};
 #[allow(unused_imports)]
 use crate::style::{Align, Border, Color, Direction, Edges, FontId, Justify, Size, Style, TextAlign, style_fields};
@@ -13,7 +12,7 @@ use crate::style::{Align, Border, Color, Direction, Edges, FontId, Justify, Size
 type Map<A, Msg> = Arc<dyn Fn(A) -> Msg + Send + Sync>;
 
 /// The message constructors of one element.
-pub(crate) struct Handlers<Msg> {
+pub struct Handlers<Msg> {
     pub click: Option<Msg>,
     pub change: Option<Map<f32, Msg>>,
     pub toggle: Option<Map<bool, Msg>>,
@@ -342,7 +341,7 @@ pub fn text_input<Msg>(value: impl Into<String>) -> El<Msg> {
     El::new(NodeKind::text_input(value))
 }
 
-pub fn image<Msg>(texture: TextureHandle, fit: ImageFit) -> El<Msg> {
+pub fn image<Msg>(texture: ImageId, fit: ImageFit) -> El<Msg> {
     El::new(NodeKind::Image { texture, fit })
 }
 

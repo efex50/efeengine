@@ -41,7 +41,7 @@ use efeengine_core::prelude::*;
 use efeengine_core::scripting::{LogLevel, ModuleId, ScriptEvent, ScriptHost};
 
 use crate::id::{Owner, WidgetId};
-use crate::node::{Anchor, ImageFit, KindTag, Layer, NodeKind};
+use crate::node::{Anchor, ImageFit, ImageId, KindTag, Layer, NodeKind};
 use crate::signal::{UiSignal, UiSignalKind, UiValue};
 use crate::style::{Color, Direction, Edges, Size};
 use crate::tree::UiTree;
@@ -831,7 +831,7 @@ fn register_all(engine: &mut Engine) -> Result<UiScripts, String> {
         move |c, a, r| {
             let (parent, texture, fit) = (a.i64(0)?, a.i32(1)?, a.i32(2)?);
             let h = run(c, &s, |g, w| {
-                let kind = NodeKind::Image { texture: TextureHandle { id: texture.max(0) as u32 }, fit: fit_from(fit) };
+                let kind = NodeKind::Image { texture: ImageId(texture.max(0) as u32), fit: fit_from(fit) };
                 g.create(w, "image", parent, kind)
             })?;
             r.set_i64(0, h)?;

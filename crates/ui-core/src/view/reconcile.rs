@@ -12,7 +12,7 @@ use crate::id::WidgetId;
 use crate::tree::UiTree;
 use crate::view::el::{El, Handlers};
 
-pub(crate) type Table<Msg> = HashMap<WidgetId, Handlers<Msg>>;
+pub type Table<Msg> = HashMap<WidgetId, Handlers<Msg>>;
 
 fn join(prefix: &str, key: &str) -> String {
     let mut s = String::with_capacity(prefix.len() + 1 + key.len());
@@ -24,7 +24,7 @@ fn join(prefix: &str, key: &str) -> String {
 
 /// Panics (before anything is applied) if two keyed elements get the same tree key, or a slot
 /// has children.
-pub(crate) fn validate<Msg>(el: &El<Msg>, prefix: &str, seen: &mut HashSet<String>) {
+pub fn validate<Msg>(el: &El<Msg>, prefix: &str, seen: &mut HashSet<String>) {
     let own;
     let child_prefix = match &el.key {
         Some(k) => {
@@ -47,7 +47,7 @@ pub(crate) fn validate<Msg>(el: &El<Msg>, prefix: &str, seen: &mut HashSet<Strin
 }
 
 /// Reconciles `root` as the only child of `layer`. `prefix` is the view name (the layer key).
-pub(crate) fn reconcile_root<Msg: Clone>(tree: &mut UiTree, layer: WidgetId, prefix: &str, root: El<Msg>, table: &mut Table<Msg>) {
+pub fn reconcile_root<Msg: Clone>(tree: &mut UiTree, layer: WidgetId, prefix: &str, root: El<Msg>, table: &mut Table<Msg>) {
     reconcile_children(tree, layer, vec![root], prefix, table);
 }
 

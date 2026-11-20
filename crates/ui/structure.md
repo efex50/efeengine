@@ -1,18 +1,18 @@
 # efeengine-ui
 
-The common UI API of the engine (design: `docs/ui/API.md`, sections 1 to 15; plan: `ui-roadmap.md`, Phase 1 retained layer; scripts and mods: section 9, `src/scripting.rs`; guide: `docs/ui/GUIDE.md`). A retained `UiTree` resource with a change journal, a style subset and themes, signals, bindings, the `UiBackend` trait, a headless backend and the `UiTest` helper. The web backend (DOM) is real (Phase 2); the native iced backend is in progress (Phase 0 spike done, the start of Phase 3); the fallback backend (`src/fallback`, feature `fallback`, phases F1 to F3) is built and tested, wired through core's `Draw2DOverlay` (`docs/ui/FALLBACK_NATIVE.md` section 9; `UiPlugin::fallback()`, automatic in SDL mode); no UI toolkit type appears in the API. The Elm-style view layer (section 16) is the `view` module, built on top of the public tree API.
+The common UI API of the engine (design: `docs/ui/API.md`, sections 1 to 15; plan: `ui-roadmap.md`, Phase 1 retained layer; scripts and mods: section 9, `src/scripting.rs`; guide: `docs/ui/GUIDE.md`). A retained `UiTree` resource with a change journal, a style subset and themes, signals, bindings, the `UiBackend` trait, a headless backend and the `UiTest` helper. The web backend (DOM) is real (Phase 2); the native iced backend is in progress (Phase 0 spike done, the start of Phase 3); the fallback backend (`src/fallback`, feature `fallback`, phases F1 to F3) is built and tested, wired through core's `Draw2DOverlay` (`docs/ui/FALLBACK_NATIVE.md` section 9; `UiPlugin::fallback()`, automatic in SDL mode); no UI toolkit type appears in the API. The Elm-style view layer (section 16) is the `view` module, built on top of the public tree API. The engine-free model (tree, journal, styles, themes, css, signals, bindings, `El` and the reconciler, the headless checker) lives in the separate crate `efeui-core` (`crates/ui-core`); this crate is its engine adapter: backends, plugin, scripting, painters, `UiTest`, and the conversions of engine types (`TextureHandle` <-> `ImageId`, `InputCapture` <-> `UiCapture`, engine access in `BindCx`).
 
 ## At a glance
 | | |
 |---|---|
 | Path | `crates/ui` |
 | Kind | library (rlib) |
-| Depends on (workspace) | `efeengine-core` (Engine, Plugin, Ctx, Resources, Events, `InputEvent`, `TextureHandle`) |
-| External deps | `smallvec` (node classes), `thiserror` (`TreeError`); native + feature `iced` (default): `iced_wgpu`, `iced_widget`, `iced_runtime`, `iced_core` (iced main, git, pinned to `e5c350f2`, wgpu 30) and `pollster`; native + feature `fallback`: `taffy` 0.15 and `cosmic-text` (git, the rev iced uses) |
+| Depends on (workspace) | `efeui-core` (the engine-agnostic model, `crates/ui-core`; re-exported here under the same module paths), `efeengine-core` (Engine, Plugin, Ctx, Resources, Events, `InputEvent`, `TextureHandle`) |
+| External deps | `smallvec`, `thiserror` (also pulled by `efeui-core`); native + feature `iced` (default): `iced_wgpu`, `iced_widget`, `iced_runtime`, `iced_core` (iced main, git, pinned to `e5c350f2`, wgpu 30) and `pollster`; native + feature `fallback`: `taffy` 0.15 and `cosmic-text` (git, the rev iced uses) |
 | Used by | `examples/ui_demo`, `examples/coin_dash`, `examples/coin_dash_mods` |
 | Features | `fallback`: the Draw2D backend (taffy + cosmic-text), native only; `UiPlugin::new()` picks it (or iced) once the graphics mode is known (`Engine::on_graphics_ready`, a no-op `PendingBackend` until then), so `auto` falling back to SDL works. `iced` (default): the native backend. Its dependencies sit under `cfg(not(wasm32))`, so wasm builds never see iced. Without the feature `UiPlugin::new()` is headless on native. `examples/ui_demo` forwards it (`default-features = false` on the ui dependency) |
 | Targets | native and `wasm32-unknown-unknown` (both check clean) |
-| Tests | `tests/windows.rs` (6: layers per window, modal scoping, one backend instance per window, input routing, closed windows, headless all-windows); unit tests in `src/` (24: css, dom_plan, native model / convert / keyed), `tests/tree.rs` (14), `tests/theme.rs` (5), `tests/plugin.rs` (25), `tests/review.rs` (9), `tests/settings.rs` (2), `tests/view.rs` (22), `tests/gpu_view.rs` (4), `tests/scripts.rs` (11: mods and scripts building UI, grants, handles, signals, limits, mount points, unload); headless, no window or GPU. `tests/native_gpu.rs` (3, `#[ignore]`: focus navigation, identity across layer insertion and reorder, idle vs active frames on a real GPU; run with `-- --ignored`); `tests/fallback.rs` (29) and `tests/fallback_pixels.rs` (2 + 1 `#[ignore]`) need `--features fallback`: fallback layout, drawing into a `DrawList`, interaction, text input, offscreen pixels (SDL software renderer; wgpu / SDL comparison on a GPU); `examples/ui_demo/tests/fallback_screenshot.rs` (PNGs of the menu through the fallback in SDL and wgpu); `examples/ui_demo/tests/native_screenshot.rs` (2, `#[ignore]`: PNG of the menu incl. the GPU view and its pixel checks, re-present equality) |
+| Tests | `tests/windows.rs` (6: layers per window, modal scoping, one backend instance per window, input routing, closed windows, headless all-windows); unit tests in `src/` (native model / convert / keyed; the css and dom_plan ones and `tests/tree.rs`, `tests/theme.rs`, `tests/review.rs` moved to `efeui-core`), `tests/plugin.rs` (25), `tests/settings.rs` (2), `tests/view.rs` (22), `tests/gpu_view.rs` (4), `tests/scripts.rs` (11: mods and scripts building UI, grants, handles, signals, limits, mount points, unload); headless, no window or GPU. `tests/native_gpu.rs` (3, `#[ignore]`: focus navigation, identity across layer insertion and reorder, idle vs active frames on a real GPU; run with `-- --ignored`); `tests/fallback.rs` (29) and `tests/fallback_pixels.rs` (2 + 1 `#[ignore]`) need `--features fallback`: fallback layout, drawing into a `DrawList`, interaction, text input, offscreen pixels (SDL software renderer; wgpu / SDL comparison on a GPU); `examples/ui_demo/tests/fallback_screenshot.rs` (PNGs of the menu through the fallback in SDL and wgpu); `examples/ui_demo/tests/native_screenshot.rs` (2, `#[ignore]`: PNG of the menu incl. the GPU view and its pixel checks, re-present equality) |
 
 ## Layout
 ```text
@@ -23,26 +23,19 @@ crates/ui
 ├── structure.md
 ├── src
 │   ├── lib.rs        module list and re-exports (everything public is importable from the crate root)
-│   ├── id.rs         WidgetId (generational), Owner (Game / Plugin / Mod)
-│   ├── style.rs      Style (all fields Option, `merge` / `overlaid`, chained setters), Color, Edges, Size, Border, Direction, Justify, Align, TextAlign, FontId
+│   ├── id.rs         re-export of `efeui_core::id` (WidgetId, Owner); the same for style, node, journal, tree, theme, css and dom_plan (`pub use efeui_core::x;` in lib.rs)
 │   ├── painter.rs    UiPainter, ViewTarget, UiPainters (registry), EngineUiExt (add_ui_painter)
-│   ├── node.rs       NodeKind, KindTag, ImageFit, ClassId, Anchor, Layer, Node (read accessors)
-│   ├── journal.rs    UiChange
-│   ├── tree.rs       UiTree (slots, keys, owners, layers, classes, fonts, journal, builders, setters, theme), NodeRef (builder handle), StyleMut, TreeError
-│   ├── theme.rs      Theme, StateStyles, WidgetState, resolution, built-in dark theme
-│   ├── signal.rs     UiSignal, UiSignalKind, UiValue, UiCtxExt (`cx.ui_signals()`), filter_signals
-│   ├── bindings.rs   Bind<T>, BindCx, UiBindings resource, BindUpdate, TextSrc
-│   ├── capture.rs    UiCapture (alias of core's `InputCapture`)
-│   ├── backend.rs    UiBackend trait, Filter, UiBackendCx
-│   ├── css.rs        pure CSS generation (class names, declarations, base and theme state stylesheets), target independent
-│   ├── dom_plan.rs   pure parts of the web backend (element tag, class list, inline declarations, style diff), native unit tests
+│   ├── signal.rs     re-exports `efeui_core::signal`; adds UiCtxExt (`cx.ui_signals()`)
+│   ├── bindings.rs   re-exports `efeui_core::bindings`; adds `engine_bind_cx`, BindCxExt (resources, world, time) and BindExt (`Bind::res`, `Bind::query`)
+│   ├── capture.rs    re-exports core's `UiCapture`; `input_capture` / `ui_capture` convert to and from the engine's `InputCapture`
+│   ├── backend.rs    UiBackend trait, Filter, UiBackendCx, TextureExt / ImageIdExt (`TextureHandle` <-> `ImageId`)
 │   ├── web.rs        WebBackend (wasm32 only): DOM elements, delegated listeners, capture
 │   ├── native/       IcedBackend (native, feature `iced`): mod.rs (backend, input, render, messages -> signals, focus navigation, clipboard, cursor icon), model.rs (owned, theme-resolved copy of the tree, text-property inheritance), view.rs (model -> iced Element, style mapping), keyed.rs (`Keyed` wrapper: stable widget identity), assets.rs (image handles, font registry, the bundled Inter), convert.rs (engine InputEvent -> iced Event, physical keys), offscreen.rs (render a tree to an offscreen texture + PNG, for screenshots)
 │   ├── fallback/     FallbackBackend (native, feature `fallback`): mod.rs (backend, `prepare` / `take_atlas_image` / `draw`, UiBackend impl), model.rs (theme-resolved copy of the tree), layout.rs (taffy tree per layer, measured leaves), paint.rs (model -> DrawList: boxes, text, images, widgets, scrollbars), shapes.rs (feathered rounded-rect / ring meshes), text.rs (cosmic-text fonts, shaping, CPU glyph atlas), input.rs (hit test, hover / press / focus, widget state machines, signals, scroll), edit.rs (single-line editor on cosmic_text::Editor), offscreen.rs (record + render with SDL's software renderer or wgpu to RGBA8 for tests and screenshots)
-│   ├── headless.rs   HeadlessBackend (journal recorder and consistency checker) and HeadlessHandle
+│   ├── headless.rs   HeadlessBackend (a UiBackend around core's `HeadlessModel`); also re-exports HeadlessModel and HeadlessHandle
 │   ├── plugin.rs     UiPlugin (resources and four main-thread systems; also registers the script side; one backend instance per window with a layer: `Backends` slots, `with_window_backends`, per-window input routing and overlay calls)
 │   ├── scripting.rs  script and mod access (API.md section 9): the `ui` host namespace, the `ui.signal` event, `UiScripts` (limits, mount points, violations), the queue and its apply system
-│   ├── view/         the Elm-style view layer: mod.rs (docs: key scheme, frame order), el.rs (El, IntoChildren, constructors, `column!` / `row!`), reconcile.rs (tree diff), plugin.rs (UiView, UiViews, ViewCx, RunCondition, `changed`)
+│   ├── view/         the Elm-style view layer: mod.rs (docs: key scheme, frame order; re-exports core's `El`, constructors and `reconcile`), plugin.rs (UiView, UiViews, ViewCx, RunCondition, `changed`); `El` and the reconciler live in `efeui_core::view`
 │   └── testing.rs    UiTest
 └── tests/            see above
 ```

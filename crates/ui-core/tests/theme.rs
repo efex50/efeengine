@@ -1,6 +1,6 @@
 //! Theme resolution.
 
-use efeengine_ui::*;
+use efeui_core::*;
 
 fn red() -> Color {
     Color::hex(0xff0000)

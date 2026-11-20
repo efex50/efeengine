@@ -1334,6 +1334,7 @@ version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "efeengine-core",
+ "efeui-core",
  "iced_core",
  "iced_runtime",
  "iced_wgpu",
@@ -1378,6 +1379,14 @@ dependencies = [
  "rodio",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "efeui-core"
+version = "0.1.0"
+dependencies = [
+ "smallvec",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

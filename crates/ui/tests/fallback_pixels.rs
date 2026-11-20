@@ -18,7 +18,7 @@ fn scene() -> (UiTree, Vec<(TextureHandle, Arc<Image>)>) {
     let row = t.container(root).style(Style::new().direction(Direction::Row).gap(10.0).padding(10.0)).id();
     t.container(row)
         .style(Style::new().width(Size::Px(40.0)).height(Size::Px(40.0)).background(Color::rgb(1.0, 0.0, 0.0)).border(Border::new(2.0, Color::rgb(0.0, 1.0, 0.0), 10.0)));
-    t.image(row, img, ImageFit::Fill).style(Style::new().width(Size::Px(40.0)).height(Size::Px(40.0)));
+    t.image(row, img.image_id(), ImageFit::Fill).style(Style::new().width(Size::Px(40.0)).height(Size::Px(40.0)));
     t.text(row, "Hello").style(Style::new().text_color(Color::WHITE).font_size(20.0));
     (t, vec![(img, Arc::new(Image::solid(8, 8, [0, 0, 255, 255])))])
 }

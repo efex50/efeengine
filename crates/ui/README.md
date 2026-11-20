@@ -1,6 +1,6 @@
 # efeengine-ui
 
-The engine-owned UI API: a retained tree (`UiTree`) with a change journal, styles, themes, signals, bindings and a backend trait. Backends turn the tree into real widgets (web DOM, iced, a native fallback); a headless backend and `UiTest` drive it in tests. Design: `docs/ui/API.md`. Layout and details: `structure.md`.
+The engine-owned UI API (the engine adapter of `efeui-core`, `crates/ui-core`, which holds the engine-agnostic model; its modules are re-exported here under the same paths): a retained tree (`UiTree`) with a change journal, styles, themes, signals, bindings and a backend trait. Backends turn the tree into real widgets (web DOM, iced, a native fallback); a headless backend and `UiTest` drive it in tests. Design: `docs/ui/API.md`. Layout and details: `structure.md`.
 
 ```rust
 engine.add_plugin(UiPlugin::new())?;            // web DOM backend on wasm32, iced on native (feature `iced`, default) when there is a window, else headless (UiPlugin::headless() forces headless)
@@ -36,4 +36,6 @@ t.click("menu/play");
 t.step(1);
 ```
 
-Run the tests with `cargo test -p efeengine-ui`.
+Engine types the model does not know: images are `ImageId` in the tree (`texture.image_id()` and `id.texture()` convert, traits `TextureExt` / `ImageIdExt`); `Bind::res` and `Bind::query` come from the `BindExt` trait (in scope with `use efeengine_ui::*`).
+
+Run the tests with `cargo test -p efeengine-ui` (engine side) and `cargo test -p efeui-core` (model, no engine).

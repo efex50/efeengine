@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 
 use efeengine_core::prelude::TextureHandle;
+
+use crate::backend::ImageIdExt;
 use efeengine_core::render::{Draw2D, DrawList, Filter, Rect, RectI};
 
 use super::edit::{InputState, caret_x};
@@ -241,12 +243,12 @@ impl Painter<'_> {
                 self.text_input(n, &base, &st, value, placeholder, *password, content, clip);
             }
             NodeKind::Image { texture, fit } => {
-                let Some((iw, ih)) = self.images.get(texture).copied() else { return };
+                let Some((iw, ih)) = self.images.get(&texture.texture()).copied() else { return };
                 let (dest, uv) = fit_image(*fit, r, (iw as f32, ih as f32));
                 self.flush();
                 self.set_clip(clip.map_or(Some(r), |c| Some(c.intersect(&r))));
                 self.out.set_filter(Filter::Linear);
-                self.out.quad(Some(*texture), self.ph(dest), uv, [1.0, 1.0, 1.0, op.clamp(0.0, 1.0)]);
+                self.out.quad(Some(texture.texture()), self.ph(dest), uv, [1.0, 1.0, 1.0, op.clamp(0.0, 1.0)]);
                 self.out.set_filter(Filter::Nearest);
                 self.set_clip(clip);
             }

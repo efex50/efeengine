@@ -35,7 +35,8 @@ use efeengine_core::render::{Gpu, Image, RenderOverlay};
 
 use crate::backend::{UiBackend, UiBackendCx};
 use crate::capture::UiCapture;
-use crate::bindings::{BindCx, UiBindings};
+use crate::backend::ImageIdExt;
+use crate::bindings::{UiBindings, engine_bind_cx};
 use crate::headless::HeadlessBackend;
 use efeengine_core::engine::config::GraphicsMode;
 use crate::journal::UiChange;
@@ -342,7 +343,7 @@ impl Plugin for UiPlugin {
                 }
                 let updates = match cx.resources.get::<UiBindings>() {
                     Some(binds) if !binds.is_empty() => {
-                        binds.evaluate(&BindCx { resources: &*cx.resources, world: &*cx.world, time: cx.time })
+                        engine_bind_cx(&*cx.resources, &*cx.world, cx.time, |bcx| binds.evaluate(bcx))
                     }
                     _ => return,
                 };
@@ -382,10 +383,10 @@ impl Plugin for UiPlugin {
                             for ch in changes {
                                 let (UiChange::Created(id) | UiChange::Kind(id)) = ch else { continue };
                                 if let Some(NodeKind::Image { texture, .. }) = tree.kind(*id)
-                                    && let Some(img) = textures.get(*texture)
-                                    && !images.iter().any(|(h, _)| h == texture)
+                                    && let Some(img) = textures.get(texture.texture())
+                                    && !images.iter().any(|(h, _)| *h == texture.texture())
                                 {
-                                    images.push((*texture, img.clone()));
+                                    images.push((texture.texture(), img.clone()));
                                 }
                             }
                         }
@@ -403,7 +404,7 @@ impl Plugin for UiPlugin {
                             let _ = seen.remove(&h);
                             let Some(img) = textures.get(h) else { continue };
                             for (id, n) in tree.iter() {
-                                if matches!(n.kind(), NodeKind::Image { texture, .. } if *texture == h) {
+                                if matches!(n.kind(), NodeKind::Image { texture, .. } if texture.texture() == h) {
                                     if !changes.contains(&UiChange::Kind(id)) && !changes.contains(&UiChange::Created(id)) {
                                         changes.push(UiChange::Kind(id));
                                     }

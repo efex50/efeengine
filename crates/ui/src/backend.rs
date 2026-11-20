@@ -8,12 +8,35 @@ use efeengine_core::render::Image;
 
 use crate::capture::UiCapture;
 use crate::journal::UiChange;
+use crate::node::ImageId;
 use crate::signal::UiSignal;
 use crate::theme::Theme;
 use crate::tree::UiTree;
 
 pub use efeengine_core::input::Filter;
 use efeengine_core::render::Gpu;
+
+/// `TextureHandle` to the core-owned [`ImageId`] the tree stores.
+pub trait TextureExt {
+    fn image_id(self) -> ImageId;
+}
+
+impl TextureExt for TextureHandle {
+    fn image_id(self) -> ImageId {
+        ImageId(self.id)
+    }
+}
+
+/// [`ImageId`] back to the engine's `TextureHandle`.
+pub trait ImageIdExt {
+    fn texture(self) -> TextureHandle;
+}
+
+impl ImageIdExt for ImageId {
+    fn texture(self) -> TextureHandle {
+        TextureHandle { id: self.0 }
+    }
+}
 
 /// Where the OS text-input (IME) area should be, in logical pixels; `cursor` is the caret offset
 /// in characters inside the area. Sent by the plugin as `set_text_input_area`.
