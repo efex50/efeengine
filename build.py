@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "scripts"))
+import remote  # noqa: E402  (scripts/remote.py: build on a remote machine over SSH)
 import web  # noqa: E402  (scripts/web.py)
 
 IS_WIN = os.name == "nt"
@@ -20,7 +21,7 @@ WASM_TARGET = web.WASM_TARGET
 COLOR = sys.stdout.isatty() and (not IS_WIN or os.environ.get("WT_SESSION") or os.environ.get("ANSICON"))
 
 USAGE = """\
-Usage: build.py [--dry-run] [--no-preflight] [<command> ...]
+Usage: build.py [--dry-run] [--no-preflight] [--remote[=HOST]] [<command> ...]
 
   ./build.py                                  interactive: pick example, native/web, build or run
   ./build.py run   [<example>] [native|web] [--release] [--static] [--port N]
@@ -43,6 +44,14 @@ Options:
   --port N         web server port (default 8080)
   --dry-run        print commands instead of running them
   --no-preflight   skip the SDL3 / cmake / cc checks before native builds
+  --remote[=HOST]  native build/run/editor/check/test: cargo runs on a remote machine over SSH
+                   (the tree is rsynced there), the built executables are fetched into
+                   target/<profile>/ and run on this PC. HOST is any ssh destination; bare
+                   --remote uses $EFE_REMOTE_HOST or `git config remotebuild.host`.
+                   Directory: $EFE_REMOTE_DIR / remotebuild.dir (default remote-builds/<repo>),
+                   jobs: $EFE_REMOTE_JOBS / remotebuild.jobs (default: remote cores - 3).
+                   Not for web/dist. Example: ./build.py --remote run coin_dash native
+                   (see docs/REMOTE_BUILD.md, scripts/remote.py doctor)
 
 On Windows use: python build.py ...
 Environment: CARGO_TARGET_DIR is respected; WASM_BINDGEN selects a wasm-bindgen binary.
@@ -75,6 +84,7 @@ def need_args(msg):
 class Ctx:
     dry = False
     preflight = True
+    remote = None  # remote.Remote when --remote is given
 
 
 def run(cmd, **kw):
@@ -148,6 +158,58 @@ def pick_example(given):
     raise need_args(f"missing <example> (available: {' '.join(exs)})")
 
 
+# ------------------------------------------------------------- remote ----
+def sdl3_runtime_found():
+    """libSDL3 loadable at run time (what a remotely built, dynamically linked binary needs)."""
+    ldconfig = shutil.which("ldconfig") or "/sbin/ldconfig"
+    try:
+        out = subprocess.run([ldconfig, "-p"], capture_output=True, text=True).stdout
+        if "libSDL3.so" in out:
+            return True
+    except OSError:
+        pass
+    return sdl3_found()
+
+
+def need_local_only(what):
+    if Ctx.remote:
+        raise Fail(f"--remote supports native builds only (not for {what})")
+
+
+def remote_cargo(sub, args, fetch_names=None):
+    """Run cargo on the remote; with fetch_names, bring those executables into the local
+    target/<profile>/ afterwards."""
+    r = Ctx.remote
+    try:
+        if r.cargo(sub, args) != 0:
+            raise Fail(f"remote cargo {sub} failed")
+        if fetch_names:
+            profile = remote.profile_dir(args)
+            r.fetch(profile, dest=remote.local_profile_dir(profile), names=fetch_names)
+    except remote.RemoteError as e:
+        raise Fail(str(e))
+
+
+def cargo_build(args, fetch_names=None):
+    """cargo build ARGS locally, or on the remote with --remote."""
+    if Ctx.remote:
+        remote_cargo("build", args, fetch_names)
+    else:
+        run(["cargo", "build"] + args)
+
+
+def remote_exe(name, release):
+    return remote.local_profile_dir("release" if release else "debug") / name
+
+
+def native_preflight_or_remote(static):
+    if not Ctx.remote:
+        preflight_native(static)
+    elif not static and not IS_WIN and Ctx.preflight and not sdl3_runtime_found():
+        warn("no libSDL3.so found on this PC: a remotely built binary needs SDL3 at run time "
+             "(install it, e.g. dnf install SDL3 / apt install libsdl3-0, or pass --static)")
+
+
 # ----------------------------------------------------------- preflight ----
 def sdl3_found():
     if shutil.which("pkg-config") and subprocess.run(["pkg-config", "--exists", "sdl3"]).returncode == 0:
@@ -193,14 +255,28 @@ def preflight_native(static):
 # ------------------------------------------------------ build/run actions --
 def do_native(action, ex, release, static):
     pkg = web.package_name(ex)
-    need_cargo()
-    preflight_native(static)
+    if not Ctx.remote:
+        need_cargo()
+    native_preflight_or_remote(static)
     extra = (["--release"] if release else []) + (["--features", "efeengine-core/static"] if static else [])
     desc = ("release" if release else "debug") + (", static SDL3" if static else "")
     if has_native_bin(ex):
-        step(f"native {action}: {pkg} ({desc})")
+        step(f"native {action}: {pkg} ({desc})" + (f" on {Ctx.remote.host}" if Ctx.remote else ""))
         try:
-            run(["cargo", action, "-p", pkg, "--bin", pkg] + extra)
+            if Ctx.remote:
+                # Build there, fetch the binary, run it here (never `cargo run`: that would rebuild locally).
+                cargo_build(["-p", pkg, "--bin", pkg] + extra, [pkg])
+                if action == "run":
+                    exe = remote_exe(pkg, release)
+                    step(f"run {exe}")
+                    if Ctx.dry:
+                        print(f"[dry-run] (cd {ROOT} && {exe})")
+                    else:
+                        code = subprocess.run([str(exe)], cwd=ROOT).returncode
+                        if code != 0:
+                            raise Fail(f"{pkg} exited with {code}", code)
+            else:
+                run(["cargo", action, "-p", pkg, "--bin", pkg] + extra)
         except Fail:
             if static:
                 print("hint: building SDL3 from source also needs its platform dev headers "
@@ -214,12 +290,13 @@ def do_native(action, ex, release, static):
             raise
     else:
         step(f"{pkg} has no binary target; building the lib")
-        run(["cargo", "build", "-p", pkg, "--lib"] + extra)
+        cargo_build(["-p", pkg, "--lib"] + extra)
         if action == "run":
             raise Fail(f"example '{ex}' has no binary named '{pkg}', nothing to run (library was built)")
 
 
 def do_web(action, ex, release, port):
+    need_local_only(f"web {action}")
     step(f"web {action}: {ex}")
     try:
         out = web.build(ex, release or action == "dist", Ctx.dry)
@@ -257,6 +334,7 @@ def cmd_build_run(a, action, interactive=False):
 
 
 def cmd_dist(a):
+    need_local_only("dist")
     do_web("dist", pick_example(a.example), True, 8080)
 
 
@@ -269,17 +347,35 @@ def cmd_list(_a):
 
 
 def cmd_check(_a):
-    need_cargo()
-    step("cargo check --workspace (native)")
-    run(["cargo", "check", "--workspace"])
     pkgs = ["-p", "efeengine-core"]
     for e in web.list_examples():
         pkgs += ["-p", web.package_name(e)]
+    if Ctx.remote:
+        step(f"cargo check --workspace (native) on {Ctx.remote.host}")
+        remote_cargo("check", ["--workspace"])
+        try:
+            have_wasm = Ctx.dry or Ctx.remote.has_target(WASM_TARGET)
+        except remote.RemoteError as e:
+            raise Fail(str(e))
+        if not have_wasm:
+            print(f"note: skipping the {WASM_TARGET} check: {Ctx.remote.host} has no {WASM_TARGET} target "
+                  "(rustup +nightly target add it there, or run ./build.py check without --remote)")
+            return
+        step(f"cargo check for {WASM_TARGET} on {Ctx.remote.host}")
+        remote_cargo("check", pkgs + ["--lib", "--target", WASM_TARGET, "-Z", "build-std=panic_abort,std"])
+        return
+    need_cargo()
+    step("cargo check --workspace (native)")
+    run(["cargo", "check", "--workspace"])
     step(f"cargo check for {WASM_TARGET} ({' '.join(pkgs)})")
     run(["cargo", "check", *pkgs, "--lib", "--target", WASM_TARGET, "-Z", "build-std=panic_abort,std"])
 
 
 def cmd_test(_a):
+    if Ctx.remote:
+        step(f"cargo test -p calc -p efepages -p efescript on {Ctx.remote.host}")
+        remote_cargo("test", ["-p", "calc", "-p", "efepages", "-p", "efescript"])
+        return
     need_cargo()
     step("cargo test -p calc -p efepages -p efescript")
     run(["cargo", "test", "-p", "calc", "-p", "efepages", "-p", "efescript"])
@@ -388,8 +484,9 @@ def links_editor(ex):
 def do_editor(ex, release, static):
     """Run the game with the editor link on (EFE_EDITOR=1), then the editor in front of it."""
     pkg = web.package_name(ex)
-    need_cargo()
-    preflight_native(static)
+    if not Ctx.remote:
+        need_cargo()
+    native_preflight_or_remote(static)
     if not has_native_bin(ex):
         raise Fail(f"example '{ex}' has no binary target, so there is no game to attach the editor to")
     if not links_editor(ex):
@@ -402,13 +499,22 @@ def do_editor(ex, release, static):
     if not target.is_absolute():
         target = ROOT / target
     game = target / profile / (pkg + (".exe" if os.name == "nt" else ""))
-    editor_cmd = ["cargo", "run", "-p", "efeengine-editor", "--bin", "efe-editor", "--", "--port", port]
-    step(f"editor: {pkg} ({'release' if release else 'debug'}) on port {port}")
-    run(["cargo", "build", "-p", pkg, "--bin", pkg] + extra)
-    run(["cargo", "build", "-p", "efeengine-editor", "--bin", "efe-editor"] + (["--release"] if release else []))
+    if Ctx.remote:
+        # Both binaries are built there and fetched; the editor is started directly, not via cargo run.
+        editor_cmd = [str(remote_exe("efe-editor", release)), "--port", port]
+    else:
+        editor_cmd = ["cargo", "run", "-p", "efeengine-editor", "--bin", "efe-editor", "--", "--port", port]
+    step(f"editor: {pkg} ({'release' if release else 'debug'}) on port {port}"
+         + (f", built on {Ctx.remote.host}" if Ctx.remote else ""))
+    cargo_build(["-p", pkg, "--bin", pkg] + extra, [pkg])
+    cargo_build(["-p", "efeengine-editor", "--bin", "efe-editor"] + (["--release"] if release else []),
+                ["efe-editor"])
     if Ctx.dry:
         print(f"[dry-run] EFE_EDITOR=1 EFE_EDITOR_PORT={port} {game} &")
-        run(editor_cmd)
+        if Ctx.remote:
+            print("[dry-run] " + subprocess.list2cmdline(editor_cmd))
+        else:
+            run(editor_cmd)
         return
     env = dict(os.environ, EFE_EDITOR="1", EFE_EDITOR_PORT=port)
     proc = subprocess.Popen([str(game)], cwd=str(ROOT), env=env)
@@ -468,7 +574,18 @@ def main(argv):
     argv = list(argv)
     Ctx.dry = "--dry-run" in argv
     Ctx.preflight = "--no-preflight" not in argv
-    argv = [x for x in argv if x not in ("--dry-run", "--no-preflight")]
+    remote_host = None
+    use_remote = False
+    for x in argv:
+        if x == "--remote" or x.startswith("--remote="):
+            use_remote = True
+            remote_host = x.partition("=")[2] or remote_host
+    argv = [x for x in argv if x not in ("--dry-run", "--no-preflight") and not (x == "--remote" or x.startswith("--remote="))]
+    if use_remote:
+        try:
+            Ctx.remote = remote.Remote(remote_host, dry=Ctx.dry)
+        except remote.RemoteError as e:
+            raise Fail(str(e))
     p = build_parser()
     try:
         a, rest = p.parse_known_args([x for x in argv])

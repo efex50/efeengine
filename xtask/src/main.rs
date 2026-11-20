@@ -6,6 +6,7 @@
 mod api;
 mod mods;
 mod project;
+mod remote;
 mod serve;
 mod toolchain;
 mod util;
@@ -31,6 +32,8 @@ use util::{cargo, dry_run, miss_line, ok_line, root, run, stdin_is_tty, step, wa
                   run time); `run` sets EFE_SCRIPT_DIR. `check-scripts` assembles them against the index. \n\
                   Mods: examples/<example>/mods/*/ (folders with a mod.toml) are packed by `mods` as a check; \
                   native builds copy the folders into mods/ next to the game, dist packs .efmod files. See `mods`.\n\
+                  Remote builds: `cargo xtask --remote[=HOST] run <example> native` compiles on another machine \
+                  over SSH and runs the result here (docs/REMOTE_BUILD.md).\n\
                   Environment: CARGO_TARGET_DIR is respected; WASM_BINDGEN selects a wasm-bindgen binary."
 )]
 struct Cli {
@@ -40,6 +43,13 @@ struct Cli {
     /// Skip the SDL3 / cmake / C compiler checks before native builds.
     #[arg(long, global = true)]
     no_preflight: bool,
+    /// Build on a remote machine over SSH and run here (native build/run/editor/check/test).
+    /// Cargo runs on HOST after the tree is rsynced there; the built executables are fetched into
+    /// target/<profile>/. Bare `--remote` uses $EFE_REMOTE_HOST or `git config remotebuild.host`.
+    /// Directory: $EFE_REMOTE_DIR / remotebuild.dir (default remote-builds/<repo>); jobs:
+    /// $EFE_REMOTE_JOBS / remotebuild.jobs (default: remote cores - 3). Not for web/dist/serve.
+    #[arg(long, global = true, num_args = 0..=1, require_equals = true, value_name = "HOST", default_missing_value = "")]
+    remote: Option<String>,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -194,6 +204,9 @@ impl std::error::Error for UsageError {}
 
 fn real_main(cli: Cli) -> Result<()> {
     let preflight = !cli.no_preflight;
+    if let Some(host) = &cli.remote {
+        remote::enable(Some(host.clone()))?;
+    }
     let Some(cmd) = cli.cmd else {
         if !stdin_is_tty() {
             bail!(UsageError("no command given and stdin is not a terminal".into()));
@@ -213,6 +226,7 @@ fn real_main(cli: Cli) -> Result<()> {
             api::api_export(&project, &ex, output, release, static_sdl)
         }
         Cmd::Dist { example } => {
+            need_local("dist")?;
             let project = Project::load()?;
             let ex = pick_example(&project, example.as_deref())?;
             let out = web::build(&project, &ex, true)?;
@@ -237,6 +251,7 @@ fn real_main(cli: Cli) -> Result<()> {
             api::check_scripts(&project, &ex)
         }
         Cmd::Serve { example, server } => {
+            need_local("serve")?;
             let project = Project::load()?;
             let ex = pick_example(&project, example.as_deref())?;
             serve::serve(&root().join("dist").join(&ex.dir), &server.host, server.port)
@@ -245,6 +260,9 @@ fn real_main(cli: Cli) -> Result<()> {
         Cmd::Check => check(),
         Cmd::Test => {
             step("cargo test -p calc -p efepages -p efescript -p xtask");
+            if let Some(r) = remote::get() {
+                return r.cargo(&["test", "-p", "calc", "-p", "efepages", "-p", "efescript", "-p", "xtask"].map(String::from));
+            }
             let mut c = cargo();
             c.args(["test", "-p", "calc", "-p", "efepages", "-p", "efescript", "-p", "xtask"]);
             run(c)
@@ -253,6 +271,14 @@ fn real_main(cli: Cli) -> Result<()> {
         Cmd::Dev { target } => dev(&target),
         Cmd::Clean { example } => clean(example.as_deref()),
     }
+}
+
+/// `--remote` builds natively only.
+fn need_local(what: &str) -> Result<()> {
+    if remote::get().is_some() {
+        bail!("--remote supports native builds only (not for {what})");
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ choosing --
@@ -334,6 +360,7 @@ fn dispatch(
     match target {
         Target::Native => native(&project, ex, action, release, static_sdl, preflight),
         Target::Web => {
+            need_local("web")?;
             if static_sdl {
                 warn("--static is ignored for web");
             }
@@ -360,6 +387,11 @@ const STATIC_DEPS_HINT: &str = "hint: building SDL3 from source also needs its p
 Or skip the source build: install SDL3 itself (dnf install SDL3-devel) and drop --static.";
 
 fn preflight_native(static_sdl: bool) -> Result<()> {
+    if remote::get().is_some() {
+        // The compiler and SDL3 dev files live on the remote; here only the run-time library matters.
+        remote::warn_if_no_local_sdl3(static_sdl);
+        return Ok(());
+    }
     if static_sdl {
         let mut missing = vec![];
         if util::which("cmake").is_none() {
@@ -412,18 +444,22 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
             warn(format!("{}: mods not packed (no binary to export the API index)", ex.dir));
         }
         step(format!("{} has no binary target; building the lib", ex.package));
-        let mut c = cargo();
-        c.args(["build", "-p", &ex.package, "--lib"]).args(&extra);
-        run(c)?;
+        if let Some(r) = remote::get() {
+            let mut args: Vec<String> = ["build", "-p", &ex.package, "--lib"].map(String::from).to_vec();
+            args.extend(extra.iter().map(|s| s.to_string()));
+            r.cargo(&args)?;
+        } else {
+            let mut c = cargo();
+            c.args(["build", "-p", &ex.package, "--lib"]).args(&extra);
+            run(c)?;
+        }
         if action != Action::Build {
             bail!("example '{}' has no binary target, nothing to run (library was built)", ex.dir);
         }
         return Ok(());
     }
-    step(format!("native build: {} ({desc})", ex.package));
-    let mut c = cargo();
-    c.args(["build", "-p", &ex.package, "--bin", &ex.package]).args(&extra);
-    run(c).inspect_err(|_| {
+    step(format!("native build: {} ({desc}){}", ex.package, remote::get().map_or(String::new(), |r| format!(" on {}", r.host))));
+    api::build_native(project, ex, release, static_sdl).inspect_err(|_| {
         if static_sdl {
             eprintln!("{STATIC_DEPS_HINT}");
         }
@@ -436,8 +472,14 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
     }
     if action == Action::Run {
         step(format!("native run: {} ({desc})", ex.package));
-        let mut c = cargo();
-        c.args(["run", "-p", &ex.package, "--bin", &ex.package]).args(&extra);
+        // With --remote the binary was fetched: start it directly (`cargo run` would rebuild here).
+        let mut c = if remote::get().is_some() {
+            std::process::Command::new(profile.join(format!("{}{}", ex.package, std::env::consts::EXE_SUFFIX)))
+        } else {
+            let mut c = cargo();
+            c.args(["run", "-p", &ex.package, "--bin", &ex.package]).args(&extra);
+            c
+        };
         if let Some(dir) = scripts {
             c.env("EFE_SCRIPT_DIR", dir);
         }
@@ -453,16 +495,27 @@ fn editor_session(project: &Project, ex: &Example, release: bool, scripts: Optio
     let port = std::env::var("EFE_EDITOR_PORT").unwrap_or_else(|_| "7878".into());
     let profile = api::profile_dir(project, release);
     let game = profile.join(format!("{}{}", ex.package, std::env::consts::EXE_SUFFIX));
-    let editor_build = {
+    if let Some(r) = remote::get() {
+        let mut args: Vec<String> = ["-p", "efeengine-editor", "--bin", "efe-editor"].map(String::from).to_vec();
+        if release {
+            args.push("--release".into());
+        }
+        remote::build_and_fetch(r, &project.target_dir, &args, release, &["efe-editor"])?;
+    } else {
         let mut c = cargo();
         c.args(["build", "-p", "efeengine-editor", "--bin", "efe-editor"]);
         if release {
             c.arg("--release");
         }
-        c
-    };
-    run(editor_build)?;
+        run(c)?;
+    }
     let editor_run = || {
+        // With --remote the editor binary was fetched: start it directly, no local cargo.
+        if remote::get().is_some() {
+            let mut c = std::process::Command::new(profile.join(format!("efe-editor{}", std::env::consts::EXE_SUFFIX)));
+            c.args(["--port", &port]);
+            return c;
+        }
         let mut c = cargo();
         c.args(["run", "-p", "efeengine-editor", "--bin", "efe-editor", "--", "--port", &port]);
         if release {
@@ -536,6 +589,9 @@ fn list() -> Result<()> {
 
 fn check() -> Result<()> {
     let project = Project::load()?;
+    if let Some(r) = remote::get() {
+        return check_remote(r, &project);
+    }
     step("cargo check --workspace (native)");
     let mut c = cargo();
     c.args(["check", "--workspace"]);
@@ -550,6 +606,27 @@ fn check() -> Result<()> {
         .args(&pkgs)
         .args(["--lib", "--target", WASM_TARGET, "-Z", "build-std=panic_abort,std"]);
     run(c)
+}
+
+/// `check --remote`: the native check runs there; the wasm check only if that machine has the target.
+fn check_remote(r: &remote::Remote, project: &Project) -> Result<()> {
+    step(format!("cargo check --workspace (native) on {}", r.host));
+    r.cargo(&["check".to_string(), "--workspace".to_string()])?;
+    if !r.has_target(WASM_TARGET)? {
+        println!(
+            "note: skipping the {WASM_TARGET} check: {} has no {WASM_TARGET} target \
+             (rustup +nightly target add it there, or run `cargo xtask check` without --remote)",
+            r.host
+        );
+        return Ok(());
+    }
+    let mut args: Vec<String> = ["check", "-p", "efeengine-core"].map(String::from).to_vec();
+    for e in &project.examples {
+        args.extend(["-p".to_string(), e.package.clone()]);
+    }
+    args.extend(["--lib", "--target", WASM_TARGET, "-Z", "build-std=panic_abort,std"].map(String::from));
+    step(format!("cargo check for {WASM_TARGET} on {}", r.host));
+    r.cargo(&args)
 }
 
 fn doctor() -> Result<()> {

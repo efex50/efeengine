@@ -44,7 +44,14 @@ pub fn build_flags(release: bool, static_sdl: bool) -> Vec<&'static str> {
     v
 }
 
-fn build_native(ex: &Example, release: bool, static_sdl: bool) -> Result<()> {
+/// Build the example's binary: with cargo here, or on the remote (`--remote`) followed by
+/// fetching the binary into this machine's `target/<profile>/`.
+pub fn build_native(project: &Project, ex: &Example, release: bool, static_sdl: bool) -> Result<()> {
+    if let Some(r) = crate::remote::get() {
+        let mut args: Vec<String> = ["-p", &ex.package, "--bin", &ex.package].map(String::from).to_vec();
+        args.extend(build_flags(release, static_sdl).into_iter().map(String::from));
+        return crate::remote::build_and_fetch(r, &project.target_dir, &args, release, &[&ex.package]);
+    }
     let mut c = cargo();
     c.args(["build", "-p", &ex.package, "--bin", &ex.package]).args(build_flags(release, static_sdl));
     run(c)
@@ -107,7 +114,7 @@ pub fn api_export(project: &Project, ex: &Example, output: Option<PathBuf>, rele
         None => project.target_dir.join("efapi").join(format!("{}.efapi", ex.dir)),
     };
     step(format!("api-export: building {}", ex.package));
-    build_native(ex, release, static_sdl)?;
+    build_native(project, ex, release, static_sdl)?;
     step(format!("api-export: running {}", native_bin(project, ex, release).display()));
     run_export(&native_bin(project, ex, release), &out)?;
     println!("API index: {}", out.display());
@@ -206,7 +213,7 @@ pub fn copy_into_dist(project: &Project, ex: &Example, dist: &Path) {
         }
         let efapi = project.target_dir.join("efapi").join(format!("{}.efapi", ex.dir));
         step(format!("exporting the API index into {}", dist.display()));
-        build_native(ex, false, false)?;
+        build_native(project, ex, false, false)?;
         run_export(&native_bin(project, ex, false), &efapi)?;
         if !dry_run() {
             let dest = dist.join(format!("{}.efapi", ex.dir));
