@@ -251,12 +251,27 @@ fn log_progress(engine: &mut Engine, score: Score) {
     });
 }
 
+/// With feature `jit` (native only) the scripts run on the Cranelift JIT; the mods of the demo
+/// policy stay interpreted (`Grant::jit` is false). Otherwise this does nothing.
+#[allow(dead_code)] // called from `main`, which `#[main]` leaves out of the native lib target
+fn use_jit(engine: &mut Engine) {
+    #[cfg(all(feature = "jit", not(target_family = "wasm")))]
+    {
+        use efeengine_core::scripting::{JitConfig, ScriptBackend};
+        engine.scripting_mut().set_backend(ScriptBackend::Jit, JitConfig::default());
+        global_info("[script_demo] scripts run on the JIT");
+    }
+    #[cfg(not(all(feature = "jit", not(target_family = "wasm"))))]
+    let _ = engine;
+}
+
 #[main]
 fn main() {
     match Engine::new(GAME) {
         Ok(mut engine) => {
             let score = setup(&mut engine);
             global_info("[script_demo] registered game.score_add and game.report");
+            use_jit(&mut engine);
             let modules = load_scripts(&mut engine);
             // Not while exporting the API index: the index is the game's alone, the mods are
             // packed against it.

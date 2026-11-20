@@ -59,6 +59,9 @@ pub(crate) struct ModuleSlot {
     pub budget: u64,
     /// `Limits::max_memory_pages` of the instance.
     pub memory_pages: u32,
+    /// Whether this module's instance may run on the JIT: true for game modules, the grant's
+    /// `jit` for mods (the engine-wide `ScriptBackend` still has the last word).
+    pub jit: bool,
     /// Units left this frame.
     pub remaining: u64,
     /// Import namespace prefixes this module may use; `None` = all (game modules).

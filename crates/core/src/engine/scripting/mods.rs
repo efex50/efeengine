@@ -27,12 +27,14 @@ pub struct ModOptions {
     /// The doc of the mod's namespace in the API index; default ``Functions provided by the
     /// mod `name`.``
     pub doc: Option<String>,
+    /// Whether the mod may run on the JIT (default `false`; see `Grant::jit`).
+    pub jit: bool,
 }
 
 impl ModOptions {
     /// Version 1, the default budget, nothing allowed yet (add with [`allow`](Self::allow)).
     pub fn new(name: impl Into<String>) -> Self {
-        ModOptions { name: name.into(), version: 1, budget: DEFAULT_BUDGET, allowed: Vec::new(), memory_pages: DEFAULT_MEMORY_PAGES, doc: None }
+        ModOptions { name: name.into(), version: 1, budget: DEFAULT_BUDGET, allowed: Vec::new(), memory_pages: DEFAULT_MEMORY_PAGES, doc: None, jit: false }
     }
 
     pub fn allow(mut self, prefix: impl Into<String>) -> Self {
@@ -52,6 +54,11 @@ impl ModOptions {
 
     pub fn with_version(mut self, version: u32) -> Self {
         self.version = version;
+        self
+    }
+
+    pub fn with_jit(mut self, jit: bool) -> Self {
+        self.jit = jit;
         self
     }
 
@@ -206,6 +213,7 @@ impl Scripting {
         budget: u64,
         memory_pages: u32,
         doc: Option<String>,
+        jit: bool,
     ) -> Result<ModuleId, ScriptError> {
         if !efevm::api::is_ident(name) {
             return Err(ScriptError::InvalidName(name.to_string()));
@@ -244,6 +252,7 @@ impl Scripting {
                 }
             }
         }
+        self.attach_backend(&mut instance, name, jit);
         self.modules.push(ModuleSlot {
             name: name.to_string(),
             module,
@@ -252,6 +261,7 @@ impl Scripting {
             version,
             budget,
             memory_pages,
+            jit,
             remaining: budget,
             allowed,
             pending_init: true,
@@ -277,7 +287,7 @@ impl Scripting {
 
     /// [`load_module`](Self::load_module) for a module that is already decoded.
     pub(crate) fn load_module_decoded(&mut self, name: &str, module: Module) -> Result<ModuleId, ScriptError> {
-        self.instantiate(name, module, None, 1, DEFAULT_BUDGET, DEFAULT_MEMORY_PAGES, None)
+        self.instantiate(name, module, None, 1, DEFAULT_BUDGET, DEFAULT_MEMORY_PAGES, None, true)
     }
 
     /// Load a mod: only the namespaces in `opts.allowed` may be imported; a refused import
@@ -296,7 +306,7 @@ impl Scripting {
 
     /// [`load_mod`](Self::load_mod) for a module that is already decoded.
     pub(crate) fn load_mod_decoded(&mut self, module: Module, opts: ModOptions) -> Result<ModuleId, ScriptError> {
-        self.instantiate(&opts.name, module, Some(opts.allowed), opts.version, opts.budget, opts.memory_pages, opts.doc)
+        self.instantiate(&opts.name, module, Some(opts.allowed), opts.version, opts.budget, opts.memory_pages, opts.doc, opts.jit)
     }
 
     /// The copies of external structs in `iface` must equal what the registry holds.
@@ -605,6 +615,8 @@ impl Scripting {
                 }
             }
         }
+        let may_jit = self.modules[idx].jit;
+        self.attach_backend(&mut instance, &name, may_jit);
         let slot = &mut self.modules[idx];
         slot.module = module;
         slot.instance = Some(instance);

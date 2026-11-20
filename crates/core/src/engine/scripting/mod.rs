@@ -27,7 +27,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use efevm::{
-    Caller, HostFn, HostOk, HostRegistry, LinkError, LoadError as VmLoadError, EventDesc, RegistryError, Results, StructDesc, Args, Trap,
+    Instance, Caller, HostFn, HostOk, HostRegistry, LinkError, LoadError as VmLoadError, EventDesc, RegistryError, Results, StructDesc, Args, Trap,
 };
 use hecs::World;
 
@@ -56,6 +56,7 @@ const _: fn() = || {
 };
 pub(crate) use system::script_system;
 
+use crate::engine::config::{JitConfig, ScriptBackend};
 use crate::engine::{input::InputState, time::Time, types::TypeRegistry};
 
 /// Default per-module, per-frame budget in VM units.
@@ -247,6 +248,9 @@ pub struct Scripting {
     pub(crate) stash: components::StashMap,
     /// Layout changes to apply when the running swap succeeds.
     pub(crate) migrations: Vec<components::Migration>,
+    /// Which backend new instances get (see [`ScriptBackend`]).
+    pub(crate) backend: ScriptBackend,
+    pub(crate) jit_cfg: JitConfig,
 }
 
 impl Scripting {
@@ -274,6 +278,64 @@ impl Scripting {
             next_watch_check: 0.0,
             stash: Default::default(),
             migrations: Vec::new(),
+            backend: ScriptBackend::default(),
+            jit_cfg: JitConfig::default(),
+        }
+    }
+
+    /// Choose the backend that runs script code and its JIT settings (see [`ScriptBackend`]).
+    /// Applies to the modules loaded now and to every instance made later (reloads included).
+    /// Game modules may use the JIT, mods only when their grant says `jit: true`. Call it
+    /// between frames. Without the `jit` feature (or on wasm) every choice runs the interpreter
+    /// (`Jit` logs one warning).
+    pub fn set_backend(&mut self, backend: ScriptBackend, jit: JitConfig) {
+        self.backend = backend;
+        self.jit_cfg = jit;
+        for i in 0..self.modules.len() {
+            let Some(mut inst) = self.modules[i].instance.take() else { continue };
+            inst.set_backend(None);
+            let (name, may) = (self.modules[i].name.clone(), self.modules[i].jit);
+            self.attach_backend(&mut inst, &name, may);
+            self.modules[i].instance = Some(inst);
+        }
+    }
+
+    /// The backend choice in effect.
+    pub fn backend(&self) -> ScriptBackend {
+        self.backend
+    }
+
+    /// Whether module `id`'s instance currently runs on the JIT (false when it is not loaded,
+    /// when its mod has no `jit` grant, or when the interpreter was chosen or the compile failed).
+    pub fn runs_on_jit(&self, id: ModuleId) -> bool {
+        self.modules.get(id.0 as usize).and_then(|m| m.instance.as_ref()).is_some_and(|i| i.has_backend())
+    }
+
+    /// Install (or leave out) the JIT on a fresh instance, following [`ScriptBackend`].
+    /// `may_jit` is false for a mod without a grant. Never fails: a module that does not
+    /// compile keeps the interpreter.
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    pub(crate) fn attach_backend(&mut self, inst: &mut Instance<ScriptHost>, name: &str, may_jit: bool) {
+        if self.backend == ScriptBackend::Interpreter || !may_jit {
+            return;
+        }
+        let opts = efevm_jit::JitOptions {
+            opt_level: if self.jit_cfg.optimize { efevm_jit::OptLevel::Speed } else { efevm_jit::OptLevel::None },
+            max_native_stack: self.jit_cfg.max_native_stack,
+            ..efevm_jit::JitOptions::default()
+        };
+        if let Err(e) = efevm_jit::enable(inst, &opts) {
+            self.log(LogLevel::Warn, format!("[{name}] the JIT could not compile the module, running it in the interpreter: {e}"));
+        }
+    }
+
+    #[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+    pub(crate) fn attach_backend(&mut self, _inst: &mut Instance<ScriptHost>, _name: &str, may_jit: bool) {
+        if self.backend == ScriptBackend::Jit && may_jit {
+            self.warn_once(
+                "jit-unavailable".to_string(),
+                "ScriptBackend::Jit was requested but the JIT is not compiled in (feature `jit`, native only): scripts run in the interpreter".to_string(),
+            );
         }
     }
 

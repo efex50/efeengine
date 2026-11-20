@@ -208,6 +208,7 @@ impl Engine {
         };
 
         let mut scripting = Scripting::new(cfg.script_cache.clone());
+        scripting.set_backend(cfg.script_backend, cfg.script_jit.clone());
         scripting.set_game(&cfg.title);
 
         let state = EngineState{

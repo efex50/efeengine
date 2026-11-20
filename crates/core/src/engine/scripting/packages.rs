@@ -69,6 +69,10 @@ pub struct Grant {
     pub max_component_types: u32,
     /// Largest size in bytes of one declared component (default 256).
     pub max_component_size: u32,
+    /// Whether the mod's code may run on the JIT (when the engine's `ScriptBackend` and the
+    /// `jit` feature allow it). Default `false`: mods are untrusted input, and a lowering bug
+    /// in the JIT is a host memory-safety bug where an interpreter bug is only a wrong result.
+    pub jit: bool,
 }
 
 impl Default for Grant {
@@ -81,6 +85,7 @@ impl Default for Grant {
             memory_pages: DEFAULT_MEMORY_PAGES,
             max_component_types: DEFAULT_MAX_COMPONENT_TYPES,
             max_component_size: DEFAULT_MAX_COMPONENT_SIZE,
+            jit: false,
         }
     }
 }
@@ -549,6 +554,7 @@ impl Scripting {
             allowed,
             memory_pages: grant.memory_pages,
             doc: Some(manifest.namespace_doc()),
+            jit: grant.jit,
         };
         let id = match self.load_mod_decoded(module, opts) {
             Ok(id) => id,
@@ -608,6 +614,7 @@ impl Scripting {
             std::mem::replace(&mut slot.budget, grant.budget),
             std::mem::replace(&mut slot.memory_pages, grant.memory_pages),
             std::mem::replace(&mut slot.doc, doc),
+            std::mem::replace(&mut slot.jit, grant.jit),
         );
         match self.reload_module(idx, module, version) {
             Ok(()) => {
@@ -621,7 +628,7 @@ impl Scripting {
             }
             Err(e) => {
                 let slot = &mut self.modules[idx];
-                (slot.allowed, slot.budget, slot.memory_pages, slot.doc) = old;
+                (slot.allowed, slot.budget, slot.memory_pages, slot.doc, slot.jit) = old;
                 Err(e.into())
             }
         }

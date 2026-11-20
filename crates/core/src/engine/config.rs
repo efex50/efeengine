@@ -161,6 +161,45 @@ pub struct EngineConfig {
     pub headless: bool,
     /// The script cache (memory and disk) of the engine.
     pub script_cache: crate::engine::scripting::CacheConfig,
+    /// Which backend runs script code (see [`ScriptBackend`]). Only does something when the
+    /// `jit` feature is compiled in on a native target; otherwise scripts always run in the
+    /// interpreter.
+    pub script_backend: ScriptBackend,
+    /// Settings of the JIT when it is used.
+    pub script_jit: JitConfig,
+}
+
+/// Which backend runs the bytecode of scripts. The two produce the same results, memory,
+/// traps and budget accounting; the JIT is faster. Mods only use the JIT when their
+/// [`Grant`](crate::engine::scripting::Grant) says `jit: true` (mods are untrusted input).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScriptBackend {
+    /// Always the interpreter.
+    Interpreter,
+    /// Ask for the JIT. When it is not compiled in (feature `jit`, native targets only) or a
+    /// module fails to compile, the interpreter runs it and a warning is logged.
+    Jit,
+    /// The JIT when it is compiled in and the module compiles, else the interpreter (a failed
+    /// compile is logged, a missing feature is not).
+    #[default]
+    Auto,
+}
+
+/// Settings passed to the JIT (`efevm_jit::JitOptions`); ignored without the `jit` feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitConfig {
+    /// Cranelift `opt_level=speed` (default) or `none` (faster to compile, slower code).
+    pub optimize: bool,
+    /// Native stack the generated code may use; when it runs out the fiber continues in the
+    /// interpreter. The thread running scripts needs this much stack plus headroom for host
+    /// functions, so the default (256 KiB) is lower than the crate's own.
+    pub max_native_stack: usize,
+}
+
+impl Default for JitConfig {
+    fn default() -> Self {
+        JitConfig { optimize: true, max_native_stack: 256 * 1024 }
+    }
 }
 
 impl Default for EngineConfig {
@@ -175,6 +214,8 @@ impl Default for EngineConfig {
             canvas_id: None,
             headless: false,
             script_cache: Default::default(),
+            script_backend: ScriptBackend::default(),
+            script_jit: JitConfig::default(),
         }
     }
 }
@@ -243,6 +284,8 @@ mod tests {
         assert_eq!(c.fixed_dt, 1.0 / 60.0);
         assert_eq!(c.max_fps, Some(60.0));
         assert!(!c.headless);
+        assert_eq!(c.script_backend, ScriptBackend::Auto);
+        assert_eq!(c.script_jit, JitConfig::default());
     }
 
     #[test]

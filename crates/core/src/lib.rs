@@ -38,6 +38,7 @@ pub mod input {
 pub mod scripting {
     //! Running scripts: the VM host, script components, events and errors.
     pub use crate::engine::scripting::{Scripting, ScriptHost, ScriptStats, Script, ScriptEvent, ScriptEventError, ScriptError, ModuleId, ModuleInfo, LogLevel, LogLine};
+    pub use crate::engine::config::{ScriptBackend, JitConfig};
 }
 
 pub mod mods {
@@ -101,6 +102,9 @@ pub use bytemuck;
 /// The VM crate; its `StructDesc` / `FieldDesc` / `Prim` describe script-visible layouts.
 pub use efevm;
 pub use efemod;
+/// The Cranelift JIT (feature `jit`, native only), re-exported for its diagnostics counters.
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+pub use efevm_jit;
 #[cfg(feature = "efa")]
 pub use efa;
 #[cfg(target_arch = "wasm32")]
