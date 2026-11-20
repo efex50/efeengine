@@ -90,7 +90,9 @@ impl SdlWindowManager {
         let pump = s.event_pump().map_err(|e| werr(&e))?;
         let mouse = s.mouse();
 
-        video.text_input().start(&window);
+        // Text input stays off until a text field asks for it (`set_text_input`). While it is on,
+        // the OS input method takes the keys: it shows the accent picker on a/s/d/e... and stops
+        // key repeat, so holding a letter in a game does not repeat it.
 
         // Gamepads are optional: never fail window creation over them.
         let gamepad_subsystem = match s.gamepad() {
@@ -137,7 +139,6 @@ impl InnerWindow for SdlWindowManager {
             b.resizable();
         }
         let window = b.build().map_err(|e| werr(&e))?;
-        self.video.text_input().start(&window);
         self.by_sdl.insert(window.id(), id.0);
         self.windows.insert(id.0, SdlWin::new(window));
         Ok(())

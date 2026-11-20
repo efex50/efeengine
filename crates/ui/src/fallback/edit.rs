@@ -62,8 +62,23 @@ impl InputState {
         self.value = value.to_string();
     }
 
+    /// The whole text (lines joined with `\n`; an editable input has exactly one line).
     pub fn text(&self) -> String {
-        self.editor.with_buffer(|b| b.lines.first().map_or_else(String::new, |l| l.text().to_string()))
+        self.editor.with_buffer(|b| {
+            if b.lines.len() == 1 {
+                b.lines[0].text().to_string()
+            } else {
+                b.lines.iter().map(|l| l.text()).collect::<Vec<_>>().join("\n")
+            }
+        })
+    }
+
+    /// The cursor at the very end of the text.
+    fn end_cursor(&self) -> Cursor {
+        self.editor.with_buffer(|b| {
+            let last = b.lines.len().saturating_sub(1);
+            Cursor::new(last, b.lines.get(last).map_or(0, |l| l.text().len()))
+        })
     }
 
     pub fn cursor(&self) -> usize {
@@ -134,9 +149,9 @@ impl InputState {
         }
         match op {
             EditOp::SelectAll => {
-                let len = self.text().len();
+                let end = self.end_cursor();
                 self.editor.set_selection(Selection::Normal(Cursor::new(0, 0)));
-                self.editor.set_cursor(Cursor::new(0, len));
+                self.editor.set_cursor(end);
             }
             EditOp::Backspace => {
                 self.editor.borrow_with(&mut ts.fs).action(Action::Backspace);
@@ -182,6 +197,56 @@ impl InputState {
             self.editor.set_selection(Selection::None);
         }
         self.editor.set_cursor(c);
+        self.drop_empty_selection();
+    }
+
+    /// Multi-line text: puts the cursor at `c` (a hit on the display buffer); `extend` keeps or
+    /// starts a selection from the old cursor.
+    pub fn place_cursor_at(&mut self, c: Cursor, extend: bool) {
+        if extend {
+            if matches!(self.editor.selection(), Selection::None) {
+                self.editor.set_selection(Selection::Normal(self.editor.cursor()));
+            }
+        } else {
+            self.editor.set_selection(Selection::None);
+        }
+        self.editor.set_cursor(c);
+        self.drop_empty_selection();
+    }
+
+    /// An anchor that is the cursor selects nothing, but the editor would still take the next
+    /// Backspace / Delete as "delete the selection" and swallow it: a click (press, then the
+    /// release's drag update) must leave no such selection.
+    fn drop_empty_selection(&mut self) {
+        if let Selection::Normal(a) = self.editor.selection()
+            && a == self.editor.cursor()
+        {
+            self.editor.set_selection(Selection::None);
+        }
+    }
+
+    /// Multi-line text: selects the word at `c`.
+    pub fn select_word_at(&mut self, c: Cursor) {
+        self.editor.set_cursor(c);
+        self.editor.set_selection(Selection::Word(c));
+        if let Some((a, b)) = self.editor.selection_bounds() {
+            self.editor.set_selection(Selection::Normal(a));
+            self.editor.set_cursor(b);
+        }
+    }
+
+    /// Multi-line text: the selection as cursors `(start, end)`, `None` when empty.
+    pub fn selection_cursors(&self) -> Option<(Cursor, Cursor)> {
+        self.editor.selection_bounds().filter(|(a, b)| a != b)
+    }
+
+    /// Multi-line text: lays the display out wrapped at `width` (logical px), no password mask
+    /// and no preedit.
+    pub fn refresh_wrapped(&mut self, ts: &mut TextSystem, spec: &TextSpec, width: f32) {
+        let mut spec = spec.clone();
+        spec.text = self.text();
+        spec.wrap = true;
+        ts.layout(&mut self.display, &spec, Some(width.max(1.0)));
     }
 
     /// Selects the word around byte offset `idx`.
@@ -199,13 +264,16 @@ impl InputState {
 
     /// Re-applies the display text and shaping for the current state. `password` shows bullets.
     /// Returns the display text.
-    pub fn refresh_display(&mut self, ts: &mut TextSystem, spec: &TextSpec, password: bool) {
+    pub fn refresh_display(&mut self, ts: &mut TextSystem, spec: &TextSpec, password: bool, replace: Option<&str>) {
         let text = self.text();
         let cur = self.cursor().min(text.len());
         let shown = |s: &str| -> String { if password { s.chars().map(|_| BULLET).collect() } else { s.to_string() } };
         let mut display = shown(&text[..cur]);
         display.push_str(&self.preedit);
         display.push_str(&shown(&text[cur..]));
+        if let Some(r) = replace {
+            display = r.to_string();
+        }
         let mut spec = spec.clone();
         spec.text = display;
         spec.wrap = false;
@@ -332,7 +400,7 @@ mod tests {
     fn password_display_maps_offsets() {
         let mut ts = TextSystem::new(false);
         let mut s = InputState::new(&mut ts, &spec("abc"), "abc");
-        s.refresh_display(&mut ts, &spec("abc"), true);
+        s.refresh_display(&mut ts, &spec("abc"), true, None);
         // bullets are three bytes each
         assert_eq!(s.display_offset(2, true), 6);
         assert_eq!(s.real_offset(6, true), 2);

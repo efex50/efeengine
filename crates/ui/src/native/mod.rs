@@ -105,6 +105,13 @@ pub struct IcedBackend {
     hovering: HashSet<WidgetId>,
     /// The text input with keyboard focus.
     focused: Option<WidgetId>,
+    /// Scroll nodes with `follow_end` as of the last sync, and those of them that stick to the end.
+    following: HashSet<WidgetId>,
+    pinned: HashSet<WidgetId>,
+    /// New followers: snap them to the end in the next update.
+    snap_pending: Vec<WidgetId>,
+    /// `UiTree::blur` asked for the focus to go: the next update unfocuses the widget.
+    blur_pending: bool,
     assets: Assets,
     /// GPU-view painters (from the plugin) and the painting state.
     painters: Option<crate::painter::UiPainters>,
@@ -145,6 +152,10 @@ impl IcedBackend {
             over: HashSet::new(),
             hovering: HashSet::new(),
             focused: None,
+            following: HashSet::new(),
+            pinned: HashSet::new(),
+            snap_pending: Vec::new(),
+            blur_pending: false,
             assets: Assets::new(),
             painters: None,
             view_painter: ViewPainter::default(),
@@ -191,6 +202,8 @@ impl IcedBackend {
                 state = s2;
             }
         }
+        let snaps: Vec<WidgetId> = std::mem::take(&mut self.snap_pending);
+        let nav = if std::mem::take(&mut self.blur_pending) { Some(Nav::Blur) } else { nav };
         let nav_op: Option<Box<dyn Operation>> = match nav {
             Some(Nav::Next) => Some(Box::new(focusable::focus_next::<()>())),
             Some(Nav::Previous) => Some(Box::new(focusable::focus_previous::<()>())),
@@ -207,7 +220,15 @@ impl IcedBackend {
                 }
             }
         }
-        let mut probe = FocusProbe(None);
+        for id in snaps {
+            let mut op = iced_core::widget::operation::scrollable::snap_to::<()>(
+                iced_id(id),
+                iced_core::widget::operation::scrollable::RelativeOffset { x: None, y: Some(1.0) },
+                iced_core::widget::operation::Animation::Instant,
+            );
+            ui.operate(&g.renderer, &mut op);
+        }
+        let mut probe = FocusProbe { focus: None, bounds: Vec::new() };
         ui.operate(&g.renderer, &mut probe);
         if let Some((gpu, target)) = draw {
             self.assets.views.begin_draw();
@@ -220,7 +241,8 @@ impl IcedBackend {
         } else {
             self.cache = ui.into_cache();
         }
-        let focus_id = probe.0;
+        let focus_id = probe.focus.clone();
+        let input_bounds = std::mem::take(&mut probe.bounds);
         if let user_interface::State::Updated { input_method, redraw_request, mouse_interaction, .. } = state {
             self.ime_area = match input_method {
                 iced_core::InputMethod::Enabled { cursor, .. } => Some(cursor),
@@ -237,6 +259,7 @@ impl IcedBackend {
             self.dirty = true;
         }
         self.set_focus(focus_id.and_then(|id| self.model.text_inputs().into_iter().find(|n| iced_id(*n) == id)));
+        self.update_ellipsis(&input_bounds);
         statuses
     }
 
@@ -274,10 +297,104 @@ impl IcedBackend {
             self.push(new, UiSignalKind::Focus(true));
         }
         self.focused = now;
+        self.assets.focus = now;
+        self.dirty = true;
         if now.is_none() {
             self.ime_area = None;
         }
         self.refresh_text_request();
+    }
+
+    /// Reads the `follow_end` flags of a new model: a node that starts following snaps to its end;
+    /// the model then follows only the pinned nodes (a user scroll away unpins until the end is
+    /// reached again).
+    fn follow_flags(&mut self) {
+        let mut now = HashSet::new();
+        self.model.walk_mut(&mut |n| {
+            if matches!(n.kind, NodeKind::Scroll { follow_end: true }) {
+                now.insert(n.id);
+            }
+        });
+        for id in &now {
+            if !self.following.contains(id) {
+                self.pinned.insert(*id);
+                self.snap_pending.push(*id);
+            }
+        }
+        self.pinned.retain(|id| now.contains(id));
+        self.following = now;
+        self.apply_follow();
+    }
+
+    fn apply_follow(&mut self) {
+        let pinned = &self.pinned;
+        self.model.walk_mut(&mut |n| {
+            if let NodeKind::Scroll { follow_end } = &mut n.kind {
+                *follow_end = pinned.contains(&n.id);
+            }
+        });
+    }
+
+    /// Cuts the one-line `ellipsize` texts that do not fit the width iced gave them and reports
+    /// `Truncated` when that changes. The width comes from the bounds of the last built interface
+    /// (so a resize is covered), the text width from iced's own paragraph shaping.
+    fn update_ellipsis(&mut self, bounds: &[(iced_core::widget::Id, Rectangle)]) {
+        use iced_core::text::Paragraph as _;
+        let mut jobs = Vec::new();
+        for id in self.model.text_inputs() {
+            let Some(n) = self.model.find(id) else { continue };
+            let NodeKind::TextInput { value, read_only: true, multiline: false, ellipsize: true, .. } = &n.kind else { continue };
+            let Some((_, b)) = bounds.iter().find(|(i, _)| *i == iced_id(id)) else { continue };
+            let pad = n.style().padding.unwrap_or(crate::style::Edges::ZERO);
+            jobs.push((id, value.clone(), (b.width - pad.left - pad.right - 2.0).max(1.0), *n.style()));
+        }
+        let alive: HashSet<WidgetId> = jobs.iter().map(|j| j.0).collect();
+        self.assets.ellipsis.retain(|id, _| alive.contains(id));
+        for (id, value, avail, style) in jobs {
+            if self.assets.ellipsis.get(&id).is_some_and(|e| e.value == value && e.avail == avail.to_bits()) {
+                continue;
+            }
+            let assets = &self.assets;
+            let width = |s: &str| {
+                iced_wgpu::graphics::text::Paragraph::with_text(iced_core::text::Text {
+                    content: s,
+                    bounds: Size::INFINITE,
+                    size: iced_core::Pixels(view::font_size(&style)),
+                    line_height: iced_core::text::LineHeight::default(),
+                    font: view::font(&style, assets),
+                    align_x: iced_core::text::Alignment::Default,
+                    align_y: iced_core::alignment::Vertical::Top,
+                    shaping: iced_core::text::Shaping::Advanced,
+                    wrapping: iced_core::text::Wrapping::None,
+                    ellipsis: iced_core::text::Ellipsis::None,
+                    hint_factor: None,
+                })
+                .min_width()
+            };
+            let shown = if width(&value) <= avail {
+                None
+            } else {
+                let base: Vec<char> = value.strip_suffix("...").unwrap_or(&value).chars().collect();
+                let (mut lo, mut hi) = (0usize, base.len());
+                while lo < hi {
+                    let mid = (lo + hi).div_ceil(2);
+                    let cand: String = base[..mid].iter().collect::<String>() + "...";
+                    if width(&cand) <= avail {
+                        lo = mid;
+                    } else {
+                        hi = mid - 1;
+                    }
+                }
+                Some(base[..lo].iter().collect::<String>() + "...")
+            };
+            let cut = shown.is_some();
+            let was = self.assets.ellipsis.get(&id).is_some_and(|e| e.shown.is_some());
+            if cut != was {
+                self.push(id, UiSignalKind::Truncated(cut));
+            }
+            self.assets.ellipsis.insert(id, assets::Ellipsis { value, avail: avail.to_bits(), shown });
+            self.dirty = true;
+        }
     }
 
     /// Queues `SetTextInput` / area when the wanted state differs from what was sent.
@@ -322,7 +439,7 @@ impl IcedBackend {
             }
             Msg::Input(id, mut s) => {
                 let Some(n) = self.model.find_mut(id).filter(|n| n.enabled) else { return };
-                if let NodeKind::TextInput { value, max_len, .. } = &mut n.kind {
+                if let NodeKind::TextInput { value, max_len, read_only: false, .. } = &mut n.kind {
                     if *max_len > 0 && s.chars().count() > *max_len as usize {
                         s = s.chars().take(*max_len as usize).collect();
                     }
@@ -334,9 +451,26 @@ impl IcedBackend {
             }
             Msg::Submit(id) => {
                 let Some(n) = self.model.find(id).filter(|n| n.enabled) else { return };
-                if let NodeKind::TextInput { value, .. } = &n.kind {
+                if let NodeKind::TextInput { value, read_only: false, .. } = &n.kind {
                     let v = value.clone();
                     self.push(id, UiSignalKind::Submit(v));
+                }
+            }
+            Msg::Scrolled(id, at_end) => {
+                // A user scroll away from the end stops following; back to the end resumes it.
+                if !at_end {
+                    self.pinned.remove(&id);
+                } else if self.following.contains(&id) {
+                    self.pinned.insert(id);
+                }
+                self.apply_follow();
+                self.push(id, UiSignalKind::Scrolled { at_end });
+            }
+            Msg::Edit(id, action) => {
+                if !action.is_edit()
+                    && let Some((_, content)) = self.assets.editors.get_mut(&id)
+                {
+                    content.perform(action);
                 }
             }
             Msg::Enter(id) => {
@@ -400,16 +534,23 @@ impl Default for IcedBackend {
 }
 
 /// Finds the focused widget that has an id (text inputs; their ids come from `iced_id`).
-struct FocusProbe(Option<iced_core::widget::Id>);
+struct FocusProbe {
+    focus: Option<iced_core::widget::Id>,
+    /// Every focusable widget with an id and its bounds (the text inputs).
+    bounds: Vec<(iced_core::widget::Id, Rectangle)>,
+}
 
 impl Operation for FocusProbe {
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
         operate(self);
     }
 
-    fn focusable(&mut self, id: Option<&iced_core::widget::Id>, _bounds: Rectangle, state: &mut dyn Focusable) {
+    fn focusable(&mut self, id: Option<&iced_core::widget::Id>, bounds: Rectangle, state: &mut dyn Focusable) {
         if state.is_focused() && id.is_some() {
-            self.0 = id.cloned();
+            self.focus = id.cloned();
+        }
+        if let Some(id) = id {
+            self.bounds.push((id.clone(), bounds));
         }
     }
 
@@ -471,6 +612,13 @@ impl UiBackend for IcedBackend {
         }
         self.dirty = true;
         self.model = Model::build(tree, self.window);
+        self.assets.refresh_editors(&self.model);
+        self.follow_flags();
+        // `UiTree::blur`: unfocus on the next update, and report it right away.
+        if changes.iter().any(|c| matches!(c, UiChange::Blur(w) if w.is_none_or(|w| w == self.window))) && self.focused.is_some() {
+            self.blur_pending = true;
+            self.set_focus(None);
+        }
         // Forget ids that are gone or no longer interesting; a surviving widget keeps its state
         // in iced's cache, so its enter / exit pairs stay consistent.
         let m = &self.model;

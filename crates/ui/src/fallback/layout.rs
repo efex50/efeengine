@@ -146,7 +146,7 @@ fn container_style(n: &VNode, parent: Parent, own: (bool, bool)) -> (taffy::Styl
     let g = st.gap.unwrap_or(0.0);
     s.gap = taffy::Size { width: length(g), height: length(g) };
     s.padding = pad(st.padding);
-    let scroll = matches!(n.kind, NodeKind::Scroll);
+    let scroll = matches!(n.kind, NodeKind::Scroll { .. });
     if scroll {
         s.overflow = taffy::Point { x: Overflow::Scroll, y: Overflow::Scroll };
     }
@@ -164,7 +164,7 @@ fn build(n: &mut VNode, parent: Parent, tree: &mut TaffyTree<Leaf>, cx: &LayoutC
         definite(h, row && parent.stretch, parent.h_def) || force_fill,
     );
     let mut node = match &n.kind {
-        NodeKind::Container | NodeKind::Scroll => {
+        NodeKind::Container | NodeKind::Scroll { .. } => {
             let (s, cp) = container_style(n, parent, own);
             let kids: Vec<NodeId> = n.children.iter_mut().map(|c| build(c, cp, tree, cx, false)).collect();
             let id = tree.new_with_children(s, &kids).expect("taffy node");
@@ -189,6 +189,8 @@ fn build(n: &mut VNode, parent: Parent, tree: &mut TaffyTree<Leaf>, cx: &LayoutC
             (item_style(&st, parent), Leaf::Checkbox(n.id, text_spec(&st, label, true), checkbox_box(fs), st.gap.unwrap_or(8.0)))
         }
         NodeKind::Slider { .. } => (item_style(&st, parent), Leaf::Slider),
+        // Wrapped, read-only text: measured like a text, drawn by `paint::text_multiline`.
+        NodeKind::TextInput { value, multiline: true, read_only: true, .. } => (item_style(&st, parent), Leaf::Text(n.id, text_spec(&st, value, true))),
         NodeKind::TextInput { .. } => (item_style(&st, parent), Leaf::Input(font_size(&st) * LINE_HEIGHT)),
         NodeKind::GpuView { .. } => (item_style(&st, parent), Leaf::Nothing),
     };

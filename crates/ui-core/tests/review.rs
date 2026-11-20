@@ -122,7 +122,7 @@ fn max_len_truncates_existing_value() {
     let t = ui.text_input(p, "abcdef").id();
     ui.node(t).unwrap().max_len(3);
     assert_eq!(ui.text_of(t), Some("abc"));
-    ui.set_kind(t, NodeKind::TextInput { value: "xyzxyz".into(), placeholder: String::new(), max_len: 2, password: false }).unwrap();
+    ui.set_kind(t, NodeKind::TextInput { value: "xyzxyz".into(), placeholder: String::new(), max_len: 2, password: false, read_only: false, multiline: false, ellipsize: false }).unwrap();
     assert_eq!(ui.text_of(t), Some("xy"));
 }
 

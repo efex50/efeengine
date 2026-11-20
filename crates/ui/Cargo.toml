@@ -9,14 +9,19 @@ efeengine-core = { path = "../core" }
 efeui-core = { path = "../ui-core" }
 smallvec = "1.16.5"
 thiserror = "2.0.21"
+taffy = { version = "0.15.1", default-features = false, features = ["std", "taffy_tree", "flexbox", "content_size"], optional = true }
+# The same cosmic-text fork and rev iced_wgpu uses, so enabling both backends compiles it once.
+cosmic-text = { git = "https://github.com/hecrj/cosmic-text.git", rev = "6adc2364289fd241daed751948a03d0aea5a31ca", default-features = false, features = ["std", "swash"], optional = true }
 
 [features]
 default = ["iced"]
 # Native backend (Phase 0/3). Never pulled into wasm32 builds (the dependencies sit under a
 # non-wasm target table); `UiPlugin::new()` falls back to headless without it.
-# Fallback native backend (4C.6): taffy layout + cosmic-text glyphs, drawn through the engine's
-# `Draw2D` (wgpu and SDL modes). Native only.
-fallback = ["dep:taffy", "dep:cosmic-text"]
+# `text` = cosmic-text shaping and shape meshes only (what efeengine-world-ui uses).
+# `fallback` = the full fallback UI backend (4C.6: taffy layout + widgets, drawn through the engine's
+# `Draw2D`, wgpu and SDL modes) on top of `text`. Built on all targets; the screenshot/offscreen helper is native only.
+text = ["dep:cosmic-text"]
+fallback = ["text", "dep:taffy"]
 iced = ["dep:iced_wgpu", "dep:iced_widget", "dep:iced_runtime", "dep:iced_core", "dep:pollster"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -26,9 +31,6 @@ iced_widget = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f
 iced_runtime = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", optional = true }
 iced_core = { git = "https://github.com/iced-rs/iced", rev = "e5c350f271a8046f875c6662d452fde9e462d486", optional = true }
 pollster = { version = "1.0.2", optional = true }
-taffy = { version = "0.15.1", default-features = false, features = ["std", "taffy_tree", "flexbox", "content_size"], optional = true }
-# The same cosmic-text fork and rev iced_wgpu uses, so enabling both backends compiles it once.
-cosmic-text = { git = "https://github.com/hecrj/cosmic-text.git", rev = "6adc2364289fd241daed751948a03d0aea5a31ca", default-features = false, features = ["std", "swash"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # versions match crates/core
@@ -43,6 +45,7 @@ features = [
     "Element",
     "HtmlElement",
     "HtmlInputElement",
+    "HtmlTextAreaElement",
     "HtmlCanvasElement",
     "HtmlHeadElement",
     "CanvasRenderingContext2d",

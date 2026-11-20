@@ -17,7 +17,7 @@ use std::sync::Arc;
 use wasm_bindgen::{JsCast, closure::Closure};
 use web_sys::{
     CanvasRenderingContext2d, Document, Element, Event, EventTarget, FontFace, HtmlCanvasElement, HtmlElement,
-    HtmlInputElement, ImageData, KeyboardEvent, MouseEvent, PointerEvent, Text, WheelEvent,
+    HtmlInputElement, HtmlTextAreaElement, ImageData, KeyboardEvent, MouseEvent, PointerEvent, Text, WheelEvent,
 };
 
 use crate::backend::{UiBackend, UiBackendCx};
@@ -50,6 +50,12 @@ struct Shared {
     /// Element to blur once the listener has released the borrow: `blur()` fires `focusout`
     /// synchronously, which re-enters a listener and would borrow `Shared` again.
     blur: Option<HtmlElement>,
+    /// Scroll nodes with `follow_end`, and those that stick to the end (a user scroll away from
+    /// it unpins until the end is reached again), by `WidgetId::to_bits`.
+    following: HashSet<u64>,
+    pinned: HashSet<u64>,
+    /// Scroll nodes whose next `scroll` event is our own `scrollTop` write.
+    own_scroll: HashSet<u64>,
 }
 
 struct Entry {
@@ -83,6 +89,7 @@ struct Listener {
     target: EventTarget,
     kind: &'static str,
     closure: Closure<dyn FnMut(Event)>,
+    capture: bool,
 }
 
 pub struct WebBackend {
@@ -97,6 +104,8 @@ struct Inner {
     theme_style: HtmlElement,
     theme_written: bool,
     entries: HashMap<WidgetId, Entry>,
+    /// Ellipsized texts and whether each was last reported cut.
+    trunc: HashMap<WidgetId, bool>,
     /// The loaded font faces (kept alive here; also in `document.fonts`), by font id.
     fonts: HashMap<FontId, FontFace>,
     shared: Rc<RefCell<Shared>>,
@@ -206,6 +215,7 @@ impl UiBackend for WebBackend {
             theme_style,
             theme_written: false,
             entries: HashMap::new(),
+            trunc: HashMap::new(),
             fonts: HashMap::new(),
             shared,
             listeners: Vec::new(),
@@ -223,7 +233,9 @@ impl UiBackend for WebBackend {
     }
 
     fn drain_signals(&mut self, out: &mut Vec<UiSignal>) {
-        if let Some(inner) = &self.inner {
+        if let Some(inner) = &mut self.inner {
+            inner.follow_scrolls();
+            inner.report_truncation();
             out.append(&mut inner.shared.borrow_mut().signals);
         }
     }
@@ -297,7 +309,7 @@ impl Inner {
         });
         let target: EventTarget = self.root.clone().into();
         if target.add_event_listener_with_callback(kind, closure.as_ref().unchecked_ref()).is_ok() {
-            self.listeners.push(Listener { target, kind, closure });
+            self.listeners.push(Listener { target, kind, closure, capture: false });
         } else {
             warn(&format!("could not add the {kind} listener"));
         }
@@ -343,10 +355,23 @@ impl Inner {
         });
         self.listen("keydown", |sh, root, e| {
             let ke = e.clone().dyn_into::<KeyboardEvent>().ok()?;
+            // Escape leaves a text field (the browser would keep the focus, and the game its
+            // keys blocked), like the other backends.
+            if ke.key() == "Escape"
+                && widget_at(sh, root, e.target(), |k| k == TextInput).is_some()
+                && let Some(h) = e.target().and_then(|t| t.dyn_into::<HtmlElement>().ok())
+            {
+                sh.blur = Some(h);
+                return None;
+            }
             if ke.key() != "Enter" || ke.is_composing() {
                 return None;
             }
             let input = input_of(e.target())?;
+            // A read-only input (selectable text) never submits.
+            if input.read_only() {
+                return None;
+            }
             let (id, _) = widget_at(sh, root, e.target(), |k| k == TextInput)?;
             Some(vec![signal(id, UiSignalKind::Submit(input.value()))])
         });
@@ -403,6 +428,30 @@ impl Inner {
                 if out.is_empty() { None } else { Some(out) }
             });
         }
+        // A user scroll of a scroll node. `scroll` does not bubble, so the root listens in the
+        // capture phase. Our own `scrollTop` writes (following the end) are skipped.
+        {
+            let shared = self.shared.clone();
+            let closure = Closure::<dyn FnMut(Event)>::new(move |e: Event| {
+                let Some(el) = e.target().and_then(|t| t.dyn_into::<Element>().ok()) else { return };
+                let Some(bits) = el.get_attribute(ID_ATTR).and_then(|s| s.parse::<u64>().ok()) else { return };
+                let Ok(mut sh) = shared.try_borrow_mut() else { return };
+                if sh.kinds.get(&bits) != Some(&KindTag::Scroll) || sh.own_scroll.remove(&bits) {
+                    return;
+                }
+                let at_end = el.scroll_height() - el.scroll_top() as i32 - el.client_height() <= 1;
+                if !at_end {
+                    sh.pinned.remove(&bits);
+                } else if sh.following.contains(&bits) {
+                    sh.pinned.insert(bits);
+                }
+                sh.signals.push(signal(WidgetId::from_bits(bits), UiSignalKind::Scrolled { at_end }));
+            });
+            let target: EventTarget = self.root.clone().into();
+            if target.add_event_listener_with_callback_and_bool("scroll", closure.as_ref().unchecked_ref(), true).is_ok() {
+                self.listeners.push(Listener { target, kind: "scroll", closure, capture: true });
+            }
+        }
         // Pointer-over-widget flag for `capture()`.
         let shared = self.shared.clone();
         let root: Element = self.root.clone().into();
@@ -433,9 +482,38 @@ impl Inner {
             });
             let target: EventTarget = self.root.clone().into();
             if target.add_event_listener_with_callback(kind, closure.as_ref().unchecked_ref()).is_ok() {
-                self.listeners.push(Listener { target, kind, closure });
+                self.listeners.push(Listener { target, kind, closure, capture: false });
             }
         }
+    }
+
+    /// Keeps every pinned scroll node at its end (content grew, or the view resized).
+    fn follow_scrolls(&mut self) {
+        let pinned: Vec<u64> = self.shared.borrow().pinned.iter().copied().collect();
+        for bits in pinned {
+            let Some(e) = self.entries.get(&WidgetId::from_bits(bits)) else { continue };
+            let end = e.el.scroll_height() - e.el.client_height();
+            if end > 0 && (e.el.scroll_top() as i32) < end {
+                // The browser answers with a `scroll` event: mark it as ours.
+                self.shared.borrow_mut().own_scroll.insert(bits);
+                e.el.set_scroll_top(end);
+            }
+        }
+    }
+
+    /// `Truncated` for ellipsized inputs whose text overflows (or stopped overflowing), also after
+    /// a resize: checked every frame (reading the sizes costs no layout when nothing changed).
+    fn report_truncation(&mut self) {
+        let mut out = Vec::new();
+        for (id, was) in self.trunc.iter_mut() {
+            let Some(e) = self.entries.get(id) else { continue };
+            let cut = e.el.scroll_width() > e.el.client_width();
+            if cut != *was {
+                *was = cut;
+                out.push(signal(*id, UiSignalKind::Truncated(cut)));
+            }
+        }
+        self.shared.borrow_mut().signals.append(&mut out);
     }
 
     // ----- sync ------------------------------------------------------------------------------
@@ -523,6 +601,17 @@ impl Inner {
                     restyle_all = true;
                 }
                 UiChange::Font(id) => self.install_font(tree, id),
+                UiChange::Blur(w) => {
+                    // `UiTree::blur`: the focused element of this backend's root loses focus; the
+                    // browser fires `focusout`, which reports `Focus(false)`.
+                    if w.is_none_or(|w| w == self.window)
+                        && let Some(a) = self.document.active_element()
+                        && self.root.contains(Some(&a))
+                        && let Ok(h) = a.dyn_into::<HtmlElement>()
+                    {
+                        let _ = h.blur();
+                    }
+                }
             }
         }
         // Fonts registered before the first sync (and any the journal missed): load what is not
@@ -665,6 +754,7 @@ impl Inner {
             NodeKind::Slider { .. } => {
                 let _ = el.set_attribute("type", "range");
             }
+            NodeKind::TextInput { multiline: true, .. } => {} // a `<textarea>`, no `type`
             NodeKind::TextInput { .. } => {
                 let _ = el.set_attribute("type", "text");
             }
@@ -705,6 +795,10 @@ impl Inner {
         let mut sh = self.shared.borrow_mut();
         sh.kinds.remove(&bits);
         sh.hover.remove(&bits);
+        sh.following.remove(&bits);
+        sh.pinned.remove(&bits);
+        drop(sh);
+        self.trunc.remove(&id);
     }
 
     /// Orders the DOM children of `parent` like `tree.children(parent)`. A button without
@@ -713,7 +807,7 @@ impl Inner {
     fn place_children(&mut self, tree: &UiTree, parent: WidgetId) {
         let Some(pe) = self.entries.get(&parent) else { return };
         let kind = tree.kind(parent);
-        if !matches!(kind, Some(NodeKind::Container | NodeKind::Scroll | NodeKind::Button { .. })) {
+        if !matches!(kind, Some(NodeKind::Container | NodeKind::Scroll { .. } | NodeKind::Button { .. })) {
             return;
         }
         let mut wanted: Vec<web_sys::Node> = tree
@@ -775,8 +869,28 @@ impl Inner {
                     i.set_value(&value.to_string());
                 }
             }
-            NodeKind::TextInput { value, placeholder, max_len, password } => {
+            NodeKind::TextInput { value, multiline: true, read_only, .. } => {
+                if let Ok(t) = e.el.clone().dyn_into::<HtmlTextAreaElement>() {
+                    t.set_read_only(*read_only);
+                    // Grows with the text (no inner scrollbar, no resize grip).
+                    let style = t.style();
+                    let _ = style.set_property("field-sizing", "content");
+                    let _ = style.set_property("resize", "none");
+                    if t.value() != *value {
+                        t.set_value(value);
+                    }
+                }
+            }
+            NodeKind::TextInput { value, placeholder, max_len, password, read_only, ellipsize, .. } => {
                 if let Ok(i) = e.el.clone().dyn_into::<HtmlInputElement>() {
+                    i.set_read_only(*read_only);
+                    // An unfocused input shows `...` (the browser's ellipsis) where the text is cut.
+                    let _ = i.style().set_property("text-overflow", if *ellipsize { "ellipsis" } else { "clip" });
+                    if *ellipsize {
+                        self.trunc.entry(id).or_insert(false);
+                    } else {
+                        self.trunc.remove(&id);
+                    }
                     i.set_type(if *password { "password" } else { "text" });
                     i.set_placeholder(placeholder);
                     if *max_len > 0 {
@@ -813,7 +927,20 @@ impl Inner {
                 // No page gestures (scroll, zoom) on a view that wants the pointer.
                 let _ = e.el.style().set_property("touch-action", if *pointer { "none" } else { "auto" });
             }
-            NodeKind::Container | NodeKind::Scroll => {}
+            NodeKind::Container => {}
+            NodeKind::Scroll { follow_end } => {
+                // A node that starts following sticks to its end (see `Inner::follow_scrolls`).
+                let bits = id.to_bits();
+                let mut sh = self.shared.borrow_mut();
+                if *follow_end {
+                    if sh.following.insert(bits) {
+                        sh.pinned.insert(bits);
+                    }
+                } else {
+                    sh.following.remove(&bits);
+                    sh.pinned.remove(&bits);
+                }
+            }
         }
     }
 
@@ -884,7 +1011,7 @@ impl Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         for l in self.listeners.drain(..) {
-            let _ = l.target.remove_event_listener_with_callback(l.kind, l.closure.as_ref().unchecked_ref());
+            let _ = l.target.remove_event_listener_with_callback_and_bool(l.kind, l.closure.as_ref().unchecked_ref(), l.capture);
         }
         // The elements and stylesheets stay: the page owns the layer element.
     }

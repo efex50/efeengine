@@ -20,11 +20,10 @@
 mod edit;
 mod input;
 mod layout;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod offscreen;
 mod model;
 mod paint;
-mod shapes;
-mod text;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,7 +50,24 @@ use paint::{PaintState, Painter};
 use shapes::Mesh;
 use text::{TextCell, TextSystem};
 
+pub use crate::text_kit::{shapes, text};
 pub use text::DEFAULT_FAMILY;
+
+/// What an `ellipsize` text shows for a value and available width (see `update_ellipsis`).
+struct Ellipsis {
+    value: String,
+    avail: u32,
+    shown: Option<String>,
+}
+
+fn collect_followers(n: &model::VNode, out: &mut std::collections::HashSet<WidgetId>) {
+    if matches!(n.kind, crate::node::NodeKind::Scroll { follow_end: true }) {
+        out.insert(n.id);
+    }
+    for c in &n.children {
+        collect_followers(c, out);
+    }
+}
 
 /// Caret blink half period.
 const BLINK_MS: u128 = 530;
@@ -62,6 +78,9 @@ pub struct FallbackBackend {
     text: TextSystem,
     cells: HashMap<WidgetId, TextCell>,
     inputs: HashMap<WidgetId, InputState>,
+    /// Ellipsized one-line texts: what is shown (`None` fits) for a value and width, and what was
+    /// last reported with `Truncated`.
+    ellipsis: HashMap<WidgetId, Ellipsis>,
     model: Model,
     images: HashMap<TextureHandle, (u32, u32)>,
     logical: (f32, f32),
@@ -107,6 +126,7 @@ impl FallbackBackend {
             text: TextSystem::new(system_fonts),
             cells: HashMap::new(),
             inputs: HashMap::new(),
+            ellipsis: HashMap::new(),
             model: Model::default(),
             images: HashMap::new(),
             logical: (0.0, 0.0),
@@ -201,6 +221,7 @@ impl FallbackBackend {
                 text: &mut self.text,
                 cells: &mut self.cells,
                 inputs: &mut self.inputs,
+                ellipsis: &self.ellipsis,
                 images: &self.images,
                 mesh: &mut self.mesh,
                 st: PaintState {
@@ -248,6 +269,76 @@ impl FallbackBackend {
         self.list.replay(d);
     }
 
+    /// `follow_end` flags of this model: a node that starts following sticks to its end at once.
+    fn follow_flags(&mut self) {
+        let mut now = std::collections::HashSet::new();
+        for l in &self.model.layers {
+            collect_followers(&l.root, &mut now);
+        }
+        for id in &now {
+            if !self.ui.following.contains(id) {
+                self.ui.pinned.insert(*id);
+            }
+        }
+        self.ui.pinned.retain(|id| now.contains(id));
+        self.ui.following = now;
+    }
+
+    /// Cuts the one-line `ellipsize` texts that do not fit their width (`...` at the cut) and
+    /// reports `Truncated` when that changes. Runs after every layout, so a resize is covered.
+    fn update_ellipsis(&mut self) {
+        use crate::node::NodeKind;
+        use crate::signal::UiSignalKind;
+        let mut jobs = Vec::new();
+        fn walk(n: &model::VNode, out: &mut Vec<(WidgetId, String, f32, crate::style::Style)>) {
+            if let NodeKind::TextInput { value, read_only: true, multiline: false, ellipsize: true, .. } = &n.kind {
+                let pad = paint::padding(n.style());
+                out.push((n.id, value.clone(), (n.rect.w - pad.left - pad.right - 2.0).max(1.0), *n.style()));
+            }
+            for c in &n.children {
+                walk(c, out);
+            }
+        }
+        for l in &self.model.layers {
+            walk(&l.root, &mut jobs);
+        }
+        let alive: std::collections::HashSet<WidgetId> = jobs.iter().map(|j| j.0).collect();
+        self.ellipsis.retain(|id, _| alive.contains(id));
+        for (id, value, avail, style) in jobs {
+            if self.ellipsis.get(&id).is_some_and(|e| e.value == value && e.avail == avail.to_bits()) {
+                continue;
+            }
+            let width = |text: &mut TextSystem, cells: &mut HashMap<WidgetId, TextCell>, s: &str| {
+                let cell = cells.entry(id).or_default();
+                text.layout(cell, &layout::text_spec(&style, s, false), None).0
+            };
+            let shown = if width(&mut self.text, &mut self.cells, &value) <= avail {
+                None
+            } else {
+                // The longest prefix (of the value without a trailing `...`) that fits with `...`.
+                let base: Vec<char> = value.strip_suffix("...").unwrap_or(&value).chars().collect();
+                let (mut lo, mut hi) = (0usize, base.len());
+                while lo < hi {
+                    let mid = (lo + hi).div_ceil(2);
+                    let cand: String = base[..mid].iter().collect::<String>() + "...";
+                    if width(&mut self.text, &mut self.cells, &cand) <= avail {
+                        lo = mid;
+                    } else {
+                        hi = mid - 1;
+                    }
+                }
+                Some(base[..lo].iter().collect::<String>() + "...")
+            };
+            let cut = shown.is_some();
+            let was = self.ellipsis.get(&id).is_some_and(|e| e.shown.is_some());
+            if cut != was {
+                self.signals.push(crate::signal::UiSignal { widget: id, key: None, owner: crate::id::Owner::Game, kind: UiSignalKind::Truncated(cut) });
+            }
+            self.ellipsis.insert(id, Ellipsis { value, avail: avail.to_bits(), shown });
+            self.dirty = true;
+        }
+    }
+
     pub(crate) fn ensure_layout(&mut self) {
         if !self.layout_dirty {
             return;
@@ -256,6 +347,7 @@ impl FallbackBackend {
         self.layouts += 1;
         let mut cx = LayoutCx { text: &mut self.text, cells: &mut self.cells, images: &self.images };
         layout::layout(&mut self.model, self.logical, &mut cx);
+        self.update_ellipsis();
         self.ui.clamp_scroll(&self.model);
         self.dirty = true;
         self.refresh_hover();
@@ -289,6 +381,7 @@ impl UiBackend for FallbackBackend {
             }
         }
         self.model = Model::build(tree, self.window);
+        self.follow_flags();
         self.layout_dirty = true;
         self.dirty = true;
         // Forget state of nodes that are gone.
@@ -296,6 +389,12 @@ impl UiBackend for FallbackBackend {
         self.cells.retain(|id, _| m.find(*id).is_some());
         self.inputs.retain(|id, _| m.find(*id).is_some());
         self.ui.retain(&self.model);
+        // `UiTree::blur`: drop the focus of a text input (reports `Focus(false)`).
+        if changes.iter().any(|c| matches!(c, UiChange::Blur(w) if w.is_none_or(|w| w == self.window)))
+            && self.focused_input().is_some()
+        {
+            self.set_focus(None, false);
+        }
         self.after_focus_change();
     }
 

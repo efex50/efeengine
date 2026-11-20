@@ -90,8 +90,10 @@ pub enum NodeKind {
     Button  { label: String },                   // or children instead of a label (icon + text)
     Checkbox{ label: String, checked: bool },
     Slider  { min: f32, max: f32, step: f32, value: f32 },
-    TextInput { value: String, placeholder: String, max_len: u32, password: bool },
-    Scroll,                                      // clips children, scrolls on the main axis
+    TextInput { value: String, placeholder: String, max_len: u32, password: bool,
+                read_only: bool, multiline: bool,
+                ellipsize: bool },                     // see "Selectable text" below
+    Scroll { follow_end: bool },                 // clips children, scrolls on the main axis; follow_end: stay at the end (see "Scroll following")
 }
 
 pub struct Node {
@@ -131,6 +133,50 @@ Builders return a small handle with chained setters (`.class`, `.key`, `.gap`, `
 `.id()`. Reads: `ui.get(id)`, `children`, `parent`, `text_of`, `value`, `find(key)`. Setters on an existing node: `ui.set_text(id, ..)`, `ui.set_value(id, ..)`,
 `ui.set_visible(id, ..)`, `ui.set_enabled(id, ..)`, `ui.set_class(id, ..)`, `ui.style_mut(id)`,
 `ui.move_to(id, parent, index)`, `ui.remove(id)`. Each writes one journal entry.
+
+### Selectable text (read-only `TextInput`)
+
+There is no separate selectable-text kind: a `TextInput` with `read_only` can be focused, selected
+with the mouse or Ctrl+A and copied (Ctrl+C), but never edited. It sends no `Changed` or `Submit`
+(Enter does nothing; the tree drops a `Changed` for it, `write_back` returns `None`), while
+`Focus` signals and the keyboard capture of a focused text field work as for any input. The
+program can still change the value (`set_text`, the view layer). `multiline` (meant for
+`read_only`) shows the value wrapped over several lines at the node's width, `\n` breaking lines, and
+the node grows in height. Builders: `NodeRef::read_only(bool)` / `multiline(bool)`,
+`NodeKind::selectable_text(value, multiline)`, view layer `selectable_text(value, multiline)` or
+`text_input(..).read_only(true)`. A backend may fix `multiline` when it creates the widget (the
+web `<textarea>`), so give a node that flips it a new key. Per backend: iced a `text_input` whose
+edits the backend drops (one line) or a `text_editor` whose edit actions are dropped (wrapped);
+fallback the same editor with every edit blocked, wrapped text laid out like `Text`; web
+`<input readonly>` or `<textarea readonly>`.
+
+`ellipsize` (for a `read_only`, one-line input): while unfocused, a value wider than the node is cut
+so that text plus `...` fits, and the backend reports `UiSignalKind::Truncated(bool)` whenever the
+cut state changes (first layout and every resize included); focused, the whole value is shown and
+scrolls, so selecting and copying always work on the full text. A trailing `...` already in the value
+is not doubled. Builders: `NodeRef::ellipsize(bool)`, `El::ellipsize(bool)`, view layer
+`.on_truncated(|cut| Msg)`. Per backend: fallback measures with its cosmic-text shaping after every
+layout; iced reads each input's bounds with an operation and measures with iced's paragraph shaping
+(its `text_input` cannot ellipsize), one frame late; web uses CSS `text-overflow: ellipsis`, so it shows
+the browser's `…` character instead of three dots, and compares `scrollWidth` with `clientWidth` every
+frame; headless does nothing (tests inject `Truncated`). `filter_signals` drops `Truncated` for any
+node without `ellipsize`.
+
+### Scroll following (`Scroll { follow_end }`)
+
+`follow_end` keeps the end of the content in view while it grows (a terminal-style log); without it
+the position never moves when content is added. The backend sticks to the end after every layout
+(growth, resize). A user scroll (wheel, scrollbar, touch) away from the end unpins the node until it
+is scrolled back to the end or the flag is set again; both are reported with
+`UiSignalKind::Scrolled { at_end }` (view layer `.on_scroll(|at_end| Msg)`), so the program can mirror
+it in a checkbox: set `follow_end` from that state. The backend's own following sends no signal.
+Builders: `NodeRef::follow_end(bool)`, `El::follow_end(bool)`. Per backend: fallback keeps a pinned set
+and applies the offset after layout, wheel and thumb drags send `Scrolled`; iced uses
+`scrollable.on_scroll` (its `Source` tells user scrolls from `Content` / `Resize` notifications) and
+snaps to the end on growth, with a one-off snap when a node starts following; web listens to `scroll`
+in the capture phase (it does not bubble), re-sticks `scrollTop` every frame while pinned and ignores
+its own writes; headless records nothing (tests inject `Scrolled`). `filter_signals` drops `Scrolled`
+for non-`Scroll` nodes. Fallback: Tab focus scrolling into view does not send `Scrolled`.
 
 ## 5. Style
 
@@ -255,6 +301,11 @@ pub struct StateStyles { pub normal: Style, pub hovered: Style, pub pressed: Sty
     all pointer events, so the content may sit anywhere by its anchor. Inside layers a node takes
     pointer events (`auto`), except a Container or Text without background and border, which lets
     the pointer through to the game (a transparent layout box does not block clicks).
+- Wireframe classes (square, high-contrast lines; used by the debug menu): `wire-panel` (bordered
+  panel), `separator` / `separator-v` (one-pixel rule across a column / a row), `wire-header`,
+  `wire-row` (padded row), `tab` and `tab-active` (a tab bar is a row of buttons with `tab`, the
+  current one also `tab-active`; there is no tab widget), `wire-text` (a read-only input that reads
+  as plain text) and `wire-field` (a small bordered input).
 - **iced:** the theme is resolved per node when the tree changes (`WidgetState` variants: normal, hovered, pressed, focused, disabled) and the widgets' status closures pick one (`button::Style` for Active / Hovered / Pressed / Disabled, `text_input` Active / Hovered / Focused / Disabled, checkbox and slider Active / Hovered(Dragged) / Disabled). iced buttons, checkboxes and sliders are not focusable, so only text inputs show `focused`. A checkbox's background / border style paints its box (not the whole row as on the web).
 - **Fallback:** resolved per node at sync time and cached until the node, its classes or the theme
   change.
@@ -274,6 +325,8 @@ pub enum UiSignalKind {
     Submit(String),                     // TextInput: Enter
     Focus(bool),                        // gained / lost keyboard focus
     Hover(bool),                        // pointer entered / left (only if the node opts in: `.hover_signals()`)
+    Scrolled { at_end: bool },          // Scroll: the user scrolled (not the backend's own following); at_end = view is at the end
+    Truncated(bool),                    // ellipsize TextInput: the value is cut (true) or fits (false)
 }
 pub enum UiValue { Bool(bool), F32(f32), Text(String) }
 ```
@@ -444,6 +497,21 @@ pub type UiCapture = efeengine_core::input::InputCapture;   // { pointer: bool, 
 6. **Windows (done):** `RenderOverlay` calls and the input filter are per window (`Gpu::window`, `InputEvent::window`);
    the plugin keeps one backend instance per window with a layer (section 13). `docs/MULTI_WINDOW.md`.
 
+### Giving the keyboard back: `UiTree::blur`
+
+A text field keeps the keyboard captured until it loses focus. Users leave it by Escape or a click
+elsewhere (every backend does that itself), but a form that is done (Enter, a tab switch) has to
+do it for them: `tree.blur_window(window)` (or `tree.blur()` for every window) writes
+`UiChange::Blur(Some(window) | None)`. At the next `sync` each backend instance of that window
+unfocuses its text input, reports `Focus(false)` and its `capture().keyboard` is false from then
+on, so the game gets its keys back in the next frame's input stage. Nothing happens when no text
+input has focus. Per backend: iced runs its `unfocus` operation, the fallback clears its focus, web
+calls `blur()` on the focused element under its root (and Escape in a text field blurs too), the
+headless backend tracks focus from the `Focus` signals it is given (`HeadlessHandle::focused()`,
+ORed into `capture().keyboard`) and answers a blur with a `Focus(false)` signal like a real one.
+With a separate OS window the capture is per backend instance and ORed by the plugin, so the
+window's own blur is enough; the game window is untouched.
+
 ## 13. Backend trait
 
 ```rust
@@ -466,6 +534,7 @@ pub enum UiChange {
     Created(WidgetId), Removed(WidgetId), Moved { id: WidgetId, parent: WidgetId, index: u32 },
     Kind(WidgetId), Style(WidgetId), Classes(WidgetId), Visible(WidgetId), Enabled(WidgetId),
     HoverSignals(WidgetId), Layer(WidgetId), Theme, Font(FontId),
+    Blur(Option<u32>),                                                 // UiTree::blur / blur_window: drop the text focus (section 10)
 }
 ```
 

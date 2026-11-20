@@ -38,6 +38,10 @@ pub enum UiChange {
     Layer(WidgetId),
     Theme,
     Font(FontId),
+    /// Drop the keyboard focus of the text input in a window (`Some(window)`) or in every
+    /// window (`None`): see [`UiTree::blur`](crate::UiTree::blur). Names no node. A backend
+    /// that has a focused text input there unfocuses it and reports `Focus(false)`.
+    Blur(Option<u32>),
 }
 
 impl UiChange {
@@ -54,7 +58,7 @@ impl UiChange {
             | UiChange::HoverSignals(id)
             | UiChange::Layer(id) => Some(id),
             UiChange::Moved { id, .. } => Some(id),
-            UiChange::Theme | UiChange::Font(_) => None,
+            UiChange::Theme | UiChange::Font(_) | UiChange::Blur(_) => None,
         }
     }
 }

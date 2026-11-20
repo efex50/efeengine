@@ -36,9 +36,25 @@ pub enum NodeKind {
     Checkbox { label: String, checked: bool },
     Slider { min: f32, max: f32, step: f32, value: f32 },
     /// `max_len` counts chars, 0 = unlimited.
-    TextInput { value: String, placeholder: String, max_len: u32, password: bool },
-    /// Clips children, scrolls on the main axis.
-    Scroll,
+    ///
+    /// `read_only`: the text can be focused, selected and copied but never edited; no `Changed`
+    /// or `Submit` signal comes from it (the tree drops them) and Enter does nothing. `multiline`
+    /// (meant for `read_only`): the value may hold `\n` and is shown wrapped over several lines
+    /// at the node's width, growing in height; an input that is not `read_only` stays one line.
+    /// A backend may fix `multiline` when it creates the widget (web: `<textarea>`), so give a
+    /// node that flips it a new key.
+    ///
+    /// `ellipsize` (for a `read_only`, one-line input): while it is not focused the backend cuts
+    /// a value that does not fit the node's width and shows `...` at the cut (the web shows its own
+    /// ellipsis character); focused, the whole value is shown (scrolling). The backend reports
+    /// whether the value is cut with `UiSignalKind::Truncated`, also after a resize.
+    TextInput { value: String, placeholder: String, max_len: u32, password: bool, read_only: bool, multiline: bool, ellipsize: bool },
+    /// Clips children, scrolls on the main axis. `follow_end`: keep the view at the end (the
+    /// bottom of a column) while the content grows, like a terminal; a user scroll away from the
+    /// end makes the backend stop following until the flag is set again or the user scrolls back
+    /// to the end (it reports both with `UiSignalKind::Scrolled`). Without it the scroll position
+    /// never moves when content is added.
+    Scroll { follow_end: bool },
     /// A view the game draws with wgpu: the [`UiPainter`](crate::UiPainter) registered under
     /// `painter` (API.md section 17). Sized and clipped like an `Image`; an `Auto` size is
     /// empty (give it a size). `pointer`: send `Pointer` signals.
@@ -98,7 +114,7 @@ impl NodeKind {
             NodeKind::Checkbox { .. } => KindTag::Checkbox,
             NodeKind::Slider { .. } => KindTag::Slider,
             NodeKind::TextInput { .. } => KindTag::TextInput,
-            NodeKind::Scroll => KindTag::Scroll,
+            NodeKind::Scroll { .. } => KindTag::Scroll,
             NodeKind::GpuView { .. } => KindTag::GpuView,
         }
     }
@@ -144,8 +160,14 @@ impl NodeKind {
         NodeKind::GpuView { painter: painter.into(), pointer: false }
     }
 
+    /// A read-only text input: selectable and copyable, not editable. `multiline` wraps it over
+    /// several lines.
+    pub fn selectable_text(value: impl Into<String>, multiline: bool) -> NodeKind {
+        NodeKind::TextInput { value: value.into(), placeholder: String::new(), max_len: 0, password: false, read_only: true, multiline, ellipsize: false }
+    }
+
     pub fn text_input(value: impl Into<String>) -> NodeKind {
-        NodeKind::TextInput { value: value.into(), placeholder: String::new(), max_len: 0, password: false }
+        NodeKind::TextInput { value: value.into(), placeholder: String::new(), max_len: 0, password: false, read_only: false, multiline: false, ellipsize: false }
     }
 }
 

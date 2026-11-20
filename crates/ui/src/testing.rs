@@ -104,6 +104,11 @@ impl UiTest {
         self.signal(key, UiSignalKind::Changed(UiValue::F32(value)));
     }
 
+    /// Replaces the text of an input (as typed in one go).
+    pub fn set_text(&mut self, key: &str, text: &str) {
+        self.signal(key, UiSignalKind::Changed(UiValue::Text(text.to_string())));
+    }
+
     pub fn set_checked(&mut self, key: &str, checked: bool) {
         self.signal(key, UiSignalKind::Changed(UiValue::Bool(checked)));
     }

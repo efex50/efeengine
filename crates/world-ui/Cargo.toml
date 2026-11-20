@@ -1,0 +1,12 @@
+[package]
+name = "efeengine-world-ui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Display-only world-space UI for efeengine: text, rectangles, bars, sprites and containers anchored to entities or world points. No input."
+
+[dependencies]
+efeengine-core = { path = "../core" }
+
+# Only the fallback backend's text shaping and shape meshes are used; no iced, no input.
+efeengine-ui = { path = "../ui", default-features = false, features = ["text"] }

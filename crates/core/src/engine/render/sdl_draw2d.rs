@@ -381,7 +381,7 @@ impl SdlMode {
 
     /// Draw and present one frame. `custom`, `renderer_2d` (a user-installed wgpu renderer) and
     /// `overlays` say what the game installed that this mode cannot run (warned once each).
-    pub fn render(&mut self, frame: &super::RenderFrame, custom: bool, renderer_2d: bool, overlays: bool, overlays_2d: &mut super::Overlays2D, scale: f32) {
+    pub fn render(&mut self, frame: &super::RenderFrame, custom: bool, renderer_2d: bool, overlays: bool, world_2d: &mut super::Overlays2D, overlays_2d: &mut super::Overlays2D, scale: f32) {
         let w = &mut self.warned;
         let once = |flag: &mut bool, on: bool, msg: &str| {
             if on && !*flag {
@@ -395,6 +395,7 @@ impl SdlMode {
         once(&mut w.overlays, overlays, "SDL mode: render overlays (the iced UI) need wgpu and are not drawn; use the fallback UI (UiPlugin::fallback, feature `fallback`), which draws through Draw2D");
         self.draw.sync(&frame.textures);
         self.sprites.render(&mut self.draw, &frame.d2);
+        world_2d.render_sdl(&mut self.draw, scale);
         overlays_2d.render_sdl(&mut self.draw, scale);
         self.draw.present();
     }

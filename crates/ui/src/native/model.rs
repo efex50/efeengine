@@ -60,6 +60,12 @@ impl Model {
         Model { layers }
     }
 
+    pub fn walk_mut(&mut self, f: &mut dyn FnMut(&mut VNode)) {
+        for l in &mut self.layers {
+            l.root.walk_mut(f);
+        }
+    }
+
     pub fn find_mut(&mut self, id: WidgetId) -> Option<&mut VNode> {
         self.layers.iter_mut().find_map(|l| l.root.find_mut(id))
     }
@@ -95,6 +101,13 @@ impl Model {
 }
 
 impl VNode {
+    pub fn walk_mut(&mut self, f: &mut dyn FnMut(&mut VNode)) {
+        f(self);
+        for c in &mut self.children {
+            c.walk_mut(f);
+        }
+    }
+
     pub fn find(&self, id: WidgetId) -> Option<&VNode> {
         if self.id == id {
             return Some(self);

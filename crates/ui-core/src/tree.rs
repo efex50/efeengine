@@ -385,6 +385,20 @@ impl UiTree {
         self.journal.push(change);
     }
 
+    /// Asks the backends to drop the keyboard focus of the text input in `window` (a core
+    /// `WindowId`'s number, 0 = main): the next `sync` unfocuses it, the backend reports
+    /// `Focus(false)` and its capture's `keyboard` goes false, so the game gets its keys back.
+    /// Does nothing when no text input has focus there. Use it when a form is done (submit,
+    /// Escape, a tab switch).
+    pub fn blur_window(&mut self, window: u32) {
+        self.journal.push(UiChange::Blur(Some(window)));
+    }
+
+    /// [`blur_window`](Self::blur_window) for every window.
+    pub fn blur(&mut self) {
+        self.journal.push(UiChange::Blur(None));
+    }
+
     /// The changes since the last [`take_changes`](Self::take_changes).
     pub fn changes(&self) -> &[UiChange] {
         &self.journal
@@ -537,7 +551,7 @@ impl UiTree {
     }
 
     pub fn scroll(&mut self, parent: WidgetId) -> NodeRef<'_> {
-        self.create(parent, NodeKind::Scroll)
+        self.create(parent, NodeKind::Scroll { follow_end: false })
     }
 
     /// A text node; `text` is a `&str`, `String` or a [`Bind<String>`].
@@ -692,6 +706,10 @@ impl UiTree {
     /// Used by the UI plugin before game systems run.
     pub fn write_back(&mut self, id: WidgetId, value: UiValue) -> Option<UiValue> {
         let node = self.get_mut(id)?;
+        // A read-only input never takes a value from the user (the program may still set it).
+        if matches!(node.kind, NodeKind::TextInput { read_only: true, .. }) {
+            return None;
+        }
         let v = sanitize(&node.kind, value)?;
         apply_value(&mut node.kind, v.clone());
         Some(v)
@@ -1068,6 +1086,46 @@ impl NodeRef<'_> {
         self.tree.edit_kind(self.id, |k| {
             if let NodeKind::TextInput { password, .. } = k {
                 *password = on;
+            }
+        });
+        self
+    }
+
+    /// Selectable but not editable (see [`NodeKind::TextInput`]).
+    pub fn read_only(self, on: bool) -> Self {
+        self.tree.edit_kind(self.id, |k| {
+            if let NodeKind::TextInput { read_only, .. } = k {
+                *read_only = on;
+            }
+        });
+        self
+    }
+
+    /// Cut with `...` when it does not fit (see [`NodeKind::TextInput`]).
+    pub fn ellipsize(self, on: bool) -> Self {
+        self.tree.edit_kind(self.id, |k| {
+            if let NodeKind::TextInput { ellipsize, .. } = k {
+                *ellipsize = on;
+            }
+        });
+        self
+    }
+
+    /// A `Scroll` that follows its end (see [`NodeKind::Scroll`]).
+    pub fn follow_end(self, on: bool) -> Self {
+        self.tree.edit_kind(self.id, |k| {
+            if let NodeKind::Scroll { follow_end } = k {
+                *follow_end = on;
+            }
+        });
+        self
+    }
+
+    /// Wrapped over several lines (for a read-only input, see [`NodeKind::TextInput`]).
+    pub fn multiline(self, on: bool) -> Self {
+        self.tree.edit_kind(self.id, |k| {
+            if let NodeKind::TextInput { multiline, .. } = k {
+                *multiline = on;
             }
         });
         self

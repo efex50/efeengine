@@ -185,7 +185,7 @@ impl TextSystem {
         Some(family)
     }
 
-    pub(super) fn attrs<'a>(&'a self, spec: &TextSpec) -> Attrs<'a> {
+    pub(crate) fn attrs<'a>(&'a self, spec: &TextSpec) -> Attrs<'a> {
         let family = spec.font.and_then(|f| self.families.get(&f)).map_or(DEFAULT_FAMILY, |f| &**f);
         Attrs::new().family(Family::Name(family)).weight(if spec.bold { Weight::BOLD } else { Weight::NORMAL })
     }

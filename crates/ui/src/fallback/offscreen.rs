@@ -93,3 +93,37 @@ pub fn render_wgpu(tree: &UiTree, images: &[(TextureHandle, Arc<Image>)], size: 
     }
     Ok(Shot { width: size.0, height: size.1, rgba: off.read_rgba8() })
 }
+
+/// Screenshots of a live backend (one that has scrolled, focused, resized, ...) through one SDL
+/// software renderer that keeps the glyph atlas between shots.
+pub struct SdlShooter {
+    d: SdlDraw2D,
+    size: (u32, u32),
+}
+
+impl SdlShooter {
+    pub fn new(size: (u32, u32)) -> Result<Self, String> {
+        Ok(Self { d: SdlDraw2D::offscreen(size)?, size })
+    }
+
+    /// Records the backend's current frame (it must have an atlas texture,
+    /// `set_atlas_texture`) and reads the pixels back, `background` under it.
+    pub fn shoot(&mut self, b: &mut FallbackBackend, background: [f32; 3]) -> Result<Shot, String> {
+        b.set_antialias(false);
+        b.prepare();
+        let mut list = DrawList::new();
+        list.set_blend(Blend::None);
+        list.fill_rect(Rect::new(0.0, 0.0, self.size.0 as f32, self.size.1 as f32), [background[0], background[1], background[2], 1.0]);
+        list.set_blend(Blend::Alpha);
+        b.draw(&mut list);
+        let mut changes = TextureChanges::default();
+        if let (Some(h), Some(img)) = (b.atlas_texture(), b.take_atlas_image()) {
+            changes.added.push((h, img));
+        }
+        self.d.sync(&changes);
+        self.d.begin_frame([0.0, 0.0, 0.0, 1.0]);
+        list.replay(&mut self.d);
+        let rgba = self.d.read_rgba8().ok_or("no pixels")?;
+        Ok(Shot { width: self.size.0, height: self.size.1, rgba })
+    }
+}

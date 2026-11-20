@@ -39,6 +39,7 @@ pub struct Painter<'a> {
     pub text: &'a mut TextSystem,
     pub cells: &'a mut HashMap<WidgetId, TextCell>,
     pub inputs: &'a mut HashMap<WidgetId, InputState>,
+    pub ellipsis: &'a HashMap<WidgetId, super::Ellipsis>,
     pub images: &'a HashMap<TextureHandle, (u32, u32)>,
     pub mesh: &'a mut Mesh,
     pub st: PaintState<'a>,
@@ -143,7 +144,7 @@ impl Painter<'_> {
 
     pub fn node(&mut self, n: &VNode, origin: (f32, f32), clip: Option<LRect>) {
         let r = n.rect.offset(origin.0, origin.1);
-        let is_container = matches!(n.kind, NodeKind::Container | NodeKind::Scroll) || (matches!(n.kind, NodeKind::Button { .. }) && !n.children.is_empty());
+        let is_container = matches!(n.kind, NodeKind::Container | NodeKind::Scroll { .. }) || (matches!(n.kind, NodeKind::Button { .. }) && !n.children.is_empty());
         if !is_container
             && clip.is_some_and(|c| {
                 let i = c.intersect(&r);
@@ -163,7 +164,7 @@ impl Painter<'_> {
                 self.boxed(r, &st);
                 self.children(n, (r.x, r.y), clip);
             }
-            NodeKind::Scroll => {
+            NodeKind::Scroll { .. } => {
                 self.boxed(r, &st);
                 let off = self.st.scroll.get(&n.id).copied().unwrap_or((0.0, 0.0));
                 let inner = clip.map_or(r, |c| c.intersect(&r));
@@ -238,7 +239,11 @@ impl Painter<'_> {
                     self.mesh.stroke(self.ph(r), b.radius * s, b.width * s, col(b.color, op));
                 }
             }
-            NodeKind::TextInput { value, placeholder, max_len: _, password } => {
+            NodeKind::TextInput { value, multiline: true, read_only: true, .. } => {
+                self.boxed(r, &st);
+                self.text_multiline(n, &base, &st, value, content, clip);
+            }
+            NodeKind::TextInput { value, placeholder, password, .. } => {
                 self.boxed(r, &st);
                 self.text_input(n, &base, &st, value, placeholder, *password, content, clip);
             }
@@ -280,15 +285,20 @@ impl Painter<'_> {
         if state.value != value {
             state.set_value(ts, &spec, value);
         }
-        state.refresh_display(ts, &spec, password);
+        // An unfocused ellipsized text shows its cut form; focused, the whole value.
+        let cut = (!focused).then(|| self.ellipsis.get(&n.id).and_then(|e| e.shown.as_deref())).flatten();
+        state.refresh_display(ts, &spec, password, cut);
         // Keep the caret inside the field.
         let cur_d = state.display_offset(state.cursor(), password);
         let cx = caret_x(&state.display.buffer, cur_d + state.preedit.len());
         let room = (inner.w - 2.0).max(1.0);
-        if cx - state.scroll_x > room {
+        if !focused {
+            // Not being edited: show the start of the text, whatever the caret last did.
+            state.scroll_x = 0.0;
+        } else if cx - state.scroll_x > room {
             state.scroll_x = cx - room;
         }
-        if cx < state.scroll_x {
+        if focused && cx < state.scroll_x {
             state.scroll_x = cx;
         }
         if state.scroll_x < 0.0 {
@@ -335,6 +345,45 @@ impl Painter<'_> {
         }
         if let Some(x) = caret {
             self.mesh.rect(Rect::new(x * s, (y + 1.0) * s, s.max(1.0), (line_h - 2.0) * s), tcol);
+        }
+        self.flush();
+        self.set_clip(clip);
+    }
+
+    /// Read-only wrapped text: the glyphs, and the selection (when this input is focused) as
+    /// one rectangle per selected line segment.
+    fn text_multiline(&mut self, n: &VNode, base: &Style, st: &Style, value: &str, inner: LRect, clip: Option<LRect>) {
+        let op = st.opacity.unwrap_or(1.0);
+        let tcol = col(st.text_color.unwrap_or(Color::WHITE), op);
+        let spec = text_spec(base, value, true);
+        let focused = self.st.focus == Some(n.id);
+        let inputs = &mut *self.inputs;
+        let ts = &mut *self.text;
+        let state = inputs.entry(n.id).or_insert_with(|| InputState::new(ts, &spec, value));
+        if state.value != value {
+            state.set_value(ts, &spec, value);
+        }
+        state.refresh_wrapped(ts, &spec, inner.w);
+        let clip_box = clip.map_or(inner, |c| c.intersect(&inner));
+        let s = self.scale;
+        self.flush();
+        self.set_clip(Some(clip_box));
+        let state = &*self.inputs.get(&n.id).expect("input state");
+        if let Some((a, b)) = state.selection_cursors().filter(|_| focused) {
+            for run in state.display.buffer.layout_runs() {
+                if run.line_i < a.line || run.line_i > b.line {
+                    continue;
+                }
+                for (x, w) in run.highlight(a, b) {
+                    self.mesh.fill(Rect::new((inner.x + x) * s, (inner.y + run.line_top) * s, w * s, run.line_height * s), 0.0, [0.36, 0.62, 1.0, 0.4 * op]);
+                }
+            }
+        }
+        self.flush();
+        if let Some(atlas) = self.atlas {
+            let clip_px = self.clip_px(Some(clip_box));
+            let state = self.inputs.get(&n.id).expect("input state");
+            self.text.draw(&state.display.buffer, (inner.x, inner.y), s, tcol, clip_px, atlas, self.out);
         }
         self.flush();
         self.set_clip(clip);

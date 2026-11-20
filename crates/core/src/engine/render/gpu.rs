@@ -50,6 +50,11 @@ pub(crate) fn plan_resize(size: (u32, u32)) -> ResizePlan {
 }
 
 impl GpuContext {
+    /// The graphics API the adapter was created on (on the web: WebGPU or GL / WebGL2).
+    pub fn backend(&self) -> wgpu::Backend {
+        self.backend
+    }
+
     /// Create the GPU context and configure the window's surface.
     ///
     /// On the web this prefers WebGPU and falls back to WebGL2 when the browser

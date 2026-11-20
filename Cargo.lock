@@ -1353,6 +1353,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "efeengine-world-ui"
+version = "0.1.0"
+dependencies = [
+ "efeengine-core",
+ "efeengine-ui",
+]
+
+[[package]]
 name = "efemod"
 version = "0.1.0"
 dependencies = [

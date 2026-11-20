@@ -8,9 +8,12 @@ pub mod backend;
 pub mod bindings;
 pub mod capture;
 pub use efeui_core::css;
+pub mod debug_menu;
 pub use efeui_core::dom_plan;
-#[cfg(all(feature = "fallback", not(target_arch = "wasm32")))]
+#[cfg(feature = "fallback")]
 pub mod fallback;
+#[cfg(feature = "text")]
+pub mod text_kit;
 pub mod headless;
 pub use efeui_core::id;
 pub use efeui_core::journal;
@@ -32,6 +35,7 @@ pub mod web;
 pub use backend::{Filter, ImageIdExt, TextInputArea, TextureExt, UiBackend, UiBackendCx};
 pub use bindings::{Bind, BindCx, BindCxExt, BindExt, BindTarget, BindUpdate, BoundValue, TextSrc, UiBindings, engine_bind_cx};
 pub use capture::UiCapture;
+pub use debug_menu::DebugMenuPlugin;
 pub use headless::{HeadlessBackend, HeadlessHandle};
 pub use id::{Owner, WidgetId};
 pub use journal::UiChange;

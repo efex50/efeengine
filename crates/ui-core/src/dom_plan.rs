@@ -15,11 +15,12 @@ pub type Decl = (&'static str, String);
 /// HTML tag name of a node's outer element.
 pub fn element_tag(kind: &NodeKind) -> &'static str {
     match kind {
-        NodeKind::Container | NodeKind::Scroll => "div",
+        NodeKind::Container | NodeKind::Scroll { .. } => "div",
         NodeKind::Text { .. } => "span",
         NodeKind::Image { .. } | NodeKind::GpuView { .. } => "canvas",
         NodeKind::Button { .. } => "button",
         NodeKind::Checkbox { .. } => "label",
+        NodeKind::TextInput { multiline: true, .. } => "textarea",
         NodeKind::Slider { .. } | NodeKind::TextInput { .. } => "input",
     }
 }

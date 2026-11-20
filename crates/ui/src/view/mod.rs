@@ -41,7 +41,7 @@
 mod plugin;
 
 pub use efeui_core::view::{
-    El, IntoChildren, button, button_with, checkbox, column, container, el, gpu_view, image, reconcile, row, scroll, slider, slot, text,
+    El, IntoChildren, button, button_with, checkbox, column, container, el, gpu_view, image, reconcile, row, scroll, selectable_text, slider, slot, text,
     text_input,
 };
 pub use plugin::{RunCondition, UiView, UiViews, ViewCx, changed};

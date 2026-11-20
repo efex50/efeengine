@@ -63,6 +63,13 @@ pub enum UiSignalKind {
     Focus(bool),
     /// Pointer entered or left (only nodes that opted in with `.hover_signals()`).
     Hover(bool),
+    /// Scroll: the user scrolled (wheel, scrollbar, touch); `at_end` is whether the view is now at
+    /// the end of the content (within a pixel). Not sent for the backend's own following of
+    /// `follow_end`, nor for content that grew.
+    Scrolled { at_end: bool },
+    /// TextInput with `ellipsize`: whether the value is cut (`true`) or fits (`false`). Sent when
+    /// that changes, including the first layout and resizes.
+    Truncated(bool),
     /// GpuView with `pointer`: the pointer moved over the view, a button changed, or the wheel
     /// turned. `pos` is in logical px relative to the view's top-left corner, `buttons` the
     /// pressed buttons ([`PointerEvent::LEFT`], ...), `wheel` the scroll delta of this event
@@ -142,6 +149,8 @@ pub fn filter_signals(tree: &mut UiTree, raw: Vec<UiSignal>) -> Vec<UiSignal> {
             UiSignalKind::Submit(t) if matches!(node.kind, NodeKind::TextInput { .. }) => UiSignalKind::Submit(t),
             UiSignalKind::Focus(f) => UiSignalKind::Focus(f),
             UiSignalKind::Hover(h) if node.hover_signals => UiSignalKind::Hover(h),
+            k @ UiSignalKind::Scrolled { .. } if matches!(node.kind, NodeKind::Scroll { .. }) => k,
+            k @ UiSignalKind::Truncated(_) if matches!(node.kind, NodeKind::TextInput { ellipsize: true, .. }) => k,
             k @ UiSignalKind::Pointer { .. } if matches!(node.kind, NodeKind::GpuView { pointer: true, .. }) => k,
             _ => continue,
         };

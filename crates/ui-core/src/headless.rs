@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::capture::UiCapture;
 use crate::id::WidgetId;
 use crate::journal::UiChange;
-use crate::signal::UiSignal;
+use crate::node::NodeKind;
+use crate::signal::{UiSignal, UiSignalKind};
 use crate::tree::UiTree;
 
 #[derive(Default)]
@@ -19,6 +20,11 @@ struct State {
     errors: Vec<String>,
     inject: Vec<UiSignal>,
     capture: UiCapture,
+    /// The text input a delivered `Focus(true)` signal named (a real backend's focus), and the
+    /// ids that are text inputs; together they make `capture().keyboard`, so tests see focus
+    /// follow signals and `UiTree::blur`.
+    focus: Option<WidgetId>,
+    text_inputs: HashSet<WidgetId>,
     size: (f32, f32),
     scale: f32,
 }
@@ -67,7 +73,13 @@ impl HeadlessHandle {
         s.errors.clear();
     }
 
-    /// What `capture()` reports from now on.
+    /// The text input the headless backend counts as focused (from `Focus(true)` signals, cleared
+    /// by `Focus(false)`, `UiTree::blur` and removal).
+    pub fn focused(&self) -> Option<WidgetId> {
+        self.lock().focus
+    }
+
+    /// What `capture()` reports from now on (ORed with the keyboard focus the model tracks).
     pub fn set_capture(&self, capture: UiCapture) {
         self.lock().capture = capture;
     }
@@ -114,6 +126,7 @@ impl HeadlessModel {
         for c in changes {
             match *c {
                 UiChange::Created(id) => {
+                    self.note_kind(tree, id);
                     if !self.known.insert(id) {
                         errors.push(format!("Created({id:?}) twice"));
                     }
@@ -129,6 +142,13 @@ impl HeadlessModel {
                     }
                 }
                 UiChange::Removed(id) => {
+                    {
+                        let mut s = self.handle.lock();
+                        s.text_inputs.remove(&id);
+                        if s.focus == Some(id) {
+                            s.focus = None;
+                        }
+                    }
                     if !self.known.remove(&id) {
                         errors.push(format!("Removed({id:?}) of an unknown id"));
                     }
@@ -144,7 +164,10 @@ impl HeadlessModel {
                         errors.push(format!("Moved({id:?}): index {index} is not the node's position in {parent:?}"));
                     }
                 }
-                UiChange::Kind(id) => self.check_live(tree, id, "Kind", &mut errors),
+                UiChange::Kind(id) => {
+                    self.check_live(tree, id, "Kind", &mut errors);
+                    self.note_kind(tree, id);
+                }
                 UiChange::Style(id) => self.check_live(tree, id, "Style", &mut errors),
                 UiChange::Classes(id) => self.check_live(tree, id, "Classes", &mut errors),
                 UiChange::Visible(id) => self.check_live(tree, id, "Visible", &mut errors),
@@ -152,6 +175,16 @@ impl HeadlessModel {
                 UiChange::HoverSignals(id) => self.check_live(tree, id, "HoverSignals", &mut errors),
                 UiChange::Layer(id) => self.check_live(tree, id, "Layer", &mut errors),
                 UiChange::Theme => {}
+                UiChange::Blur(window) => {
+                    let mut s = self.handle.lock();
+                    if let Some(f) = s.focus
+                        && window.is_none_or(|w| tree.window_of(f) == Some(w))
+                    {
+                        s.focus = None;
+                        // What a real backend does: report the lost focus.
+                        s.inject.push(UiSignal::new(tree, f, crate::signal::UiSignalKind::Focus(false)));
+                    }
+                }
                 UiChange::Font(id) => {
                     if tree.font(id).is_none() {
                         errors.push(format!("Font({id:?}) is not loaded"));
@@ -167,11 +200,21 @@ impl HeadlessModel {
 
     /// Moves the injected signals into `out`.
     pub fn drain_signals(&mut self, out: &mut Vec<UiSignal>) {
-        out.append(&mut self.handle.lock().inject);
+        let mut s = self.handle.lock();
+        let signals = std::mem::take(&mut s.inject);
+        for sig in &signals {
+            match sig.kind {
+                UiSignalKind::Focus(true) if s.text_inputs.contains(&sig.widget) => s.focus = Some(sig.widget),
+                UiSignalKind::Focus(false) if s.focus == Some(sig.widget) => s.focus = None,
+                _ => {}
+            }
+        }
+        out.extend(signals);
     }
 
     pub fn capture(&self) -> UiCapture {
-        self.handle.lock().capture
+        let s = self.handle.lock();
+        UiCapture { pointer: s.capture.pointer, keyboard: s.capture.keyboard || s.focus.is_some() }
     }
 
     pub fn resize(&mut self, logical: (f32, f32), scale: f32) {
@@ -182,6 +225,16 @@ impl HeadlessModel {
 }
 
 impl HeadlessModel {
+    fn note_kind(&self, tree: &UiTree, id: WidgetId) {
+        let is_input = matches!(tree.kind(id), Some(NodeKind::TextInput { .. }));
+        let mut s = self.handle.lock();
+        if is_input {
+            s.text_inputs.insert(id);
+        } else {
+            s.text_inputs.remove(&id);
+        }
+    }
+
     fn check_live(&self, tree: &UiTree, id: WidgetId, what: &str, errors: &mut Vec<String>) {
         if !self.known.contains(&id) {
             errors.push(format!("{what}({id:?}) of an unknown id"));

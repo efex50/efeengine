@@ -672,6 +672,7 @@ impl WebWindow{
                 host.append_child(&wrapper).map_err(|e| err(format!("{e:?}")))?;
                 Ok((canvas, Some(wrapper)))
             }
+            WebTarget::Popup => Err(err("Not Supported: popup windows (TODO, docs/WEB_POPUP_PLAN.md)".into())),
             WebTarget::Body => {
                 let body = document.body().ok_or_else(|| err("no <body>".into()))?;
                 let wrapper = document.create_element("div").map_err(|e| err(format!("{e:?}")))?

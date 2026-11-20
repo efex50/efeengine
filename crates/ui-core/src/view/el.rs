@@ -19,12 +19,14 @@ pub struct Handlers<Msg> {
     pub input: Option<Map<String, Msg>>,
     pub submit: Option<Map<String, Msg>>,
     pub focus: Option<Map<bool, Msg>>,
+    pub scroll: Option<Map<bool, Msg>>,
+    pub truncated: Option<Map<bool, Msg>>,
     pub pointer: Option<Map<PointerEvent, Msg>>,
 }
 
 impl<Msg> Default for Handlers<Msg> {
     fn default() -> Self {
-        Self { click: None, change: None, toggle: None, input: None, submit: None, focus: None, pointer: None }
+        Self { click: None, change: None, toggle: None, input: None, submit: None, focus: None, scroll: None, truncated: None, pointer: None }
     }
 }
 
@@ -36,6 +38,8 @@ impl<Msg: Clone> Handlers<Msg> {
             && self.input.is_none()
             && self.submit.is_none()
             && self.focus.is_none()
+            && self.scroll.is_none()
+            && self.truncated.is_none()
             && self.pointer.is_none()
     }
 
@@ -48,6 +52,8 @@ impl<Msg: Clone> Handlers<Msg> {
             UiSignalKind::Changed(UiValue::Text(t)) => self.input.as_ref().map(|f| f(t.clone())),
             UiSignalKind::Submit(t) => self.submit.as_ref().map(|f| f(t.clone())),
             UiSignalKind::Focus(b) => self.focus.as_ref().map(|f| f(*b)),
+            UiSignalKind::Scrolled { at_end } => self.scroll.as_ref().map(|f| f(*at_end)),
+            UiSignalKind::Truncated(t) => self.truncated.as_ref().map(|f| f(*t)),
             UiSignalKind::Hover(_) => None,
             UiSignalKind::Pointer { pos, buttons, wheel } => {
                 self.pointer.as_ref().map(|f| f(PointerEvent { pos: *pos, buttons: *buttons, wheel: *wheel }))
@@ -75,6 +81,8 @@ impl<Msg: Clone> Handlers<Msg> {
             input: wrap(self.input, f),
             submit: wrap(self.submit, f),
             focus: wrap(self.focus, f),
+            scroll: wrap(self.scroll, f),
+            truncated: wrap(self.truncated, f),
             pointer: wrap(self.pointer, f),
         }
     }
@@ -213,6 +221,38 @@ impl<Msg> El<Msg> {
         self
     }
 
+    /// Selectable and copyable, not editable (see [`NodeKind::TextInput`]).
+    pub fn read_only(mut self, on: bool) -> Self {
+        if let NodeKind::TextInput { read_only, .. } = &mut self.kind {
+            *read_only = on;
+        }
+        self
+    }
+
+    /// Wrapped over several lines (for a read-only input, see [`NodeKind::TextInput`]).
+    pub fn multiline(mut self, on: bool) -> Self {
+        if let NodeKind::TextInput { multiline, .. } = &mut self.kind {
+            *multiline = on;
+        }
+        self
+    }
+
+    /// Cut with `...` when it does not fit (see [`NodeKind::TextInput`]).
+    pub fn ellipsize(mut self, on: bool) -> Self {
+        if let NodeKind::TextInput { ellipsize, .. } = &mut self.kind {
+            *ellipsize = on;
+        }
+        self
+    }
+
+    /// A `scroll()` that keeps its end in view while the content grows (see [`NodeKind::Scroll`]).
+    pub fn follow_end(mut self, on: bool) -> Self {
+        if let NodeKind::Scroll { follow_end } = &mut self.kind {
+            *follow_end = on;
+        }
+        self
+    }
+
     pub fn password(mut self, on: bool) -> Self {
         if let NodeKind::TextInput { password, .. } = &mut self.kind {
             *password = on;
@@ -269,6 +309,18 @@ impl<Msg: Clone + Send + Sync + 'static> El<Msg> {
     /// Text input: Enter pressed.
     pub fn on_submit(mut self, f: impl Fn(String) -> Msg + Send + Sync + 'static) -> Self {
         self.handlers.submit = Some(Arc::new(f));
+        self
+    }
+
+    /// The user scrolled a `scroll()`: `true` when it now shows the end, `false` when not.
+    pub fn on_scroll(mut self, f: impl Fn(bool) -> Msg + Send + Sync + 'static) -> Self {
+        self.handlers.scroll = Some(Arc::new(f));
+        self
+    }
+
+    /// A one-line `ellipsize` text became cut (`true`) or fits (`false`).
+    pub fn on_truncated(mut self, f: impl Fn(bool) -> Msg + Send + Sync + 'static) -> Self {
+        self.handlers.truncated = Some(Arc::new(f));
         self
     }
 
@@ -341,6 +393,12 @@ pub fn text_input<Msg>(value: impl Into<String>) -> El<Msg> {
     El::new(NodeKind::text_input(value))
 }
 
+/// Text the user can select and copy but not edit: a read-only [`text_input`]. `multiline`
+/// shows the whole value wrapped over several lines (`\n` breaks lines), else one line.
+pub fn selectable_text<Msg>(value: impl Into<String>, multiline: bool) -> El<Msg> {
+    El::new(NodeKind::selectable_text(value, multiline))
+}
+
 pub fn image<Msg>(texture: ImageId, fit: ImageFit) -> El<Msg> {
     El::new(NodeKind::Image { texture, fit })
 }
@@ -366,7 +424,7 @@ pub fn column<Msg>() -> El<Msg> {
 
 /// Clips its children and scrolls.
 pub fn scroll<Msg>() -> El<Msg> {
-    El::new(NodeKind::Scroll)
+    El::new(NodeKind::Scroll { follow_end: false })
 }
 
 /// An empty container that the reconciler never looks inside: its children are managed with the

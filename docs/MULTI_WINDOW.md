@@ -1,5 +1,7 @@
 # Multiple windows (as built)
 
+> **Web: Not Supported (TODO).** `create_window` fails on wasm with "Not Supported". The web sections below describe the previous, canvas-based implementation and stay as reference until it is re-enabled (see `docs/WEB_POPUP_PLAN.md`).
+
 `ROADMAP.md` "Later: multiple windows". One engine, one world, one wgpu device, any number of
 windows: extra SDL windows natively, a canvas mounted in any page element on the web. Cameras
 choose the window they draw to, UI layers choose the window they are shown in, input events say

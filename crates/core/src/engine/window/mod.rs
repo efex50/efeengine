@@ -76,6 +76,9 @@ pub enum WebTarget {
     Element(String),
     /// An existing `<canvas>` matching this CSS selector.
     Canvas(String),
+    /// A separate browser popup (`window.open`). TODO: not supported on the web yet; every
+    /// `create_window` fails there with "Not Supported". See `docs/WEB_POPUP_PLAN.md`.
+    Popup,
 }
 
 /// Describes a secondary window for `Engine::create_window` / `Commands::create_window`.
@@ -115,6 +118,11 @@ impl WindowDesc {
     /// Web: use the existing `<canvas>` matching `selector`.
     pub fn web_canvas(mut self, selector: impl Into<String>) -> Self {
         self.web = WebTarget::Canvas(selector.into());
+        self
+    }
+    /// Web: a separate browser popup with its own canvas (WebGPU only, see [`WebTarget::Popup`]).
+    pub fn web_popup(mut self) -> Self {
+        self.web = WebTarget::Popup;
         self
     }
 }

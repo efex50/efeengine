@@ -116,6 +116,8 @@ pub struct Engine{
     overlays: Vec<Box<dyn RenderOverlay>>,
     /// Draw2D overlays (work in both rendering modes), drawn after `overlays`.
     overlays_2d: rendering::Overlays2D,
+    /// World-space Draw2D overlays, drawn after the renderers and before `overlays`.
+    world_overlays_2d: rendering::Overlays2D,
     /// One-shot hooks run once graphics came up (see `on_graphics_ready`).
     graphics_hooks: Vec<GraphicsHook>,
     /// Run for every raw input event before `InputState::apply`, in add order.
@@ -267,6 +269,7 @@ impl Engine {
             renderer: Renderers::new(),
             overlays: Vec::new(),
             overlays_2d: Default::default(),
+            world_overlays_2d: Default::default(),
             graphics_hooks: Vec::new(),
             input_filters: Vec::new(),
             gpu: None,
@@ -1042,6 +1045,12 @@ impl Engine {
         self
     }
 
+    /// Add a Draw2DOverlay for world-space layers: drawn after the renderers and BEFORE the RenderOverlays (iced UI) and the other Draw2DOverlays, so menus and HUD stay on top of it. Same modes and rules as add_draw2d_overlay. Add during setup.
+    pub fn add_world_overlay(&mut self, overlay: impl rendering::Draw2DOverlay) -> &mut Self {
+        self.world_overlays_2d.add(Box::new(overlay));
+        self
+    }
+
     /// Add an [`InputFilter`]: asked about every raw input event (also in headless mode and for
     /// injected events) before `InputState::apply`, in add order; any `Captured` marks the
     /// event (`InputEvent::captured`).
@@ -1360,6 +1369,13 @@ impl Engine {
         if self.sdl.is_some() {
             return Err(EngineError::Window("SDL mode (SDL_Renderer) draws the main window only; use a wgpu GPU mode for more windows".into()));
         }
+        // TODO(web windows): secondary windows are Not Supported on the web for now. Re-enable with
+        // docs/MULTI_WINDOW.md "Web" and docs/WEB_POPUP_PLAN.md.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = &desc;
+            return Err(EngineError::Window("Not Supported: secondary windows are not available on the web yet (TODO)".into()));
+        }
         self.windows.create_window(id, &desc)?;
         self.state.windows.insert(id, desc.size);
         self.windows.inject(InputEvent::with_time(InputEventKind::Window(WindowEvent::Created), 0, id));
@@ -1433,13 +1449,13 @@ impl Engine {
             if w > 0 && h > 0 && self.state.resources.contains::<RenderFrame>() {
                 let frame = self.state.resources.get::<RenderFrame>().expect("RenderFrame resource");
                 let scale = self.windows.scale_factor(WindowId::MAIN) as f32;
-                sdl.render(&frame, self.renderer.has_custom(), self.renderer.has_installed_2d(), !self.overlays.is_empty(), &mut self.overlays_2d, scale);
+                sdl.render(&frame, self.renderer.has_custom(), self.renderer.has_installed_2d(), !self.overlays.is_empty(), &mut self.world_overlays_2d, &mut self.overlays_2d, scale);
             } else if let (Some(f), Some(t)) = (self.state.resources.get_mut::<RenderFrame>().map(|f| std::mem::take(&mut f.textures)), self.state.resources.get_mut::<Textures>()) {
                 t.requeue(f);
             }
             return;
         }
-        let Engine { renderer, overlays, overlays_2d, gpu, state, logger, .. } = self;
+        let Engine { renderer, overlays, overlays_2d, world_overlays_2d, gpu, state, logger, .. } = self;
         let Some(gpu) = gpu else { return };
         if !state.resources.contains::<RenderFrame>() {
             return;
@@ -1475,6 +1491,11 @@ impl Engine {
                     let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
                     renderer.render(&gpu.gpu(), &view, &frame, &frame.textures, &mut warnings);
                 }
+                {
+                    let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
+                    world_overlays_2d.sync_textures(&gpu.gpu(), &frame.textures);
+                }
+                world_overlays_2d.render_wgpu(&gpu.gpu(), &view);
                 for o in overlays.iter_mut() {
                     o.render(&gpu.gpu(), &view);
                 }
@@ -1509,9 +1530,11 @@ impl Engine {
                     let frame = state.resources.get::<RenderFrame>().expect("RenderFrame resource");
                     let tex = if delivered { &empty } else { &frame.textures };
                     renderer.render(&g, &sf.view, &frame, tex, &mut warnings);
+                    world_overlays_2d.sync_textures(&g, tex);
                     overlays_2d.sync_textures(&g, tex);
                 }
                 delivered = true;
+                world_overlays_2d.render_wgpu(&g, &sf.view);
                 for o in overlays.iter_mut() {
                     o.render(&g, &sf.view);
                 }

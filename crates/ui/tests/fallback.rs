@@ -632,3 +632,303 @@ fn glyphs_are_cached_in_the_atlas() {
     h.frame();
     assert_eq!(h.b.cached_glyphs(), before, "drawing the same text again rasterises nothing new");
 }
+
+// ----- read-only text, multi-line text, blur ----------------------------------------------------
+
+fn read_only_menu(t: &mut UiTree) {
+    let root = t.layer("l", Layer::top_left(0));
+    let col = t.column(root).id();
+    t.text_input(col, "log line to copy").key("ro").read_only(true).style(Style::new().width(Size::Px(240.0)));
+    t.text_input(col, "plain").key("rw");
+    t.button(col, "Other").key("other");
+}
+
+#[test]
+fn a_read_only_input_selects_and_copies_but_never_edits() {
+    let mut h = H::new((400.0, 300.0), read_only_menu);
+    h.frame();
+    h.click("ro");
+    assert!(h.b.capture().keyboard, "a read-only input still takes the focus");
+    h.key(Key::character("a"), Modifiers::LCTRL);
+    efeengine_core::clipboard::set_clipboard_text("old");
+    h.key(Key::character("c"), Modifiers::LCTRL);
+    assert_eq!(efeengine_core::clipboard::clipboard_text().as_deref(), Some("log line to copy"));
+    // typing, Backspace, cut, paste and Enter change nothing and send nothing
+    h.type_text("x");
+    h.named(NamedKey::Backspace);
+    h.key(Key::character("x"), Modifiers::LCTRL);
+    efeengine_core::clipboard::set_clipboard_text("pasted");
+    h.key(Key::character("v"), Modifiers::LCTRL);
+    h.named(NamedKey::Enter);
+    assert_eq!(h.tree.value(h.id("ro")), Some(UiValue::Text("log line to copy".into())));
+    assert!(h.kinds("ro").iter().all(|k| matches!(k, UiSignalKind::Focus(_))), "{:?}", h.kinds("ro"));
+    // cut did copy the selection, like a read-only field in a browser
+    // (the clipboard holds the paste text now, so only the signals above matter)
+    // the editable neighbour still works
+    h.click("rw");
+    h.type_text("!");
+    assert_eq!(h.tree.value(h.id("rw")), Some(UiValue::Text("plain!".into())));
+}
+
+#[test]
+fn a_read_only_input_selects_with_the_mouse() {
+    let mut h = H::new((400.0, 300.0), read_only_menu);
+    h.frame();
+    let (x, y, _, hh) = h.rect("ro");
+    // drag from the left edge to the middle, then copy
+    h.button(x + 3.0, y + hh * 0.5, ElementState::Pressed);
+    h.mouse(x + 60.0, y + hh * 0.5);
+    h.button(x + 60.0, y + hh * 0.5, ElementState::Released);
+    efeengine_core::clipboard::set_clipboard_text("old");
+    h.key(Key::character("c"), Modifiers::LCTRL);
+    let copied = efeengine_core::clipboard::clipboard_text().unwrap();
+    assert!(!copied.is_empty() && "log line to copy".starts_with(&copied) && copied.len() < 16, "copied {copied:?}");
+}
+
+fn wrapped_menu(t: &mut UiTree) {
+    let root = t.layer("l", Layer::top_left(0));
+    let col = t.column(root).id();
+    t.text_input(col, "short").key("one").read_only(true).style(Style::new().width(Size::Px(160.0)));
+    t.text_input(col, "first line\nsecond line is long enough to wrap at this width\nthird")
+        .key("many")
+        .read_only(true)
+        .multiline(true)
+        .style(Style::new().width(Size::Px(160.0)));
+    t.button(col, "Other").key("other");
+}
+
+#[test]
+fn a_multiline_read_only_input_wraps_grows_and_copies_all_lines() {
+    let mut h = H::new((400.0, 400.0), wrapped_menu);
+    h.frame();
+    let (_, _, w1, h1) = h.rect("one");
+    let (x, y, w, hm) = h.rect("many");
+    assert_eq!(w, w1, "same width");
+    assert!(hm > h1 * 3.5, "four or more lines: {hm} vs one line {h1}");
+    // the button below sits under the grown input
+    let (_, by, _, _) = h.rect("other");
+    assert!(by >= y + hm - 0.5);
+    // select all and copy: the exact text with its line breaks
+    h.click("many");
+    h.key(Key::character("a"), Modifiers::LCTRL);
+    efeengine_core::clipboard::set_clipboard_text("old");
+    h.key(Key::character("c"), Modifiers::LCTRL);
+    assert_eq!(efeengine_core::clipboard::clipboard_text().as_deref(), Some("first line\nsecond line is long enough to wrap at this width\nthird"));
+    // a selection is drawn: more quads than without it
+    let with_sel = h.frame().vertices().len();
+    h.click("other");
+    assert!(h.frame().vertices().len() < with_sel, "the selection highlight is gone after focus moved");
+    // a drag from the first line into the second selects across the break
+    h.button(x + 2.0, y + 4.0, ElementState::Pressed);
+    h.mouse(x + 40.0, y + hm * 0.3);
+    h.button(x + 40.0, y + hm * 0.3, ElementState::Released);
+    efeengine_core::clipboard::set_clipboard_text("old");
+    h.key(Key::character("c"), Modifiers::LCTRL);
+    let copied = efeengine_core::clipboard::clipboard_text().unwrap();
+    assert!(copied.starts_with("first line\n") && copied.len() > 11, "copied {copied:?}");
+    // typing and Enter do nothing, no signals but focus
+    h.type_text("x");
+    h.named(NamedKey::Enter);
+    assert!(h.kinds("many").iter().all(|k| matches!(k, UiSignalKind::Focus(_))), "{:?}", h.kinds("many"));
+}
+
+#[test]
+fn tree_blur_drops_the_text_focus_and_the_keyboard_capture() {
+    let mut h = H::new((400.0, 300.0), read_only_menu);
+    h.click("rw");
+    assert!(h.b.capture().keyboard);
+    h.tree.blur();
+    h.sync();
+    assert!(!h.b.capture().keyboard, "keys go back to the game at once");
+    h.pump();
+    assert_eq!(h.kinds("rw").last(), Some(&UiSignalKind::Focus(false)));
+    // typing now goes nowhere
+    assert!(!h.type_text("x"));
+    assert_eq!(h.tree.value(h.id("rw")), Some(UiValue::Text("plain".into())));
+    // blurring when nothing has focus is a no-op
+    let n = h.log.len();
+    h.tree.blur();
+    h.sync();
+    h.pump();
+    assert_eq!(h.log.len(), n);
+}
+
+#[test]
+fn blur_names_a_window_and_other_windows_keep_their_focus() {
+    let mut h = H::new((400.0, 300.0), read_only_menu);
+    h.click("rw");
+    // this backend draws window 0: a blur of window 7 leaves it alone, of 0 drops the focus
+    h.tree.blur_window(7);
+    h.sync();
+    assert!(h.b.capture().keyboard);
+    h.tree.blur_window(0);
+    h.sync();
+    assert!(!h.b.capture().keyboard);
+}
+
+#[test]
+fn escape_and_a_click_outside_release_the_focus() {
+    let mut h = H::new((400.0, 300.0), read_only_menu);
+    h.click("rw");
+    h.named(NamedKey::Escape);
+    assert!(!h.b.capture().keyboard);
+    h.click("ro");
+    assert!(h.b.capture().keyboard);
+    // a click on a button elsewhere
+    h.click("other");
+    assert!(!h.b.capture().keyboard);
+    // and one on empty space
+    h.click("rw");
+    h.click_at(390.0, 290.0);
+    assert!(!h.b.capture().keyboard);
+}
+
+#[test]
+fn backspace_works_right_after_a_click() {
+    // A click used to leave an empty selection that swallowed the first Backspace.
+    let mut h = H::new((400.0, 300.0), |t| {
+        let root = t.layer("l", Layer::top_left(0));
+        t.text_input(root, "60").key("t").style(Style::new().width(Size::Px(72.0)));
+    });
+    h.frame();
+    h.click("t");
+    h.named(NamedKey::Backspace);
+    assert_eq!(h.tree.value(h.id("t")), Some(UiValue::Text("6".into())));
+}
+
+// ----- follow_end scrolling and ellipsized text -------------------------------------------------
+
+fn scroller(t: &mut UiTree) {
+    let root = t.layer("l", Layer::top_left(0));
+    let sc = t.scroll(root).key("sc").follow_end(true).style(Style::new().width(Size::Px(200.0)).height(Size::Px(100.0))).id();
+    let col = t.column(sc).key("col").id();
+    for i in 0..20 {
+        t.text(col, format!("row {i}")).key(&format!("r{i}"));
+    }
+}
+
+fn add_row(h: &mut H, i: usize) {
+    let col = h.id("col");
+    h.tree.text(col, format!("row {i}")).key(&format!("r{i}"));
+    h.sync();
+    h.frame();
+}
+
+fn in_view(h: &mut H, key: &str) -> bool {
+    let (_, sy, _, sh) = h.rect("sc");
+    let (_, y, _, hh) = h.rect(key);
+    y >= sy - 0.5 && y + hh <= sy + sh + 0.5
+}
+
+fn wheel(h: &mut H, dy: f32) {
+    let (x, y, w, hh) = h.rect("sc");
+    h.mouse(x + w * 0.5, y + hh * 0.5);
+    h.event(InputEventKind::MouseWheel { delta: (0.0, dy), unit: WheelUnit::Line });
+    h.frame();
+}
+
+#[test]
+fn a_follow_end_scroll_sticks_to_the_end_as_content_grows() {
+    let mut h = H::new((400.0, 300.0), scroller);
+    h.frame();
+    assert!(in_view(&mut h, "r19"), "starts at the end");
+    assert!(!in_view(&mut h, "r0"));
+    add_row(&mut h, 20);
+    assert!(in_view(&mut h, "r20"), "the new last row is in view");
+    // its own following is not a user scroll: no signal
+    assert!(h.kinds("sc").is_empty(), "{:?}", h.kinds("sc"));
+}
+
+#[test]
+fn scrolling_away_unpins_reports_and_keeps_the_view_still() {
+    let mut h = H::new((400.0, 300.0), scroller);
+    h.frame();
+    wheel(&mut h, 3.0);
+    assert_eq!(h.kinds("sc").last(), Some(&UiSignalKind::Scrolled { at_end: false }));
+    let before = h.rect("r10");
+    add_row(&mut h, 20);
+    add_row(&mut h, 21);
+    assert_eq!(h.rect("r10"), before, "content added at the end does not move what is read");
+    // a sync (any journal entry) does not pin it again
+    h.tree.set_visible(h.id("r0"), true);
+    h.tree.set_text(h.id("r1"), "row 1!");
+    h.sync();
+    h.frame();
+    assert_eq!(h.rect("r10"), before);
+    // back to the very end: reported, and it follows again
+    wheel(&mut h, -500.0);
+    assert_eq!(h.kinds("sc").last(), Some(&UiSignalKind::Scrolled { at_end: true }));
+    add_row(&mut h, 22);
+    assert!(in_view(&mut h, "r22"));
+}
+
+#[test]
+fn setting_follow_end_again_snaps_to_the_end() {
+    let mut h = H::new((400.0, 300.0), scroller);
+    h.frame();
+    wheel(&mut h, 4.0);
+    assert!(!in_view(&mut h, "r19"));
+    let sc = h.id("sc");
+    h.tree.node(sc).unwrap().follow_end(false);
+    h.sync();
+    h.tree.node(sc).unwrap().follow_end(true);
+    h.sync();
+    h.frame();
+    assert!(in_view(&mut h, "r19"));
+    // without follow_end the position never moves when content is added
+    let mut h = H::new((400.0, 300.0), |t| {
+        scroller(t);
+        let sc = t.find("sc").unwrap();
+        t.node(sc).unwrap().follow_end(false);
+    });
+    h.frame();
+    assert!(in_view(&mut h, "r0"));
+    add_row(&mut h, 20);
+    assert!(in_view(&mut h, "r0"));
+}
+
+fn ellipsized(t: &mut UiTree) {
+    let root = t.layer("l", Layer::top_left(0));
+    t.text_input(root, "a fairly long line of text that will not fit in a narrow field")
+        .key("e")
+        .read_only(true)
+        .ellipsize(true)
+        .style(Style::new().width(Size::Px(160.0)));
+    t.text_input(root, "short").key("s").read_only(true).ellipsize(true).style(Style::new().width(Size::Px(160.0)));
+}
+
+#[test]
+fn ellipsized_text_is_cut_to_its_width_and_reports_truncation() {
+    let mut h = H::new((400.0, 300.0), ellipsized);
+    let narrow = h.frame().vertices().len();
+    h.pump();
+    assert_eq!(h.kinds("e"), vec![UiSignalKind::Truncated(true)]);
+    assert!(h.kinds("s").is_empty(), "a text that fits reports nothing");
+    // widen it: it fits, the report says so, and more glyphs are drawn
+    let e = h.id("e");
+    h.tree.set_style(e, Style::new().width(Size::Px(600.0)));
+    h.sync();
+    let wide = h.frame().vertices().len();
+    h.pump();
+    assert_eq!(h.kinds("e").last(), Some(&UiSignalKind::Truncated(false)));
+    assert!(wide > narrow, "the whole text is drawn once it fits ({wide} vs {narrow})");
+    // and narrow again
+    h.tree.set_style(e, Style::new().width(Size::Px(100.0)));
+    h.sync();
+    h.frame();
+    h.pump();
+    assert_eq!(h.kinds("e").last(), Some(&UiSignalKind::Truncated(true)));
+}
+
+#[test]
+fn a_focused_ellipsized_text_shows_everything_and_copies_it_all() {
+    let mut h = H::new((400.0, 300.0), ellipsized);
+    h.frame();
+    let cut = h.frame().vertices().len();
+    h.click("e");
+    h.key(Key::character("a"), Modifiers::LCTRL);
+    efeengine_core::clipboard::set_clipboard_text("old");
+    h.key(Key::character("c"), Modifiers::LCTRL);
+    assert_eq!(efeengine_core::clipboard::clipboard_text().as_deref(), Some("a fairly long line of text that will not fit in a narrow field"));
+    assert!(h.frame().vertices().len() >= cut);
+}

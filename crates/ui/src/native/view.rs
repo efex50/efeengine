@@ -18,7 +18,7 @@ use iced_core::alignment::{Horizontal, Vertical};
 use iced_core::font::Weight;
 use iced_core::Widget as _;
 use iced_core::{Background, Border, Color as IColor, Font, Length, Padding, Theme};
-use iced_widget::{button, checkbox, container, mouse_area, opaque, scrollable, slider, space, stack, text, text_input};
+use iced_widget::{button, checkbox, container, mouse_area, opaque, scrollable, slider, space, stack, text, text_editor, text_input};
 use iced_wgpu::Renderer;
 
 use crate::backend::ImageIdExt;
@@ -40,6 +40,11 @@ pub enum Msg {
     Slide(WidgetId, f32),
     Input(WidgetId, String),
     Submit(WidgetId),
+    /// The user scrolled a scroll node; `true` when it is at its end.
+    Scrolled(WidgetId, bool),
+    /// An action of a read-only wrapped text (`TextInput { multiline, read_only }`): selecting and
+    /// scrolling only; edits are dropped by the backend.
+    Edit(WidgetId, text_editor::Action),
     Enter(WidgetId),
     Exit(WidgetId),
     Pointer(WidgetId, crate::signal::PointerEvent),
@@ -185,7 +190,7 @@ fn padding(e: Option<Edges>) -> Padding {
     Padding { top: e.top, right: e.right, bottom: e.bottom, left: e.left }
 }
 
-fn font(st: &Style, a: &Assets) -> Font {
+pub(super) fn font(st: &Style, a: &Assets) -> Font {
     let family = st.font.and_then(|f| a.fonts.get(&f).copied()).unwrap_or(DEFAULT_FAMILY);
     Font {
         family: iced_core::font::Family::Name(family),
@@ -194,7 +199,7 @@ fn font(st: &Style, a: &Assets) -> Font {
     }
 }
 
-fn font_size(st: &Style) -> f32 {
+pub(super) fn font_size(st: &Style) -> f32 {
     st.font_size.unwrap_or(16.0)
 }
 
@@ -228,7 +233,7 @@ fn node_el<'a>(n: &'a VNode, parent: Parent, fill: bool, a: &'a Assets) -> Eleme
     let st = n.style();
     let el = match &n.kind {
         NodeKind::Container => flex_el(n, parent, fill, false, a),
-        NodeKind::Scroll => flex_el(n, parent, fill, true, a),
+        NodeKind::Scroll { .. } => flex_el(n, parent, fill, true, a),
         NodeKind::Text { text: t } => {
             let (w, h) = dims(st, parent);
             text(t.as_str())
@@ -335,19 +340,66 @@ fn node_el<'a>(n: &'a VNode, parent: Parent, fill: bool, a: &'a Assets) -> Eleme
             })
             ._boxed()
         }
-        NodeKind::TextInput { value, placeholder, password, .. } => {
+        NodeKind::TextInput { multiline: true, read_only: true, .. } if a.editors.contains_key(&n.id) => {
             let (w, _) = dims(st, parent);
             let id = n.id;
             let styles = n.styles;
-            let mut t = text_input(placeholder.as_str(), value.as_str())
+            let content = &a.editors[&id].1;
+            let mut t = text_editor(content)
+                .id(iced_id(id))
+                .size(font_size(st))
+                .padding(padding(st.padding))
+                .wrapping(iced_core::text::Wrapping::Word)
+                .font(font(st, a));
+            // The editor fills its row by default; only a fixed width is set.
+            if let Length::Fixed(px) = w {
+                t = t.width(px);
+            }
+            if n.enabled {
+                t = t.on_action(move |act| Msg::Edit(id, act));
+            }
+            t.style(move |_t, status| {
+                use text_editor::Status::*;
+                let s = &styles[match status {
+                    Active => NORMAL,
+                    Hovered => HOVERED,
+                    Focused { .. } => FOCUSED,
+                    Disabled => DISABLED,
+                }];
+                let tc = text_color(s);
+                text_editor::Style {
+                    background: Background::Color(s.background.map_or(IColor::TRANSPARENT, |c| color(c, s.opacity))),
+                    border: border(s),
+                    placeholder: IColor { a: tc.a * 0.5, ..tc },
+                    value: tc,
+                    selection: IColor::from_rgba(0.36, 0.62, 1.0, 0.4),
+                }
+            })
+            ._boxed()
+        }
+        NodeKind::TextInput { value, placeholder, password, read_only, .. } => {
+            let (w, _) = dims(st, parent);
+            let id = n.id;
+            let styles = n.styles;
+            // An unfocused ellipsized text shows its cut form (see `IcedBackend::update_ellipsis`).
+            let shown = match a.ellipsis.get(&id) {
+                Some(e) if a.focus != Some(id) => e.shown.as_deref().unwrap_or(value.as_str()),
+                _ => value.as_str(),
+            };
+            let mut t = text_input(placeholder.as_str(), shown)
                 .id(iced_id(id))
                 .secure(*password)
                 .size(font_size(st))
                 .padding(padding(st.padding))
                 .width(w)
                 .font(font(st, a));
+            // A read-only input keeps its `on_input` so it can take focus and a selection; the
+            // backend drops the edits and the next view puts the value back.
             if n.enabled {
-                t = t.on_input(move |s| Msg::Input(id, s)).on_submit(Msg::Submit(id));
+                t = t.on_input(move |s| Msg::Input(id, s));
+                if !*read_only {
+                    t = t.on_submit(Msg::Submit(id));
+                }
             }
             t.style(move |_t, status| {
                 use text_input::Status::*;
@@ -475,7 +527,32 @@ fn flex_el<'a>(n: &'a VNode, parent: Parent, fill: bool, scroll: bool, a: &'a As
     let in_len = |l: Length| if matches!(l, Length::Fit | Length::Shrink) { Length::Fit } else { Length::Fill };
     let inner = flex_children(n, st, (w, h), (in_len(w), in_len(h)), a);
     let inner: Element<'a> =
-        if scroll { scrollable(inner).width(Length::Fill).height(Length::Fill)._boxed() } else { inner };
+        if scroll {
+            let id = n.id;
+            let follow = matches!(n.kind, NodeKind::Scroll { follow_end: true });
+            scrollable(inner)
+                .id(iced_id(id))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .on_scroll(move |s| {
+                    use scrollable::{Action, Source};
+                    match s.source {
+                        // The user: report it (and the backend stops or resumes following).
+                        Source::Wheel | Source::Touch | Source::Scrollbar | Source::AutoScroll => {
+                            Action::Custom(Msg::Scrolled(id, s.viewport.distance_to_end().y <= 1.0))
+                        }
+                        // The content grew or the view resized: stay at the end when following.
+                        Source::Content | Source::Resize if follow => Action::SnapTo(
+                            iced_core::widget::operation::scrollable::RelativeOffset { x: None, y: Some(1.0) },
+                            iced_core::widget::operation::Animation::Instant,
+                        ),
+                        _ => Action::None,
+                    }
+                })
+                ._boxed()
+        } else {
+            inner
+        };
     let st_copy = *st;
     container(inner)
         .width(w)

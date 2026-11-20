@@ -53,6 +53,11 @@ pub struct Interaction {
     pub focus_visible: bool,
     pub drag: Option<Drag>,
     pub scroll: HashMap<WidgetId, (f32, f32)>,
+    /// Scroll nodes with `follow_end` as of the last sync.
+    pub following: HashSet<WidgetId>,
+    /// Followers that are at the end and stick to it as content grows (a user scroll away from
+    /// the end removes the node until it is scrolled back to the end).
+    pub pinned: HashSet<WidgetId>,
     pub mods: Modifiers,
     buttons: u8,
     /// Physical keys whose press the UI used (their release is used too).
@@ -64,6 +69,8 @@ impl Interaction {
         let alive = |id: &WidgetId| m.find(*id).is_some();
         self.hover_set.retain(&alive);
         self.scroll.retain(|id, _| alive(id));
+        self.following.retain(&alive);
+        self.pinned.retain(&alive);
         if self.pressed.is_some_and(|i| !alive(&i)) {
             self.pressed = None;
         }
@@ -81,11 +88,18 @@ impl Interaction {
         }
     }
 
+    /// Follows the end of every pinned scroll node (content may have grown or the node resized).
     pub fn clamp_scroll(&mut self, m: &Model) {
+        for id in &self.pinned {
+            self.scroll.entry(*id).or_default();
+        }
         for (id, off) in self.scroll.iter_mut() {
             if let Some(n) = m.find(*id) {
                 off.0 = off.0.clamp(0.0, (n.content.0 - n.rect.w).max(0.0));
                 off.1 = off.1.clamp(0.0, (n.content.1 - n.rect.h).max(0.0));
+                if self.pinned.contains(id) {
+                    off.1 = (n.content.1 - n.rect.h).max(0.0);
+                }
             }
         }
     }
@@ -105,7 +119,7 @@ fn interactive(n: &VNode) -> bool {
 fn hit_node(n: &VNode, origin: (f32, f32), clip: Option<LRect>, scroll: &HashMap<WidgetId, (f32, f32)>, p: (f32, f32), path: &mut Vec<WidgetId>) -> bool {
     let r = n.rect.offset(origin.0, origin.1);
     let vis = clip.map_or(r, |c| c.intersect(&r));
-    let is_scroll = matches!(n.kind, NodeKind::Scroll);
+    let is_scroll = matches!(n.kind, NodeKind::Scroll { .. });
     if is_scroll && !vis.contains(p) {
         return false;
     }
@@ -133,7 +147,7 @@ fn abs_rect_in(n: &VNode, origin: (f32, f32), scroll: &HashMap<WidgetId, (f32, f
     if n.id == id {
         return Some(r);
     }
-    let off = if matches!(n.kind, NodeKind::Scroll) { scroll.get(&n.id).copied().unwrap_or((0.0, 0.0)) } else { (0.0, 0.0) };
+    let off = if matches!(n.kind, NodeKind::Scroll { .. }) { scroll.get(&n.id).copied().unwrap_or((0.0, 0.0)) } else { (0.0, 0.0) };
     n.children.iter().find_map(|c| abs_rect_in(c, (r.x - off.0, r.y - off.1), scroll, id))
 }
 
@@ -302,7 +316,7 @@ impl FallbackBackend {
         if captured { Filter::Captured } else { Filter::Pass }
     }
 
-    fn focused_input(&self) -> Option<WidgetId> {
+    pub(super) fn focused_input(&self) -> Option<WidgetId> {
         let id = self.ui.focus?;
         self.model.find(id).filter(|n| n.enabled && matches!(n.kind, NodeKind::TextInput { .. })).map(|n| n.id)
     }
@@ -336,7 +350,7 @@ impl FallbackBackend {
         // Scrollbar thumbs first.
         let path = self.ui.path.clone();
         for sid in path.iter().rev() {
-            let Some(n) = self.model.find(*sid).filter(|n| matches!(n.kind, NodeKind::Scroll)) else { continue };
+            let Some(n) = self.model.find(*sid).filter(|n| matches!(n.kind, NodeKind::Scroll { .. })) else { continue };
             let content_h = n.content.1;
             let Some(r) = self.abs_rect(*sid) else { continue };
             let off = self.ui.scroll.get(sid).copied().unwrap_or((0.0, 0.0));
@@ -398,6 +412,19 @@ impl FallbackBackend {
         }
     }
 
+    /// The user moved a scroll node: stop or resume sticking to its end, and report it.
+    fn user_scrolled(&mut self, id: WidgetId) {
+        let Some(n) = self.model.find(id) else { return };
+        let max = (n.content.1 - n.rect.h).max(0.0);
+        let at_end = max - self.ui.scroll.get(&id).map_or(0.0, |o| o.1) <= 1.0;
+        if !at_end {
+            self.ui.pinned.remove(&id);
+        } else if self.ui.following.contains(&id) {
+            self.ui.pinned.insert(id);
+        }
+        self.push(id, UiSignalKind::Scrolled { at_end });
+    }
+
     fn toggle(&mut self, id: WidgetId) {
         let Some(n) = self.model.find_mut(id).filter(|n| n.enabled) else { return };
         if let NodeKind::Checkbox { checked, .. } = &mut n.kind {
@@ -441,7 +468,11 @@ impl FallbackBackend {
         let travel = (r.h - t.h).max(1.0);
         let frac = ((y - grab - r.y) / travel).clamp(0.0, 1.0);
         let e = self.ui.scroll.entry(id).or_default();
+        let before = e.1;
         e.1 = frac * (content_h - h).max(0.0);
+        if e.1 != before {
+            self.user_scrolled(id);
+        }
         self.dirty = true;
         self.refresh_hover();
     }
@@ -451,11 +482,12 @@ impl FallbackBackend {
             return;
         }
         self.gpu_pointer(d);
-        let Some(sid) = self.ui.path.iter().rev().copied().find(|id| self.model.find(*id).is_some_and(|n| matches!(n.kind, NodeKind::Scroll))) else { return };
+        let Some(sid) = self.ui.path.iter().rev().copied().find(|id| self.model.find(*id).is_some_and(|n| matches!(n.kind, NodeKind::Scroll { .. }))) else { return };
         let Some(n) = self.model.find(sid) else { return };
         let row = n.style().direction == Some(Direction::Row);
         let (max_x, max_y) = ((n.content.0 - n.rect.w).max(0.0), (n.content.1 - n.rect.h).max(0.0));
         let e = self.ui.scroll.entry(sid).or_default();
+        let before = *e;
         if row {
             let dd = if d.0 != 0.0 { d.0 } else { -d.1 };
             e.0 = (e.0 + dd).clamp(0.0, max_x);
@@ -465,6 +497,10 @@ impl FallbackBackend {
             if d.0 != 0.0 {
                 e.0 = (e.0 + d.0).clamp(0.0, max_x);
             }
+        }
+        let moved = *e != before;
+        if moved {
+            self.user_scrolled(sid);
         }
         self.dirty = true;
         self.refresh_hover();
@@ -539,7 +575,7 @@ impl FallbackBackend {
         // Position of the target relative to each scroll ancestor's content origin.
         let mut moves: Vec<(WidgetId, (f32, f32), (f32, f32))> = Vec::new();
         for (i, a) in ancestors.iter().enumerate() {
-            if !matches!(a.kind, NodeKind::Scroll) {
+            if !matches!(a.kind, NodeKind::Scroll { .. }) {
                 continue;
             }
             let (mut rx, mut ry) = (target.rect.x, target.rect.y);
@@ -655,6 +691,14 @@ impl FallbackBackend {
         }
     }
 
+    /// `(read_only, multiline)` of a text input.
+    fn input_flags(&self, id: WidgetId) -> (bool, bool) {
+        match self.model.find(id).map(|n| &n.kind) {
+            Some(NodeKind::TextInput { read_only, multiline, .. }) => (*read_only, *read_only && *multiline),
+            _ => (false, false),
+        }
+    }
+
     fn clear_preedit(&mut self, id: WidgetId) {
         if let Some(s) = self.inputs.get_mut(&id) {
             s.preedit.clear();
@@ -690,6 +734,9 @@ impl FallbackBackend {
 
     fn type_text(&mut self, id: WidgetId, t: &str) {
         let Some((max_len, _)) = self.input_meta(id) else { return };
+        if self.input_flags(id).0 {
+            return;
+        }
         if self.state_for(id).is_none() {
             return;
         }
@@ -705,7 +752,11 @@ impl FallbackBackend {
             return false;
         }
         let (ctrl, shift) = (mods.ctrl() || mods.meta(), mods.shift());
+        let (read_only, multiline) = self.input_flags(id);
         self.clear_preedit(id);
+        if read_only {
+            return self.read_only_key(id, logical, ctrl, multiline);
+        }
         let op = match logical {
             Key::Named(NamedKey::ArrowLeft) => Some((if ctrl { EditOp::WordLeft } else { EditOp::Left }, shift)),
             Key::Named(NamedKey::ArrowRight) => Some((if ctrl { EditOp::WordRight } else { EditOp::Right }, shift)),
@@ -760,9 +811,80 @@ impl FallbackBackend {
         }
     }
 
+    /// Keys in a read-only input: Ctrl+A selects all, Ctrl+C / Ctrl+X copy the selection; every
+    /// edit, Enter (no submit) and, in a wrapped input, the cursor keys do nothing.
+    fn read_only_key(&mut self, id: WidgetId, logical: &Key, ctrl: bool, multiline: bool) -> bool {
+        match logical {
+            Key::Character(c) if ctrl && c == "a" => {
+                let (text, inputs) = (&mut self.text, &mut self.inputs);
+                if let Some(s) = inputs.get_mut(&id) {
+                    s.apply(text, EditOp::SelectAll, false);
+                }
+            }
+            Key::Character(c) if ctrl && (c == "c" || c == "x") => {
+                if let Some(t) = self.inputs.get(&id).and_then(|s| s.selected_text()) {
+                    let _ = efeengine_core::clipboard::set_clipboard_text(&t);
+                }
+            }
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::Home | NamedKey::End) if !multiline => {
+                let shift = self.ui.mods.shift();
+                let op = match logical {
+                    Key::Named(NamedKey::ArrowLeft) => EditOp::Left,
+                    Key::Named(NamedKey::ArrowRight) => EditOp::Right,
+                    Key::Named(NamedKey::Home) => EditOp::Home,
+                    _ => EditOp::End,
+                };
+                let (text, inputs) = (&mut self.text, &mut self.inputs);
+                if let Some(s) = inputs.get_mut(&id) {
+                    s.apply(text, op, shift);
+                }
+            }
+            Key::Named(NamedKey::Tab) => return false,
+            _ => {}
+        }
+        self.blink_epoch = std::time::Instant::now();
+        self.dirty = true;
+        true
+    }
+
+    /// Wrapped read-only text: the caret goes to the glyph under pointer `p` (the same
+    /// press / drag / double click / shift-click rules as `place_caret`).
+    fn place_caret_wrapped(&mut self, id: WidgetId, p: (f32, f32), extend: bool) {
+        let Some(r) = self.abs_rect(id) else { return };
+        let Some(n) = self.model.find(id) else { return };
+        let pad = padding(n.style());
+        let (ox, oy) = (r.x + pad.left, r.y + pad.top);
+        if self.state_for(id).is_none() {
+            return;
+        }
+        let drag = self.ui.drag == Some(Drag::Select(id)) && self.inputs.get(&id).is_some_and(|s| s.selecting);
+        let Some(s) = self.inputs.get_mut(&id) else { return };
+        // The display buffer is laid out by the painter; before the first frame there is no hit.
+        let Some(c) = s.display.buffer.hit(p.0 - ox, p.1 - oy) else { return };
+        let now = std::time::Instant::now();
+        if !drag && !extend {
+            let double = s.last_click.is_some_and(|t| now.duration_since(t).as_millis() < 400);
+            s.last_click = Some(now);
+            if double {
+                s.select_word_at(c);
+            } else {
+                s.place_cursor_at(c, false);
+            }
+            s.selecting = true;
+        } else {
+            s.place_cursor_at(c, true);
+            s.selecting = true;
+        }
+        self.blink_epoch = now;
+        self.dirty = true;
+    }
+
     /// Places the caret (and extends the selection with `extend` / double click) at pointer `p`.
     fn place_caret(&mut self, id: WidgetId, p: (f32, f32), extend: bool) {
         let Some((_, password)) = self.input_meta(id) else { return };
+        if self.input_flags(id).1 {
+            return self.place_caret_wrapped(id, p, extend);
+        }
         let Some(r) = self.abs_rect(id) else { return };
         let Some(n) = self.model.find(id) else { return };
         let pad = padding(n.style());
