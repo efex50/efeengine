@@ -24,7 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # Crates copied to <dest>/crates/<name>. efescript and everything it depends on by path.
-CRATES = ["efescript", "efevm", "efevm-jit", "efa", "efemod", "calc"]
+CRATES = ["efescript", "efevm", "efevm-jit", "efa", "efemod", "calc", "efe-guest"]
 # Workspace members of the mirror (paths relative to its root).
 MEMBERS = [
     "crates/efescript",
@@ -35,6 +35,7 @@ MEMBERS = [
     "crates/efevm-jit",
     "crates/efa",
     "crates/efemod",
+    "crates/efe-guest",
 ]
 EXCLUDE = ["crates/efa/fuzz"]
 # Directory names never copied.
@@ -61,7 +62,7 @@ panic = "abort"
 
 MIRROR_NOTE = """> **Mirror.** This repository is generated from
 > [efeengine](https://github.com/efex50/efeengine) (`crates/efescript`, `efevm`, `efevm-jit`,
-> `efa`, `efemod`, `calc`) by `scripts/sync_efescript.py`. Send changes there; edits here are
+> `efa`, `efemod`, `calc`, `efe-guest`) by `scripts/sync_efescript.py`. Send changes there; edits here are
 > overwritten by the next sync.
 
 """
