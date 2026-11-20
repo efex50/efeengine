@@ -22,16 +22,13 @@ Usage:
   scripts/remote.py shell                        interactive shell in the remote tree
   scripts/remote.py cargo [any cargo args]       anything else
 
-The host is any ssh destination (a ~/.ssh/config alias, user@host, an IP). It comes from, in
-order: --host, $EFE_REMOTE_HOST, or `git config remotebuild.host` (per clone, never committed):
-  git config remotebuild.host myserver
-There is no default; nothing is hardcoded.
-
-The remote directory comes from --dir, $EFE_REMOTE_DIR or `git config remotebuild.dir`, default
-~/remote-builds/<repo folder name> (relative paths are under the remote user's home).
-$EFE_REMOTE_JOBS (or `git config remotebuild.jobs`) sets the parallelism on the remote, used for
-both CARGO_BUILD_JOBS and RUST_TEST_THREADS. Default: the remote's core count minus 3 (at least 1),
-so the server stays usable.
+Settings come from the flags, then the environment, then remotes.env in the repo root (git
+ignored, so host names never reach git; copy remotes.env.example to start):
+  EFE_REMOTE_HOST=myserver     any ssh destination (~/.ssh/config alias, user@host, an IP); no default
+  EFE_REMOTE_DIR=...           tree on the remote (default ~/remote-builds/<repo folder name>;
+                               relative paths are under the remote user's home)
+  EFE_REMOTE_JOBS=N            CARGO_BUILD_JOBS and RUST_TEST_THREADS on the remote
+                               (default: the remote's core count minus 3, at least 1)
 
 Binaries built remotely link against the remote's glibc; `doctor` checks that it is not newer
 than the local one and that both sides have the same CPU architecture.
@@ -44,7 +41,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 # Never copied: build output, git data, agent worktrees, web output.
-EXCLUDES = ["/target/", "/.git/", "/.claude/", "**/target/", "**/web/pkg/", "/dist/", "__pycache__/"]
+EXCLUDES = ["/target/", "/.git/", "/.claude/", "**/target/", "**/web/pkg/", "/dist/", "__pycache__/", "/remotes.env"]
 # Reuse one ssh connection for the rsync and the cargo calls (%C: hash of host/port/user).
 SSH_OPTS = ["-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/cm-remotebuild-%C",
             "-o", "ControlPersist=10m", "-o", "ConnectTimeout=10"]
@@ -54,9 +51,31 @@ class RemoteError(Exception):
     pass
 
 
-def git_config(key, root=ROOT):
-    r = subprocess.run(["git", "config", "--get", key], cwd=root, capture_output=True, text=True)
-    return r.stdout.strip() or None
+ENV_FILE = "remotes.env"
+
+
+def env_file(root=ROOT):
+    """KEY=VALUE pairs of <root>/remotes.env (# comments, optional quotes); {} if missing."""
+    out = {}
+    try:
+        text = (Path(root) / ENV_FILE).read_text()
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip().removeprefix("export ").strip()
+        v = v.split(" #", 1)[0].strip().strip('"').strip("'")
+        if v:
+            out[k] = v
+    return out
+
+
+def setting(key, root=ROOT):
+    """$KEY from the environment, else from remotes.env."""
+    return os.environ.get(key) or env_file(root).get(key)
 
 
 def log(msg):
@@ -85,17 +104,17 @@ def local_profile_dir(profile):
 
 
 class Remote:
-    """Settings for one remote machine. Missing pieces come from the environment and git config."""
+    """Settings for one remote machine. Missing pieces come from the environment and remotes.env."""
 
     def __init__(self, host=None, rdir=None, jobs=None, root=ROOT, dry=False):
         self.root = Path(root)
-        self.host = host or os.environ.get("EFE_REMOTE_HOST") or git_config("remotebuild.host", self.root)
+        self.host = host or setting("EFE_REMOTE_HOST", self.root)
         if not self.host:
             raise RemoteError("no remote host: pass --host HOST (or --remote=HOST), set EFE_REMOTE_HOST, "
-                              "or run\n  git config remotebuild.host HOST")
-        self.rdir = (rdir or os.environ.get("EFE_REMOTE_DIR") or git_config("remotebuild.dir", self.root)
-                     or f"remote-builds/{self.root.name}")
-        self.jobs = jobs or os.environ.get("EFE_REMOTE_JOBS") or git_config("remotebuild.jobs", self.root)
+                              f"or put EFE_REMOTE_HOST=HOST in {self.root / ENV_FILE} "
+                              "(see remotes.env.example)")
+        self.rdir = rdir or setting("EFE_REMOTE_DIR", self.root) or f"remote-builds/{self.root.name}"
+        self.jobs = jobs or setting("EFE_REMOTE_JOBS", self.root)
         self.dry = dry
         self.synced = False
         self.ssh_cmd = ["ssh", *SSH_OPTS]

@@ -5,9 +5,11 @@
 //! and the needed executables are copied back into the local `target/<profile>/`. Same behaviour
 //! as `scripts/remote.py`, which this mirrors. Settings (never hardcoded):
 //!
-//! * host: `--remote=HOST`, else `$EFE_REMOTE_HOST`, else `git config remotebuild.host`
-//! * directory: `$EFE_REMOTE_DIR`, `git config remotebuild.dir`, default `remote-builds/<repo folder>`
-//! * jobs: `$EFE_REMOTE_JOBS`, `git config remotebuild.jobs`
+//! * host: `--remote=HOST`, else `$EFE_REMOTE_HOST`, else `EFE_REMOTE_HOST` in `remotes.env`
+//! * directory: `$EFE_REMOTE_DIR` / `remotes.env`, default `remote-builds/<repo folder>`
+//! * jobs: `$EFE_REMOTE_JOBS` / `remotes.env`
+//!
+//! `remotes.env` (repo root, git ignored; see `remotes.env.example`) holds `KEY=VALUE` lines.
 
 use std::io::Write;
 use std::path::Path;
@@ -20,7 +22,8 @@ use anyhow::{Context, Result, bail};
 use crate::util::{dry_run, root, show, step};
 
 /// Never copied: build output, git data, agent worktrees, web output.
-const EXCLUDES: [&str; 7] = ["/target/", "/.git/", "/.claude/", "**/target/", "**/web/pkg/", "/dist/", "__pycache__/"];
+const EXCLUDES: [&str; 8] =
+    ["/target/", "/.git/", "/.claude/", "**/target/", "**/web/pkg/", "/dist/", "__pycache__/", "/remotes.env"];
 
 /// Reuse one ssh connection for the rsync and the cargo calls (%C: hash of host/port/user).
 const SSH_OPTS: [&str; 8] = [
@@ -51,14 +54,25 @@ pub fn enable(host: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn git_config(key: &str) -> Option<String> {
-    let out = Command::new("git").args(["config", "--get", key]).current_dir(root()).output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && !s.is_empty()).then_some(s)
+const ENV_FILE: &str = "remotes.env";
+
+/// The value of `key` in `KEY=VALUE` text (`#` comments, optional `export ` and quotes).
+fn env_file_value(text: &str, key: &str) -> Option<String> {
+    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).find_map(|l| {
+        let (k, v) = l.split_once('=')?;
+        let k = k.trim();
+        let k = k.strip_prefix("export ").unwrap_or(k).trim();
+        let v = v.split(" #").next().unwrap_or("").trim().trim_matches(|c| c == '"' || c == '\'');
+        (k == key && !v.is_empty()).then(|| v.to_string())
+    })
 }
 
-fn env_or_git(env: &str, key: &str) -> Option<String> {
-    std::env::var(env).ok().filter(|s| !s.is_empty()).or_else(|| git_config(key))
+/// `$key` from the environment, else from `remotes.env` in the repo root.
+fn setting(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty()).or_else(|| {
+        let text = std::fs::read_to_string(root().join(ENV_FILE)).ok()?;
+        env_file_value(&text, key)
+    })
 }
 
 /// The directory cargo puts a profile in: `release` or `debug`.
@@ -78,14 +92,15 @@ impl Remote {
     fn resolve(host: Option<String>) -> Result<Self> {
         let host = host
             .filter(|h| !h.is_empty())
-            .or_else(|| env_or_git("EFE_REMOTE_HOST", "remotebuild.host"))
+            .or_else(|| setting("EFE_REMOTE_HOST"))
             .context(
-                "no remote host: pass --remote=HOST, set EFE_REMOTE_HOST, or run\n  git config remotebuild.host HOST",
+                "no remote host: pass --remote=HOST, set EFE_REMOTE_HOST, or put EFE_REMOTE_HOST=HOST in \
+                 remotes.env at the repo root (see remotes.env.example)",
             )?;
-        let dir = env_or_git("EFE_REMOTE_DIR", "remotebuild.dir").unwrap_or_else(|| {
+        let dir = setting("EFE_REMOTE_DIR").unwrap_or_else(|| {
             format!("remote-builds/{}", root().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
         });
-        let jobs = env_or_git("EFE_REMOTE_JOBS", "remotebuild.jobs");
+        let jobs = setting("EFE_REMOTE_JOBS");
         Ok(Self { host, dir, jobs, synced: AtomicBool::new(false) })
     }
 
@@ -234,6 +249,15 @@ pub fn warn_if_no_local_sdl3(static_sdl: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_file_values() {
+        let t = "# comment\nEFE_REMOTE_HOST=box  # inline\nexport EFE_REMOTE_DIR=\"builds/x\"\nEFE_REMOTE_JOBS=\n";
+        assert_eq!(env_file_value(t, "EFE_REMOTE_HOST").as_deref(), Some("box"));
+        assert_eq!(env_file_value(t, "EFE_REMOTE_DIR").as_deref(), Some("builds/x"));
+        assert_eq!(env_file_value(t, "EFE_REMOTE_JOBS"), None);
+        assert_eq!(env_file_value(t, "OTHER"), None);
+    }
 
     fn remote(jobs: Option<&str>) -> Remote {
         Remote { host: "h".into(), dir: "remote-builds/x".into(), jobs: jobs.map(Into::into), synced: AtomicBool::new(false) }

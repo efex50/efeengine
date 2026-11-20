@@ -45,9 +45,9 @@ struct Cli {
     no_preflight: bool,
     /// Build on a remote machine over SSH and run here (native build/run/editor/check/test).
     /// Cargo runs on HOST after the tree is rsynced there; the built executables are fetched into
-    /// target/<profile>/. Bare `--remote` uses $EFE_REMOTE_HOST or `git config remotebuild.host`.
-    /// Directory: $EFE_REMOTE_DIR / remotebuild.dir (default remote-builds/<repo>); jobs:
-    /// $EFE_REMOTE_JOBS / remotebuild.jobs (default: remote cores - 3). Not for web/dist/serve.
+    /// target/<profile>/. Bare `--remote` uses $EFE_REMOTE_HOST, else EFE_REMOTE_HOST in remotes.env
+    /// (git ignored; see remotes.env.example). Directory: EFE_REMOTE_DIR (default remote-builds/<repo>);
+    /// jobs: EFE_REMOTE_JOBS (default: remote cores - 3). Not for web/dist/serve.
     #[arg(long, global = true, num_args = 0..=1, require_equals = true, value_name = "HOST", default_missing_value = "")]
     remote: Option<String>,
     #[command(subcommand)]

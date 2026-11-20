@@ -4,3 +4,6 @@ target/
 **/web/pkg/
 /dist/
 __pycache__/
+
+# Local remote-build settings (host names); template: remotes.env.example
+/remotes.env

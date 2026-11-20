@@ -47,9 +47,9 @@ Options:
   --remote[=HOST]  native build/run/editor/check/test: cargo runs on a remote machine over SSH
                    (the tree is rsynced there), the built executables are fetched into
                    target/<profile>/ and run on this PC. HOST is any ssh destination; bare
-                   --remote uses $EFE_REMOTE_HOST or `git config remotebuild.host`.
-                   Directory: $EFE_REMOTE_DIR / remotebuild.dir (default remote-builds/<repo>),
-                   jobs: $EFE_REMOTE_JOBS / remotebuild.jobs (default: remote cores - 3).
+                   --remote uses $EFE_REMOTE_HOST, else EFE_REMOTE_HOST in remotes.env (git
+                   ignored; see remotes.env.example). Directory: EFE_REMOTE_DIR (default
+                   remote-builds/<repo>), jobs: EFE_REMOTE_JOBS (default: remote cores - 3).
                    Not for web/dist. Example: ./build.py --remote run coin_dash native
                    (see docs/REMOTE_BUILD.md, scripts/remote.py doctor)
 

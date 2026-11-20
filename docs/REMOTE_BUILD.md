@@ -5,7 +5,7 @@ result here. Works with `./build.py` and `cargo xtask`; `scripts/remote.py` is t
 tool both are built on.
 
 ```
-./build.py --remote run coin_dash native          # host from $EFE_REMOTE_HOST / git config
+./build.py --remote run coin_dash native          # host from $EFE_REMOTE_HOST / remotes.env
 ./build.py --remote=myserver build coin_dash native --release
 cargo xtask --remote=myserver run coin_dash native
 cargo xtask --remote editor script_demo
@@ -14,14 +14,18 @@ cargo xtask --remote test
 ```
 
 `--remote` is global (before or after the subcommand). Bare `--remote` resolves the host from
-`$EFE_REMOTE_HOST`, then `git config remotebuild.host` (per clone, never committed); `--remote=HOST`
-overrides both. HOST is any ssh destination (a `~/.ssh/config` alias, `user@host`, an IP). There is no
-default host.
+`$EFE_REMOTE_HOST`, then `EFE_REMOTE_HOST` in `remotes.env`; `--remote=HOST` overrides both. HOST is
+any ssh destination (a `~/.ssh/config` alias, `user@host`, an IP). There is no default host.
 
-| setting | sources (first wins) | default |
+`remotes.env` sits in the repo root and is git ignored, so machine names never reach git. Start from
+the committed template: `cp remotes.env.example remotes.env`. It is `KEY=VALUE` lines (`#` comments);
+the environment wins over the file.
+
+| setting | key (environment or `remotes.env`) | default |
 | --- | --- | --- |
-| directory on the remote | `$EFE_REMOTE_DIR`, `git config remotebuild.dir` | `~/remote-builds/<repo folder>` |
-| parallelism (`CARGO_BUILD_JOBS`, `RUST_TEST_THREADS`) | `$EFE_REMOTE_JOBS`, `git config remotebuild.jobs` | remote cores minus 3 (min 1) |
+| host | `EFE_REMOTE_HOST` | none (required) |
+| directory on the remote | `EFE_REMOTE_DIR` | `~/remote-builds/<repo folder>` |
+| parallelism (`CARGO_BUILD_JOBS`, `RUST_TEST_THREADS`) | `EFE_REMOTE_JOBS` | remote cores minus 3 (min 1) |
 
 ## What happens
 
