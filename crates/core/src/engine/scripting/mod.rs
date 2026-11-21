@@ -312,6 +312,11 @@ impl Scripting {
         }
     }
 
+    /// The JIT settings in effect (the ones last given to [`Scripting::set_backend`]).
+    pub fn jit_config(&self) -> JitConfig {
+        self.jit_cfg
+    }
+
     /// The backend choice in effect.
     pub fn backend(&self) -> ScriptBackend {
         self.backend

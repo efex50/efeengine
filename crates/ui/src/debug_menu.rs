@@ -19,7 +19,11 @@
 //!   conflicts, spawn overflows, dropped events), then one two-line row per module slot: name
 //!   (ellipsized like a log row), version, loaded / unloaded, JIT or interpreter, and a muted detail
 //!   line (game module or mod package `id@version`, dependency count, budget used / total, memory
-//!   page limit). The data is a [`ScriptsInfo`] snapshot copied from `engine.scripting()` by an
+//!   page limit). The Backend row has the buttons Interpreter | Auto | JIT (the current one
+//!   highlighted; `DebugMsg::SetBackend`, applied by an Update system through
+//!   `Scripting::set_backend` and followed by an immediate refresh); without the `jit` feature it
+//!   shows "JIT not compiled in (build with --jit)" instead. A hint line counts loaded mods that stay
+//!   interpreted for lack of a `Grant::jit`. The data is a [`ScriptsInfo`] snapshot copied from `engine.scripting()` by an
 //!   Update system at most twice a second, and only while the window shows this tab.
 //!
 //! Cost: the view runs only when something it shows changed (`UiView::when`: `DebugState`, the shown
@@ -201,6 +205,8 @@ pub enum DebugMsg {
     FpsSubmit(String),
     /// The FPS limit field gained or lost keyboard focus.
     FpsFocus(bool),
+    /// A backend button of the Scripts tab: switch the scripting backend (applied by `menu_update`).
+    SetBackend(ScriptBackend),
 }
 
 /// What the window remembers. A resource.
@@ -251,6 +257,13 @@ fn parse_limit(s: &str) -> Option<u32> {
 
 fn menu_update(cx: &mut Ctx) {
     let msgs: Vec<DebugMsg> = cx.events::<DebugMsg>().iter().cloned().collect();
+    // A backend switch: applied here (between frames, `Ctx` has the scripting), then the snapshot
+    // is read at once so the module rows show the new JIT state without waiting for the timer.
+    if let Some(b) = msgs.iter().rev().find_map(|m| if let DebugMsg::SetBackend(b) = m { Some(*b) } else { None }) {
+        let jit = cx.scripting.jit_config();
+        cx.scripting.set_backend(b, jit);
+        refresh_scripts(cx);
+    }
     // Escape leaves the field even when no widget saw it (the key is captured by the UI while a
     // text input has focus, but the raw input still reports it).
     let escape = cx.input.just_pressed(KeyCode::Escape);
@@ -310,6 +323,7 @@ fn menu_update(cx: &mut Ctx) {
                     st.fps_focused = false;
                     blur = true;
                 }
+                DebugMsg::SetBackend(_) => {} // applied above
                 DebugMsg::FpsFocus(on) => {
                     st.fps_focused = on;
                     if !on {
@@ -366,6 +380,11 @@ fn scripts_update(cx: &mut Ctx) {
         }
         return;
     }
+    refresh_scripts(cx);
+}
+
+/// Reads the scripting state into [`ScriptsInfo`] and restarts the refresh timer.
+fn refresh_scripts(cx: &mut Ctx) {
     if let Some(clock) = cx.resources.get_mut::<ScriptsClock>() {
         clock.0 = 0.0;
     }
@@ -553,14 +572,6 @@ fn edits_tab(state: &DebugState) -> El<DebugMsg> {
     scroll().width(Size::Fill).height(Size::Fill).key("edits").child(column![setting_row("fps", "Fps limit here (0=infinite)", field)].width(Size::Fill))
 }
 
-fn backend_name(b: ScriptBackend) -> &'static str {
-    match b {
-        ScriptBackend::Interpreter => "Interpreter",
-        ScriptBackend::Jit => "Jit",
-        ScriptBackend::Auto => "Auto",
-    }
-}
-
 /// One module slot: a line with the name, version, state and engine, and a muted detail line.
 /// Both texts are read-only selectable inputs that ellipsize like a log row.
 fn module_row(m: &ModuleInfo) -> El<DebugMsg> {
@@ -598,8 +609,24 @@ fn scripts_tab(info: &ScriptsInfo) -> El<DebugMsg> {
         format!("compiled in, {} of {} modules active", info.on_jit(), info.loaded())
     };
     let st = &info.stats;
+    let choose = |label: &str, key: &str, b: ScriptBackend| {
+        let btn = button(label).key(key).class("tab").on_click(DebugMsg::SetBackend(b));
+        if info.backend == b { btn.class("tab-active") } else { btn }
+    };
+    // Without the JIT every choice runs the interpreter, so the switch is replaced by a note.
+    let backend_control = if info.jit_available {
+        row![
+            choose("Interpreter", "b_interp", ScriptBackend::Interpreter),
+            choose("Auto", "b_auto", ScriptBackend::Auto),
+            choose("JIT", "b_jit", ScriptBackend::Jit),
+        ]
+        .key("control")
+    } else {
+        row![text("JIT not compiled in (build with --jit)").class("muted").key("no_jit")].key("control")
+    };
+    let no_grant = info.modules.iter().filter(|m| m.loaded && !m.jit_allowed).count();
     let mut col = column![
-        setting_row("backend", "Backend", text(backend_name(info.backend))),
+        setting_row("backend", "Backend", backend_control),
         setting_row("jit", "JIT", text(jit)),
         setting_row("lanes", "Lanes (last run)", text(st.lanes.to_string())),
         setting_row("conflicts", "Write conflicts", text(st.write_conflicts.to_string())),
@@ -611,6 +638,9 @@ fn scripts_tab(info: &ScriptsInfo) -> El<DebugMsg> {
     .width(Size::Fill);
     if info.modules.is_empty() {
         col = col.child(text("(no scripts or mods loaded)").class("muted").class("wire-row").key("empty"));
+    }
+    if info.jit_available && info.backend != ScriptBackend::Interpreter && no_grant > 0 {
+        col = col.child(text(format!("{no_grant} mod(s) stay interpreted: no jit grant (Grant::jit)")).class("muted").class("wire-row").key("no_grant"));
     }
     for m in &info.modules {
         col = col.child(module_row(m).key(&format!("m{}", m.id.0)));
@@ -955,6 +985,49 @@ mod tests {
         t.click("debug_menu/tab_logs");
         t.step(2);
         assert!(t.ui().find("debug_menu/log_scroll").is_some());
+    }
+
+    /// A test request: sent as a `DebugMsg` on the next step, like a button click would.
+    struct Req(Option<ScriptBackend>);
+
+    fn send_req(cx: &mut Ctx) {
+        let b = cx.resources.get_mut::<Req>().and_then(|r| r.0.take());
+        if let Some(b) = b {
+            cx.send(DebugMsg::SetBackend(b));
+        }
+    }
+
+    #[test]
+    fn a_backend_request_switches_the_backend_and_refreshes_the_snapshot_at_once() {
+        let mut t = menu();
+        scripts(&mut t);
+        t.engine.insert_resource(Req(None));
+        t.engine.add_system(Stage::Update, send_req).name("test_send_req");
+        let id = t.engine.load_module("switch_mod", &tiny_module()).expect("module");
+        t.step(3);
+        let jit = Scripting::jit_available();
+        assert_eq!(t.resource::<ScriptsInfo>().jit_available, jit);
+        let has_buttons = t.ui().find("debug_menu/scripts/backend/control/b_auto").is_some();
+        assert_eq!(has_buttons, jit, "the switch shows only when the JIT is compiled in");
+        assert_eq!(t.ui().find("debug_menu/scripts/backend/control/no_jit").is_some(), !jit);
+        // Interpreter, then Auto (the choices that work with and without the jit feature).
+        for want in [ScriptBackend::Interpreter, ScriptBackend::Auto] {
+            t.resource_mut::<Req>().0 = Some(want);
+            t.step(3); // far below the 0.5 s refresh: the switch refreshes by itself
+            assert_eq!(t.engine.scripting().backend(), want);
+            assert_eq!(t.resource::<ScriptsInfo>().backend, want);
+        }
+        let info = t.resource::<ScriptsInfo>().clone();
+        let m = info.modules.iter().find(|m| m.id == id).expect("module row");
+        assert_eq!(m.jit, t.engine.scripting().runs_on_jit(id));
+        if jit {
+            // The buttons are real: a click on the current backend's button keeps it highlighted.
+            t.click("debug_menu/scripts/backend/control/b_interp");
+            t.step(3);
+            assert_eq!(t.engine.scripting().backend(), ScriptBackend::Interpreter);
+            assert!(t.ui().has_class(t.id("debug_menu/scripts/backend/control/b_interp"), "tab-active"));
+            assert!(!t.ui().has_class(t.id("debug_menu/scripts/backend/control/b_auto"), "tab-active"));
+        }
     }
 
     #[test]
