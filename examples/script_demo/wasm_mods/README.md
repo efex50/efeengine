@@ -57,10 +57,9 @@ or `EFE_BLESS=1 cargo test -p script_demo --test wasm_mods_e2e bindings` (rewrit
 file (design doc section 8). `[[provide]]` lists the provided functions with the index spelling of
 types, and `[build] scratch` is the size of the scratch region; for C they are the translator's
 `Fallback` (design 4.4), for Rust they only document what the section says (the test checks both agree).
-`efescript pack` does not read any of this yet: `read_mod_toml` rejects `[[provide]]` and `[build] wasm`,
-and packing, the dev-time loading of a `.wasm` folder and the cache are E7.4c. Until then the test
-does it by hand: translate with `efe_wasm::translate`, wrap with `efemod::Package::write`, load with
-`Engine::load_input(LoadInput::Package { .. })`.
+`efescript pack` reads `[build] wasm`, `[[provide]]`, `[[provide_event]]` and `[build] scratch`,
+translates the `.wasm` at pack time into `module.efvm`, and `Engine::load` loads `.wasm` mod folders
+directly in development when the `wasm-mods` feature is enabled (caching in `ScriptCache`).
 
 ## Test
 

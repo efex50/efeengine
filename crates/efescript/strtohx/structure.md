@@ -1,47 +1,50 @@
 # strtohx
 
-Small standalone command-line helper (not a library). It turns text arguments into lines of efescript assembly (`push64`/`push32`/`push16`/`push8 0x...`) that, when run, place that string on the VM stack. It is a developer tool for writing string constants in `.efe` programs.
+Small standalone command-line helper (not a library). It converts text arguments into legacy efescript assembly push instructions (`push64`/`push32`/`push16`/`push8 0x...`) representing UTF-8 string bytes for the stack. It was written as a developer tool for authoring string constants in the old `.efe` format, which was removed from `efescript` in roadmap E3.6 (replaced by `.efa` with `db` string literals).
 
 ## At a glance
 | | |
 |---|---|
 | Path | `crates/efescript/strtohx` |
 | Kind | binary (`src/main.rs`) |
-| Depends on (workspace) | none (no Cargo dependency on `efescript`; only its output format is efescript-specific) |
-| Used by | nobody in the build; used by hand when authoring `.efe` files |
+| Depends on (workspace) | none |
+| Used by | nothing in the workspace / build (legacy tool for the removed `.efe` format) |
 | Key external deps | none |
-| Targets | native CLI; no target-specific code |
+| Targets | native CLI |
 | Features | none |
+| Tests | none |
 
 ## Layout
 ```text
 crates/efescript/strtohx/
-├── Cargo.toml    # package strtohx 0.1.0, no dependencies
-└── src/main.rs   # entire tool (125 lines)
+├── Cargo.toml    package strtohx 0.1.0, edition 2021, no dependencies
+├── src/main.rs   entire CLI tool (125 lines)
+└── structure.md  this file
 ```
 
 ## Main concepts
-Usage: `strtohx "hello world" "second string"` (each argument is handled separately; at least one is required, otherwise it panics with "not enough args").
+Usage: `strtohx "hello world" "second string"` (each argument is processed in turn; passing no arguments panics with `"not enough args"`).
 
-For each argument it takes the UTF-8 bytes and splits them greedily into chunks of 8, then 4, then 2, then 1 bytes, producing one push instruction per chunk. The chunk bytes are printed as a big-endian hex number (first byte of the text is the most significant), which matches how efescript's `pushN` writes big-endian into the stack, so the text appears in order in VM memory. It then prints the input, the instructions and `total len is N` (the byte length, which is what to put in `rc`).
+For each argument, `handle_part` iterates over its UTF-8 bytes and greedily splits them into chunks of 8, 4, 2, and 1 bytes (`K8`, `K4`, `K2`, `K1`) via `ayıkla`. Each chunk is reversed into a zero-padded `[u8; 8]` by `as_le_bytes!` and converted via `usize::from_le_bytes`, producing a big-endian hex literal formatted in uppercase (`push64 0x...`, `push32 0x...`, `push16 0x...`, `push8 0x...`), followed by `total len is N`.
 
-Example (actual output):
+Example output:
 ```text
 $ strtohx "hello world"
+------
+input str:hello world
+
 push64 0x68656C6C6F20776F
 push16 0x726C
 push8 0x64
 
 total len is 11
 ```
-(A 11-byte string is split 8 + 2 + 1; a 3-byte string becomes `push16` + `push8`.)
-The output is meant to be pasted into an `.efe` file after `mov rbp,rsp`, then `mov rb,rbp` / `mov rc,<len>` and a Print/Println syscall. Hex digits are upper-case; efescript accepts both cases.
 
 ## Public API
-None; it is a binary with no library target. The only interface is the command line above and stdout.
+None; binary-only crate (CLI arguments -> stdout).
 
 ## Status and known gaps
+- Legacy tool for the removed `.efe` format (E3.6); `.efa` supports string literals directly via `db`.
 - No arguments -> `panic!("not enough args")` rather than a usage message.
-- No newline escaping: a trailing newline has to be added by hand (for example an extra `push8 0xA`, or a literal newline inside the argument).
-- Unused `KalanType` plumbing and an unused `as_le_bytes!` copy are rough edges; helper function is named `ayıkla` (Turkish for "extract").
-- No tests, no output-file mode.
+- No newline escaping or output-file flag; no tests.
+- `as_le_bytes!` is misleadingly named (it pops/reverses bytes into an 8-byte array so `usize::from_le_bytes` yields the big-endian integer); invalid chunk size panics in `ayıkla`.

@@ -1,6 +1,6 @@
 # proc_macros
 
-Tiny proc-macro crate that belongs to `efescript`. It exposes two function-like macros that expand to `pub const` definitions, so values can be fixed at compile time of the consuming crate.
+Tiny proc-macro crate in `crates/efescript/proc_macros`. It exposes two function-like macros that expand to `pub const` definitions so values can be fixed at compile time of a consuming crate. Originally used by the legacy `.efe` VM in `efescript`, it is no longer depended on after `.efe` removal (roadmap E3.6), though the crate remains in the workspace.
 
 ## At a glance
 | | |
@@ -8,37 +8,37 @@ Tiny proc-macro crate that belongs to `efescript`. It exposes two function-like 
 | Path | `crates/efescript/proc_macros` |
 | Kind | proc-macro (`[lib] proc-macro = true`) |
 | Depends on (workspace) | none |
-| Used by | `efescript` (invoked at the top of `src/lib.rs`) |
-| Key external deps | none (only the compiler-provided `proc_macro`) |
-| Targets | runs on the host at compile time, so target-independent; the generated code is plain `usize` consts |
+| Used by | nothing in the workspace (`efescript` dropped the dependency in E3.6) |
+| Key external deps | none (only compiler-provided `proc_macro`) |
+| Targets | host proc-macro (target-independent generated `usize` consts) |
 | Features | none |
+| Tests | none |
 
 ## Layout
 ```text
 crates/efescript/proc_macros/
-├── Cargo.toml    # package proc_macros 0.1.0, [lib] proc-macro = true, no dependencies
-└── src/lib.rs    # the two macros (27 lines)
+├── Cargo.toml    package proc_macros 0.1.0, edition 2021, [lib] proc-macro = true, no deps
+├── src/lib.rs    the two proc macros (`max_addr!`, `stack_page_count!`, 28 lines)
+└── structure.md  this file
 ```
 
 ## Main concepts
-Both macros ignore their input tokens and build a string that is parsed back into a `TokenStream`.
+Both macros ignore their input `TokenStream` and format a `pub const` declaration that is parsed back into a `TokenStream`:
 
-- `max_addr!()` expands to `pub const MAX_ADDR_SIZE:usize = 281474976710656;` (2^48, computed with `2_usize.pow(48)`). The VM's maximum addressable size.
-- `stack_page_count!()` expands to `pub const STACK_PAGE_COUNT:usize = N;` where `N` is read from the environment variable `STACK_PAGE_COUNT` at macro-expansion time (default `2`). An unparsable value prints the parse error to stderr and panics, which aborts compilation. Note `env::var` is read when the macro is expanded, but cargo does not know about this dependency, so changing the variable does not trigger a rebuild of `efescript` by itself. The doc comment says "PAGE_SIZE * STACK_PAGE_COUNT" is the max stack size.
+- `max_addr!()` expands to `pub const MAX_ADDR_SIZE:usize = 281474976710656;` (`2_usize.pow(48)`).
+- `stack_page_count!()` expands to `pub const STACK_PAGE_COUNT:usize = N;`, reading `N` from the `STACK_PAGE_COUNT` environment variable at macro-expansion time (default `"2"`). Non-numeric values print the `ParseIntError` to stderr and panic, aborting compilation. Because `std::env::var` is read without `rerun-if-env-changed`, Cargo does not track changes to `STACK_PAGE_COUNT` automatically.
 
-Usage (as in `efescript/src/lib.rs`):
+Legacy usage (before E3.6 removed the dependency from `efescript`):
 ```rust
 proc_macros::max_addr!();
 proc_macros::stack_page_count!();
-// now MAX_ADDR_SIZE and STACK_PAGE_COUNT exist as crate-level pub consts
 ```
-Build with a custom stack size: `STACK_PAGE_COUNT=8 cargo build -p efescript` (after a clean/touch of `efescript`).
 
 ## Public API
-- `max_addr!()` -> `pub const MAX_ADDR_SIZE: usize`
-- `stack_page_count!()` -> `pub const STACK_PAGE_COUNT: usize`
+- `#[proc_macro] pub fn max_addr(_i: TokenStream) -> TokenStream` -> `pub const MAX_ADDR_SIZE: usize`
+- `#[proc_macro] pub fn stack_page_count(_i: TokenStream) -> TokenStream` -> `pub const STACK_PAGE_COUNT: usize`
 
 ## Status and known gaps
-- The generated constants are not used anywhere in `efescript` yet (no stack bound checks or address validation reference them).
-- An older design that read `efearena_size` from the environment is left as commented-out code (`src/lib.rs`).
-- No `cargo:rerun-if-env-changed` mechanism, so the env override can be stale (see above); there are no tests.
+- Unused anywhere in the workspace since `efescript` removed the legacy `.efe` VM in E3.6.
+- An older `efearena_size` design remains as commented-out lines in `src/lib.rs`.
+- No `cargo:rerun-if-env-changed` tracking for `STACK_PAGE_COUNT`; no tests.

@@ -1,43 +1,61 @@
 # efevm-jit
 
-`efevm-jit` compiles verified `efevm` modules to native code with Cranelift 0.137 (roadmap E7, phases J1-J6) and runs fibers through the `efevm::backend::Backend` seam. It is observably identical to the interpreter (SPEC draft 8): same `Exit` sequence, results, memory, globals, `resume_units`, trap kind and location, backtraces, fiber registers/location/backtrace while suspended. The one allowed difference is the payload of NaN results of float arithmetic. **Used by: `efeengine-core` (feature `jit`, J5; game modules by default, mods only with `Grant::jit`).**
+`efevm-jit` compiles verified `efevm` modules to native code with Cranelift 0.137.2 (roadmap E7, phases J1-J6) and runs fibers through the `efevm::backend::Backend` seam. It is observably identical to the interpreter (SPEC draft 8): same `Exit` sequence, results, memory, globals, `resume_units`, trap kind and location, backtraces, and fiber registers/location/backtrace while suspended. The one allowed difference is the payload of NaN results of float arithmetic.
 
 ## At a glance
 | | |
 |---|---|
 | Path | `crates/efevm-jit` |
-| Kind | library plus a benchmark example and integration tests |
-| Depends on | `efevm`; `cranelift-codegen`, `-frontend`, `-jit`, `-module`, `-native` pinned to `=0.137.2` (only for non-wasm targets) |
-| Targets | native 64-bit hosts with a Cranelift ISA. On `wasm32` the library body is `#![cfg(not(target_arch = "wasm32"))]`, so it is empty and its dependencies are not built. |
-| Safety | all `unsafe` lives here (calling generated code, raw context pointers, `JITModule::free_memory`); every block has a `// SAFETY:` comment. `efevm` is unchanged. |
+| Kind | library (`src/lib.rs`), plus a benchmark example (`examples/bench.rs`) and integration tests |
+| Depends on (workspace) | `efevm` (`[dev-dependencies]`: `efescript`, `efa`) |
+| Used by | `efeengine-core` (optional, feature `jit`), `efevm` (dev-dependency for `EFEVM_TEST_BACKEND=jit`), `efe-wasm` (dev-dependency) |
+| Key external deps | `cranelift-codegen`, `cranelift-frontend`, `cranelift-jit`, `cranelift-module`, `cranelift-native` pinned to `=0.137.2` (only for `not(target_arch = "wasm32")`) |
+| Features | none |
+| Targets | native 64-bit hosts with a Cranelift ISA. On `wasm32` the library body is `#![cfg(not(target_arch = "wasm32"))]`, so it is empty and Cranelift dependencies are not built. |
+| Safety | all `unsafe` lives here (calling generated code, raw context pointers, `JITModule::free_memory`); every block has a `// SAFETY:` comment. `efevm` stays `#![forbid(unsafe_code)]`. |
+| Tests | 8 integration test files in `tests/` (`calls`, `debugger`, `examples`, `fuzz`, `limits`, `memory`, `ops`, `smoke`) plus shared helpers in `tests/common/` |
 
 ## Public API
 ```rust
-pub struct JitOptions { pub opt_level: OptLevel /* None | Speed */, pub max_native_stack: usize /* 1 MiB */, pub verify: bool /* IR verifier, debug builds only by default */ }
-pub struct JitCode;                       // Send + Sync; owns the executable memory
+pub enum OptLevel { None, Speed }
+pub struct JitOptions { pub opt_level: OptLevel /* Speed */, pub max_native_stack: usize /* 1 MiB */, pub verify: bool /* cfg!(debug_assertions) */ }
+pub struct JitCode;                       // Send + Sync + Debug; owns executable memory (freed on Drop)
 pub fn compile(&efevm::Module, &JitOptions) -> Result<Arc<JitCode>, JitError>;
-pub struct JitBackend<H>;                 // impl Backend<H>; JitBackend::new(Arc<JitCode>)
+pub struct JitBackend<H>;                 // impl<H: 'static> Backend<H>; JitBackend::new(Arc<JitCode>)
 pub fn enable<H: 'static>(&mut Instance<H>, &JitOptions) -> Result<(), JitError>;   // compile + set_backend
-pub enum JitError { UnsupportedHost(String), Unsupported { func, op }, Codegen { func, message }, Module(String), TooManyRegisters { func, nregs } }  // Display + Error
+pub enum JitError { UnsupportedHost(String), Unsupported { func: u32, op: Op }, Codegen { func: u32, message: String }, Module(String), TooManyRegisters { func: u32, nregs: u32 } }  // Display + Error
 pub const MAX_JIT_REGISTERS: u32 = 4096;  // a function with more registers is refused (the module stays interpreted)
-// diagnostics (process-wide counters): native_runs(), native_stack_fallbacks(), native_stack_resume_fallbacks()
+// diagnostics (process-wide AtomicU64 counters): native_runs(), native_stack_fallbacks(), native_stack_resume_fallbacks()
 ```
-`JitBackend::run` compares the module data pointer of `cx.module` with the compiled module (`JitCode` keeps a clone, so the pointer cannot be reused) and delegates to `run_interpreter` for any other module, for a fiber not at a leader, and for a malformed stack.
+`JitBackend::run` checks that `cx.module.data()` matches the compiled module pointer (`JitCode` keeps a clone, so the pointer cannot be reused), that `stack.func`/`stack.pc` is a block leader, and that the outermost function index is a compiled module function (not an import and in range of `code.entries`). Otherwise it delegates to `run_interpreter`.
 
 ## Layout
 ```text
 crates/efevm-jit/
-├── Cargo.toml
-├── README.md
-├── structure.md
+├── Cargo.toml                  # package `efevm-jit` (edition 2024, v0.1.0), Cranelift 0.137.2 on non-wasm32, dev-deps `efescript` & `efa`
+├── README.md                   # usage snippet, security note, design/benchmark pointers
+├── structure.md                # this file
 ├── src/
-│   ├── lib.rs        # cfg gate, re-exports
-│   ├── compile.rs    # JitOptions, JitError, JitCode, compile(); the per-function code generator (struct Fc)
-│   ├── ctx.rs        # JitCtx (repr C), TableEntry, Rt (Rust-side run state), trap and suspend codes
-│   ├── helpers.rs    # extern "C" helpers called from generated code
-│   └── backend.rs    # JitBackend, enable(), run(), rebuild() of the FiberStack
-├── examples/bench.rs # ns/instruction, interpreter vs JIT (count loop and recursive fib)
-└── tests/            # see "Tests"
+│   ├── lib.rs                  # `#![cfg(not(target_arch = "wasm32"))]` gate and public re-exports
+│   ├── compile.rs              # OptLevel, JitOptions, JitError, JitCode, MAX_JIT_REGISTERS, compile(), per-function codegen (`Fc`)
+│   ├── ctx.rs                  # JitCtx (repr C) + field offsets, TableEntry, Rt (Rust-side run state), trap and suspend codes
+│   ├── helpers.rs              # `extern "C"` helpers called from generated code (traps, save/resume, stack_low, grow/copy/fill, h_host_call)
+│   └── backend.rs              # JitBackend, enable(), run(), rebuild() of FiberStack, process-wide diagnostic counters
+├── examples/
+│   └── bench.rs                # ns/instruction, interpreter vs JIT (count loop, recursive fib, memory loop, f64 loop)
+└── tests/
+    ├── common/
+    │   ├── mod.rs              # test harness (`Pair`, `Cfg`, `diff*`, `cross`, `snap`, `fuzz_case`)
+    │   ├── prog.rs             # recursive test module with host yields, traps, memory and indirect calls
+    │   └── randmod.rs          # SplitMix64 random verified-module generator for differential fuzzing
+    ├── smoke.rs                # counting loop under all budget sets
+    ├── ops.rs                  # arithmetic/compare/convert ops x edge inputs, trap kinds, select/br_table/globals/consts
+    ├── memory.rs               # loads and stores x offsets x boundary/overflowing bases, memory.size/grow/copy/fill, globals
+    ├── calls.rs                # test program under 8 budget sets, trap kinds, cross-backend resume, `step` mixed with JIT
+    ├── limits.rs               # `max_call_depth`/`max_registers` traps, tiny native stack fallbacks, `MAX_JIT_REGISTERS` refusal
+    ├── debugger.rs             # verifies `efescript::debugger::Debugger` drops the JIT and never enters native code
+    ├── fuzz.rs                 # J6 differential fuzzing (`fuzz_short` 150 cases, `#[ignore]` `fuzz_long` and `fuzz_stats`)
+    └── examples.rs             # runs `crates/efescript/examples/*.efa` with the real `std` host on both backends
 ```
 
 ## ABI

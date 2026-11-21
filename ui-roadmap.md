@@ -19,8 +19,9 @@ Both backends report user actions as the same `UiSignal` events, so game code, s
 know which backend runs. This is the same pattern as the io/window backends (SDL, web, headless
 behind one API).
 
-Developer tools (inspector, console, profiler) are separate: egui on both platforms, drawn into the
-canvas on the web too. They do not use the game UI API.
+Developer tools (inspector, REPL console, debug menus, profiler) use the same toolkit and API as the
+game UI: iced on native, the DOM on the web. They live in a dev layer above the game UI, so shipped
+builds can leave them out without touching game code. egui is dropped.
 
 ### Why
 
@@ -58,10 +59,10 @@ crates/
 ├── ui            efeengine-ui: UiTree, Style, UiSignal, bindings, plugin
 │   ├── native    feature `iced` (default on native): iced_wgpu + iced_runtime
 │   └── web       wasm only: web-sys DOM backend
-└── editor        later: egui developer tools
+└── editor        later: developer tools (UiTree panels in a dev layer)
 ```
 
-- `efeengine-core` stays toolkit-agnostic: no iced or egui types in its API.
+- `efeengine-core` stays toolkit-agnostic: no iced types in its API.
 - Games opt in with a `UiPlugin`. A game without it pulls in neither iced nor the DOM backend.
 - iced types never appear in the `efeengine-ui` public API. That keeps the backend replaceable (see 6).
 
@@ -217,9 +218,10 @@ and is held to its grant.
 
 ### Later
 
-- World-space UI (labels and bars over entities): HTML cannot draw under the canvas, so either
-  position HTML elements from the camera each frame or draw these in the game renderer.
-- egui developer tools (`crates/editor`): inspector, console, profiler.
+- World-space UI (labels, bars, damage numbers over entities): not part of `efeengine-ui`. It is
+  display-only components (`Text2D`, `Container2D`) in `efeengine-world-ui`, drawn by one render system
+  on native and web, with no input, focus or clipboard. See ROADMAP 6.8.
+- Developer tools (`crates/editor`): inspector, REPL console, debug menus, profiler (ROADMAP 6.4).
 - Accessibility on native (iced's support is limited; the web gets it from the DOM).
 
 ## 4. Rules
@@ -263,4 +265,4 @@ to write ourselves would be text editing (cursor, selection, IME).
 | wgpu | 30 (engine, iced main, cryoglyph and glyphon all match) |
 | Web game UI backend | HTML + predefined CSS, layer above the canvas |
 | Native fallback | taffy + glyphon + own widgets |
-| Developer tools | egui, both platforms, separate from game UI |
+| Developer tools | iced (native) and DOM (web), same `efeengine-ui` API, in a dev layer |
