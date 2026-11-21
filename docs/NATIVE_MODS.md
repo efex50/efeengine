@@ -1,160 +1,141 @@
-# Native mods and third-party libraries: design and roadmap
+# Native mods: design and roadmap
 
-Status: planned. Nothing here is built. This document is the plan. Code waits until the editor roadmap (`EDITOR.md`) is finished.
+Status: planned (revised 2026-11-21). Nothing here is built yet.
 
-Read first: `MOD_LOADING.md` (grants, policy, `load_input`) and `JIT.md` (Cranelift, AOT, cache).
+Read first: [`MOD_LOADING.md`](MOD_LOADING.md) (grants, policy, packages, provides) and `crates/efe-wasm/README.md` (how wasm mods become providers).
 
-## What this covers
+## The idea in one paragraph
 
-Three kinds of code can reach a game, and each needs a different level of trust:
+A native library (`.so`, `.dll`, `.dylib`) is **one more kind of provider**, exactly like an efa mod or a wasm mod. It exports a table of typed functions; the engine registers them in the host registry as `<mod>.<function>`, so they land in the API index. efa code calls them as ordinary typed imports and is the **glue** to the engine: the native library does pure computation (pathfinding, noise, compression, a third-party SDK), and efa reads and writes the world, sends events and runs under the mod's budget and grant. Native code never gets engine access of its own.
 
-| Kind | Where it runs | Trust |
-|---|---|---|
-| Game scripts (`.efa`, `.efvm`) | in the engine process, through efevm | trusted: you wrote them |
-| Mod bytecode (`.efmod`, `module.efvm`) | in the engine process, through efevm | untrusted: granted by the player |
-| Native code (JIT, AOT library, third-party DLL) | native, see below | the highest risk |
+```
+efa script ──typed import──▶ fastmath.dot(a: &Vec3, b: &Vec3) -> f32
+                                   │  provide ABI (copy in, copy out)
+                                   ▼
+                    libfastmath.so / fastmath.dll / libfastmath.dylib
+                    (exports efe_native_describe() + the functions)
+```
 
-This document covers native code. Its main rule: **a warning is not a security layer.** A third-party library loaded in the engine process can read and write all engine memory, so accepting a warning does not make it safe. Isolation is the protection, and the permission layer is what decides whether a call is allowed to start.
+This replaces the earlier plan of a generic `native.call(library, symbol, args)`: that call was untyped, invisible to the API index and the language tooling, and needed hand-written argument packing on both sides.
 
-## Principles
-
-1. **Nothing loads by default.** A game that does not call the load API loads no mods and no native code.
-2. **The engine provides mechanism; the developer provides the decision.** The engine never shows a prompt. The game developer builds the UI that asks the player.
-3. **Declared before loaded.** A mod lists every capability it needs in its manifest. Anything not declared is refused.
-4. **Checked twice.** Capabilities are checked at load (imports must be granted, or the mod does not start) and on every host call (each call is guarded against the granted set).
-5. **Consent is bound to content.** An approval is tied to the package hash and the requested capabilities. A changed file or a larger request asks again.
-6. **Native code is a separate trust level.** It needs its own consent, and third-party libraries run isolated.
-
-## Permissions model (Android-style)
-
-Capabilities are declared in the manifest, as Android declares permissions in `AndroidManifest.xml`.
-
-| Level | Examples | Granted |
-|---|---|---|
-| Normal | log, time, read the mod's own data folder | automatically when the mod is granted |
-| Dangerous | native library, file access outside the mod folder, network, writing world state | only after the player agrees |
-| Engine-only | internal calls | no mod can request them |
-
-Declaration in `[permissions]` (manifest):
+## What a script author sees
 
 ```toml
-[permissions]
-namespaces = ["engine.log", "world.read"]   # existing
-budget = 200000                              # existing
-memory_pages = 4                             # existing
+# mods/fastmath/mod.toml
+[mod]
+id = "fastmath"
+version = "1.0.0"
 
 [native]
-required = false                             # mod still works without its native part
+required = false            # true: the mod fails to load where no native build exists
 libraries = [
-  { name = "fastmath", sha256 = "…", symbols = ["mul_vec", "dot"] },
+  { target = "x86_64-unknown-linux-gnu", path = "native/x86_64-linux/libfastmath.so", sha256 = "…" },
+  { target = "x86_64-pc-windows-msvc",   path = "native/x86_64-windows/fastmath.dll", sha256 = "…" },
 ]
+wasm = "fastmath.wasm"      # optional fallback: web, unsupported targets, or sandboxed mode
+
+[[provide]]
+name = "dot"
+params = ["a: &Vec3", "b: &Vec3"]
+results = ["result: f32"]
 ```
-
-Each capability is a *namespace* in the host registry, with a descriptor the engine writes (not the mod): the name, the level, and a plain sentence for the prompt. The mod's own text is shown as untrusted and never replaces the engine's wording.
-
-## Consent flow
-
-The engine has two calls; the game developer uses them with a UI of their choice.
 
 ```text
-inspect_mod(bytes) -> ModInspection        // no side effects
-    manifest, requested capabilities, native libraries with hashes,
-    level of each, warnings, package hash
-
-load_mod(bytes, grant: Grant)              // loads only if grant covers the request
-    grant.hash must equal the bytes' hash
-    grant.capabilities subset of the requested set
+; game or mod script (efa)
+call fastmath.dot  ; typed import, checked against the index like any provide
 ```
 
-- The developer shows the inspection, collects the choice, and calls `load_mod` only if the player agreed. Without that call, nothing loads.
-- A `Grant` is serialisable. The developer stores it where they like (save file, settings). The engine does not persist decisions.
-- An update that requests new capabilities produces a new inspection, so the developer asks again. Removing a capability needs no prompt.
-- `revoke_capability(mod_id, cap)` takes a permission back. The mod is reloaded without it, and calls that need it are refused from then on.
+The `[[provide]]` block is the same one wasm and C mods already use. With an SDK that emits the descriptor (below), `[[provide]]` can be generated from the library by `efescript pack`, so it is written once.
 
-## Enforcement
+## The library side: SDKs
 
-### Load time
+**Rust:** a crate `efe-native` (no engine dependency, `#![no_std]`-friendly core).
 
-A mod's imports and events must lie inside its grant, or the mod does not start (`ModError::NotGranted`, see `MOD_LOADING.md`). Native libraries must match their declared hash, and their symbols must be on the declared list.
+```rust
+use efe_native::{export, Vec3};
 
-### Every host call
+#[export(doc = "Dot product")]
+fn dot(a: &Vec3, b: &Vec3) -> f32 { a.x * b.x + a.y * b.y + a.z * b.z }
 
-Each host function is registered with its capability. The instance holds the granted set as a bitset, and each host call tests one bit before it runs. A refused call returns an error to the script and is written to the log.
+efe_native::module!("fastmath", "1.0.0");   // emits efe_native_describe()
+```
 
-Rules:
-- A host function without a capability cannot be registered. This is a registration error, so nothing is accidentally open.
-- The check happens in efevm's host dispatch, not in the script, so a mod cannot skip it.
-- Refusals are counted per mod, so a mod that keeps trying is visible in the editor's Log panel.
+- `#[export]` generates an `extern "C"` trampoline that receives copied arguments, calls the function inside `catch_unwind` and turns a panic into a trap result (a panic never crosses into the engine).
+- `module!` emits `efe_native_describe() -> *const EfeNativeModule`: ABI version, mod id and version, and one entry per function (name, parameter and result types, struct layout hashes, trampoline pointer, doc).
+- Struct types (`Vec3`, game components) come from the game's API index through the same generator that writes `api.rs` for wasm Rust mods, so layouts match the registry.
 
-### Native calls
+**C / C++:** `efe_native.h`, generated by the same code as `efe_guest.h` (`crates/efescript/src/cgen.rs`): struct definitions from the index plus `EFE_EXPORT(name, ...)` macros that build the descriptor table. C cannot catch crashes; a C library that faults takes the process down (see isolation).
 
-`native.call(library, symbol, args)` is a host function with capability `native:<library>`. On top of the bit check:
-- The symbol must be on the library's declared list.
-- Arguments are copied across the boundary. Guest memory pointers are not passed to native code.
-- Each call has a timeout. An error or timeout ends that library's worker (see isolation).
-- The unsafe code lives in one module, `efevm-native`, which is why `efevm`'s `forbid(unsafe_code)` is relaxed for that module and nowhere else.
+## The engine side
 
-## Isolation for third-party libraries
+1. **Load check.** Pick the library for the current target. Verify its `sha256` against the manifest and the grant (consent is bound to the hash). Only then `dlopen` it (`libloading`).
+2. **Describe and match.** Call `efe_native_describe()`. Refuse on ABI version mismatch, a function missing from `[[provide]]` or present only on one side, or any type or layout difference. Error messages name the mod, the function and the field.
+3. **Register.** Each function becomes a host function `<mod>.<fn>` with the capability `native:<mod>`. Scripts import it like any provide; the API index, `.efapi` fragments and `efe_api.h` / `api.rs` generation include it automatically.
+4. **Call.** The provide ABI unchanged: scalars by value (`i32`, `i64`, `f32`, `f64`), `str`, `bytes` and `&Struct` copied from the caller's VM memory into an engine-owned per-call buffer that the library may read (and, for out-structs and results, write); results copied back. The library never sees a pointer into VM memory. Calls are synchronous and count against the caller's budget with a fixed cost per call plus bytes copied.
+5. **Unload and reload.** `unload_mod` drops the host functions and closes the library. `reload_mod` loads the new file and re-checks the descriptor; a changed signature follows the existing mod reload rules (dependents are reloaded or the reload is refused).
+6. **Unsafe code** lives in one module (`crates/efevm-native` or a module inside core), like `efevm-jit`. `efevm` keeps `forbid(unsafe_code)`.
 
-The permission checks do not stop native code that is already loaded, so third-party libraries need a separate process.
+## Three ways to run the same library
 
-| Option | Use for | Cost |
+The efa glue and the import names are identical in all three; only the loader differs.
+
+| Mode | Use for | Cost and risk |
 |---|---|---|
-| In-process `dlopen`, with consent | libraries we build ourselves | fast; a crash or memory bug takes the engine down |
-| Out-of-process helper (recommended for third parties) | everything else | a child process per library; calls go over a pipe or shared memory with a fixed message schema; latency suits I/O and data calls, not per-frame math |
-| WebAssembly build of the library | libraries that can be rebuilt for wasm | strongest sandbox; limited to what compiles to wasm |
+| In-process (`dlopen`) | your own libraries, trusted SDKs | fastest; a crash or memory bug takes the engine down |
+| Helper process | third-party libraries | one child process per library, calls over a pipe with the same descriptor and copy ABI; fine for I/O and data calls, too slow for per-frame math; a crash returns errors to the mod, the engine keeps running |
+| Wasm build of the library (`wasm = …`) | the web build, sandboxed mode, targets without a native build | goes through `efe-wasm` into efevm (interpreter or JIT); the strongest sandbox |
 
-Out-of-process helpers:
-- The engine starts the helper with a minimal environment and no inherited file handles.
-- The helper's stdout and stderr go to the log.
-- If the helper crashes, the engine reports it, the library's calls return errors, and the helper can be restarted only after the player agrees again.
+The game chooses the mode per mod in its policy (`Grant`), for example: own mods in-process, downloaded mods as helper or wasm only. On the web only the wasm fallback can run; without one, a mod with `required = false` loads its efa part and its native provides are missing (calls return an error), and `required = true` refuses to load.
 
-## Native code sources
+## Permissions and consent
 
-Three sources, each with its own consent:
+Unchanged in principle from the earlier plan:
 
-1. **Game-built JIT** (`JIT.md`): compiled in memory from a mod's bytecode. It is the same code as the bytecode, so it needs no separate consent, but it does run native. It is off unless the game enables it.
-2. **AOT libraries** (`JIT.md`, `MOD_LOADING.md`): a `.efmod` may ship a shared library per target. The library is loaded only if its hash matches and the player consented to `native`.
-3. **Third-party DLLs**: declared in the manifest with their hash. Always isolated (above) unless the developer marks the library as trusted in code, which should be rare.
+1. **Nothing loads by default.** A game that does not call the load API loads no mods and no native code.
+2. **The engine provides the mechanism; the game decides.** The engine never shows a prompt; the game builds the dialog.
+3. **Declared before loaded.** The manifest lists every library and provide; anything else is refused.
+4. **Consent is bound to content.** A grant names the package hash and the capabilities. A changed file or a larger request needs a new grant.
+5. **Native is its own capability** (`native:<mod>`), separate from script namespaces, and needs explicit consent.
+6. **A warning is not a security layer.** In-process native code can read and write all engine memory. The protection for untrusted libraries is the helper process or the wasm build, not the prompt.
+
+Engine calls: `inspect_mod(bytes) -> ModInspection` (manifest, capabilities, native libraries with hashes, warnings; no side effects) and `load_mod(bytes, grant)` (loads only if the grant matches the hash and covers the request). `Grant` gains `native: NativeMode { Off, InProcess, Helper, WasmOnly }`.
 
 ## Roadmap
 
-Nothing is started. Each phase ends with something that runs.
+### N0: consent (no native code yet)
+- [ ] N0.1 **[S] Capability levels.** Each namespace and `native:<mod>` has a level (normal, dangerous, engine-only) and an engine-written prompt sentence.
+- [ ] N0.2 **[M] `inspect_mod` and `load_mod(bytes, grant)`** with hash binding and the subset check; `set_mod_policy` stays for tests and simple games.
+- [ ] N0.3 **Tests.** A changed file fails the hash check; a grant missing one capability refuses the mod; a game that never calls the load API loads nothing.
 
-### N0: policy and consent (no native code)
+### N1: SDKs and the descriptor
+- [ ] N1.1 **[S] Descriptor ABI.** `EfeNativeModule` / `EfeNativeFn` C structs, ABI version 1, documented in this file.
+- [ ] N1.2 **[M] `efe-native` Rust crate.** `#[export]`, `module!`, panic catching, struct types from the index.
+- [ ] N1.3 **[S] `efe_native.h`** from `cgen.rs`, with `EFE_EXPORT` macros.
+- [ ] N1.4 **[S] `efescript pack`** reads the descriptor of a built library to write `[[provide]]` and the `.efapi` fragment; packs `native/<target>/…` with hashes.
 
-- [ ] N0.1 **[S] Capability descriptors.** Each namespace has a level (normal, dangerous, engine-only) and a prompt sentence, written by the engine.
-- [ ] N0.2 **[M] Inspect and load with grant.** `inspect_mod` and `load_mod(bytes, grant)`, with the hash binding and the subset check. Existing `set_mod_policy` remains for tests.
-- [ ] N0.3 **[S] Runtime guard.** Each host function carries its capability; efevm tests the granted bitset on every call; refusals are logged and counted. A host function without a capability is a registration error.
-- [ ] N0.4 **[S] Revoke.** `revoke_capability` reloads the mod without the capability.
-- [ ] N0.5 **Tests.** A mod with an undeclared import does not start; a changed file fails the grant hash check; a call without its capability is refused at run time and logged; a game that never calls the load API loads no mods.
-- _Done when_ a game with a prompt, written in the test as a function, can load a mod only after the test grants it, and the same mod is refused when the grant is missing one capability.
+### N2: in-process loader
+- [ ] N2.1 **[M] Loader.** Target selection, hash check, `dlopen`, describe and match, registration as `<mod>.<fn>`.
+- [ ] N2.2 **[M] Call trampolines.** Copy-in and copy-out buffers, budget cost, trap on panic result.
+- [ ] N2.3 **[S] Unload and reload** with the mod reload rules.
+- [ ] N2.4 **Tests and example.** A Rust and a C test library (like `examples/script_demo/wasm_mods`) called from efa on the interpreter and the JIT; wrong hash, missing function, type mismatch and panic each give a clear error; reload with an unchanged and a changed signature.
+- _Done when_ an efa script calls a Rust and a C native function by name, type-checked, and the same script runs unchanged against the wasm build of the same library.
 
-### N1: native libraries, in-process (built-in only)
+### N3: wasm fallback
+- [ ] N3.1 **[S] `wasm = …` fallback** chosen by target, grant (`WasmOnly`) or a missing native build; the web build always uses it.
+- [ ] N3.2 **Tests.** The N2.4 example passes in all three modes with identical results.
 
-- [ ] N1.1 **[S] Manifest `[native]`.** Parsing and validation of libraries, hashes and symbols.
-- [ ] N1.2 **[M] `efevm-native` module.** `native.call` with the symbol allowlist, argument copying, and the single unsafe module.
-- [ ] N1.3 **[S] Load check.** Hash of the library file must match; the library is loaded with `libloading` only after the grant.
-- [ ] N1.4 **Tests.** A wrong hash is refused; an unlisted symbol is refused; a call without `native:<lib>` is refused.
-- _Done when_ a built-in test library is called from a mod, and every refused call is logged.
+### N4: helper process (third-party libraries)
+- [ ] N4.1 **[M] Helper binary and pipe protocol.** Same descriptor and copy ABI, size and count limits per message.
+- [ ] N4.2 **[M] Supervisor.** Start with a minimal environment and no inherited handles, timeouts, kill, restart only after new consent; helper output goes to the engine log.
+- [ ] N4.3 **Tests.** A helper that crashes or hangs returns errors to the mod and the engine keeps running.
 
-### N2: out-of-process helpers (third-party)
-
-- [ ] N2.1 **[M] Helper protocol.** Fixed message schema with size and count limits, over a pipe.
-- [ ] N2.2 **[M] Supervisor.** Start, timeout, kill, restart-after-consent.
-- [ ] N2.3 **[S] Helper sandbox.** Minimal environment, no inherited handles, logs to the engine log.
-- [ ] N2.4 **Tests.** A helper that crashes returns errors to the mod and does not crash the engine; a helper that hangs is killed at the timeout.
-- _Done when_ a third-party test helper runs, crashes on request, and the engine keeps running.
-
-### N3: inspection UI for the editor and game developers
-
-- [ ] N3.1 **[S] Example prompt.** An example game shows an inspection and a consent dialog, using the two calls.
-- [ ] N3.2 **[S] Editor view.** The editor's Log panel shows refused calls per mod.
-- _Done when_ the example game refuses a mod by default and loads it after the player agrees.
+### N5: game-facing UI
+- [ ] N5.1 **[S] Example consent dialog** in an example game using `inspect_mod` / `load_mod`.
+- [ ] N5.2 **[S] Debug menu Scripts tab** shows native mods, their mode (in-process, helper, wasm), call counts and refused calls.
 
 ## Open questions
 
-- **Browser and wasm:** native libraries cannot run on the web. A mod with a native part loads its bytecode there, and the native part is skipped with a warning shown to the player.
-- **Signing:** hashes prove the file did not change; they do not prove who made it. Signing is a later decision.
-- **Trusted libraries in code:** allowing in-process trust for a library without a prompt. Recommendation: not allowed at all in the first version.
-- **Helper transport:** pipe or shared memory. Recommendation: pipe first; measure latency on real calls before deciding.
+- **Callbacks from native into the engine.** Not in v1: the library is pure computation and efa is the glue. If a library needs to call back (for example a physics SDK reporting contacts), the first answer is to return the data and let efa act on it; a restricted host vtable can come later.
+- **Threads.** A library that starts its own threads is allowed in-process but must not call into the engine; results are returned through provide calls.
+- **Signing.** Hashes prove the file is unchanged, not who built it. Signing is a later decision.
+- **Helper transport.** Pipe first; measure real call latency before considering shared memory.
