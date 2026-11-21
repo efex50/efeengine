@@ -8,6 +8,7 @@
 
 use efeengine_core::ecs::{SceneValue, entity_from_bits, entity_to_bits};
 use efeengine_core::engine::inspect::{EntityData, UNMANAGED_COMPONENTS};
+use efeengine_core::engine::prefab::{Prefab, PrefabInstance, valid_prefab_name};
 use efeengine_core::math::Affine2;
 use efeengine_core::prelude::*;
 
@@ -38,6 +39,16 @@ pub(crate) enum Cmd {
     /// A parent change that kept the world position: the parents by `EditorId` (`None`: a root)
     /// and the local `Transform` before and after.
     Reparent { id: u64, old_parent: Option<u64>, new_parent: Option<u64>, old: Transform, new: Transform },
+    /// A prefab placed (its entities in tree order): undo deletes the tree, redo spawns it again.
+    SpawnTree { data: Vec<EntityData>, refs: Vec<RefFix> },
+    /// A prefab link broken: the entities by `EditorId` with the link they had.
+    Unpack { links: Vec<(u64, PrefabInstance)> },
+    /// A prefab file written from entities (Save as prefab, Apply): the file before (`None`: there
+    /// was none) and after, the entities that were linked to it (in prefab order) and what the
+    /// write changed in the world (links and values of other instances) for undo.
+    PrefabWrite { name: String, before: Option<Prefab>, after: Prefab, source: Vec<u64>, tags: Vec<(u64, Option<PrefabInstance>)>, values: Vec<(u64, String, String, SceneValue)> },
+    /// The scene's `systems` list.
+    SceneSystems { old: Vec<String>, new: Vec<String> },
 }
 
 /// An entity reference of a saved copy that points outside the copied group, kept by the
@@ -95,6 +106,10 @@ impl Cmd {
             Cmd::Delete { .. } => "delete entity".to_string(),
             Cmd::Transform { .. } => "transform".to_string(),
             Cmd::Reparent { .. } => "reparent".to_string(),
+            Cmd::SpawnTree { .. } => "place prefab".to_string(),
+            Cmd::Unpack { .. } => "unpack prefab".to_string(),
+            Cmd::PrefabWrite { name, .. } => format!("write prefab {name}"),
+            Cmd::SceneSystems { .. } => "scene systems".to_string(),
         }
     }
 }
@@ -556,6 +571,42 @@ impl Cmd {
                 write_transform(e, ent, *old)?;
                 Ok(Some(ent))
             }
+            Cmd::SpawnTree { data, .. } => {
+                let ent = find(e, data.first().and_then(|d| d.editor_id()).ok_or("the entity has no id")?)?;
+                e.delete_entity_tree(ent);
+                Ok(None)
+            }
+            Cmd::Unpack { links } => {
+                let mut first = None;
+                for (id, link) in links {
+                    let ent = find(e, *id)?;
+                    e.set_prefab_instance(ent, Some(link.clone()));
+                    first.get_or_insert(ent);
+                }
+                Ok(first)
+            }
+            Cmd::PrefabWrite { name, before, source, tags, values, .. } => {
+                match before {
+                    Some(p) => {
+                        e.save_prefab(p).map_err(|x| x.to_string())?;
+                    }
+                    None => e.remove_prefab(name).map_err(|x| x.to_string())?,
+                }
+                for (id, comp, field, old) in values.iter().rev() {
+                    let ent = find(e, *id)?;
+                    e.set_component_field(ent, comp, field, old.clone()).map_err(|x| x.to_string())?;
+                }
+                for (id, tag) in tags.iter().rev() {
+                    let ent = find(e, *id)?;
+                    e.set_prefab_instance(ent, tag.clone());
+                }
+                super::files::scan(e);
+                source.first().map(|id| find(e, *id)).transpose()
+            }
+            Cmd::SceneSystems { old, .. } => {
+                apply_scene_systems(e, old.clone())?;
+                Ok(None)
+            }
         }
     }
 
@@ -603,7 +654,172 @@ impl Cmd {
                 write_transform(e, ent, *new)?;
                 Ok(Some(ent))
             }
+            Cmd::SpawnTree { data, refs } => {
+                let mut data = data.clone();
+                internalize(e, &mut data, refs);
+                let spawned = e.spawn_entity_data(&data).map_err(|x| x.to_string())?;
+                Ok(spawned.first().copied())
+            }
+            Cmd::Unpack { links } => {
+                let mut first = None;
+                for (id, _) in links {
+                    let ent = find(e, *id)?;
+                    e.set_prefab_instance(ent, None);
+                    first.get_or_insert(ent);
+                }
+                Ok(first)
+            }
+            Cmd::PrefabWrite { after, source, .. } => {
+                e.save_prefab(after).map_err(|x| x.to_string())?;
+                let ents: Vec<Entity> = source.iter().map(|id| find(e, *id)).collect::<Result<_, _>>()?;
+                e.apply_prefab_to_world(after, &ents).map_err(|x| x.to_string())?;
+                super::files::scan(e);
+                Ok(ents.first().copied())
+            }
+            Cmd::SceneSystems { new, .. } => {
+                apply_scene_systems(e, new.clone())?;
+                Ok(None)
+            }
         }
+    }
+}
+
+/// Sets the scene's `systems` list. Only while the game runs do the enabled flags follow (Edit and
+/// Pause keep the game frozen; the list is applied by the next scene load).
+fn apply_scene_systems(e: &mut Engine, entries: Vec<String>) -> Result<(), String> {
+    let live = e.resources().get::<super::EditorState>().is_some_and(|s| s.mode == super::EditorMode::Play);
+    e.set_scene_system_entries(entries, live).map_err(|x| x.to_string())
+}
+
+/// Lists (`on`) or unlists system `name` in the active scene; recorded for undo.
+pub(crate) fn toggle_scene_system(e: &mut Engine, name: String, on: bool) {
+    let old = e.scene_system_entries();
+    let new = e.scene_entries_with(&name, on);
+    if old == new {
+        return;
+    }
+    match apply_scene_systems(e, new.clone()) {
+        Ok(()) => record(e, Cmd::SceneSystems { old, new }),
+        Err(msg) => say(e, format!("systems: {msg}"), true),
+    }
+}
+
+/// Where a placed prefab goes when nothing says otherwise: the centre of the editor camera.
+fn placement_point(e: &Engine) -> Vec2 {
+    super::viewport::camera_center(e).unwrap_or(Vec2::ZERO)
+}
+
+/// Places a copy of prefab `name` at the centre of the editor camera and selects its root.
+pub(crate) fn place_prefab(e: &mut Engine, name: String) {
+    let spawned = match e.place_prefab(&name) {
+        Ok(s) => s,
+        Err(x) => return say(e, format!("place prefab: {x}"), true),
+    };
+    let Some(&root) = spawned.first() else { return };
+    let at = placement_point(e);
+    if let Ok(mut t) = e.world_mut().get::<&mut Transform>(root) {
+        t.position = at;
+    }
+    let data: Vec<EntityData> = spawned.iter().filter_map(|x| e.capture_entity_data(*x)).collect();
+    let refs = externalize(e, &data);
+    record(e, Cmd::SpawnTree { data, refs });
+    select(e, Some(root));
+    say(e, format!("Placed prefab {name}"), false);
+}
+
+/// Break the prefab link of the selected entity's whole instance.
+pub(crate) fn unpack_prefab(e: &mut Engine) {
+    let Some(sel) = selected(e) else { return };
+    let removed = e.unpack_prefab(sel);
+    if removed.is_empty() {
+        return say(e, "The selected entity is not part of a prefab instance", true);
+    }
+    let mut links = Vec::new();
+    for (ent, link) in removed {
+        if let Some(id) = e.ensure_editor_id(ent) {
+            links.push((id, link));
+        }
+    }
+    let n = links.len();
+    record(e, Cmd::Unpack { links });
+    say(e, format!("Unpacked {n} entities"), false);
+}
+
+/// Writes the prefab file for the tree under `root` and links the tree to it.
+fn write_prefab(e: &mut Engine, root: Entity, name: &str, keep_root_transform_of: Option<&Prefab>) {
+    if !super::files::in_edit(e) {
+        return say(e, "Prefab files can only be changed in Edit mode (press Stop first)", true);
+    }
+    if !valid_prefab_name(name) {
+        return say(e, format!("`{name}` is not a prefab name: use letters, digits, _ and -"), true);
+    }
+    let (mut prefab, tree) = match e.capture_prefab(root, name) {
+        Ok(x) => x,
+        Err(x) => return say(e, format!("prefab: {x}"), true),
+    };
+    // The root's own placement is no part of the prefab: a new prefab starts at the origin, an
+    // applied one keeps the transform it had.
+    if let Some(t) = prefab.entities[0].components.get_mut("Transform") {
+        match keep_root_transform_of.and_then(|p| p.entities.first()).and_then(|r| r.components.get("Transform")) {
+            Some(old) => *t = old.clone(),
+            None => {
+                t.insert("position".into(), SceneValue::List(vec![SceneValue::Float(0.0), SceneValue::Float(0.0)]));
+            }
+        }
+    }
+    let before = e.load_prefab(name).ok();
+    if let Err(x) = e.save_prefab(&prefab) {
+        return say(e, format!("prefab: {x}"), true);
+    }
+    for t in &tree {
+        e.ensure_editor_id(*t);
+    }
+    let rep = match e.apply_prefab_to_world(&prefab, &tree) {
+        Ok(r) => r,
+        Err(x) => return say(e, format!("prefab: {x}"), true),
+    };
+    let id_of = |e: &mut Engine, ent: Entity| e.ensure_editor_id(ent).unwrap_or(0);
+    let tags: Vec<(u64, Option<PrefabInstance>)> = rep.tags.iter().map(|(ent, t)| (id_of(e, *ent), t.clone())).collect();
+    let values: Vec<(u64, String, String, SceneValue)> = rep.values.iter().map(|(ent, c, f, v)| (id_of(e, *ent), c.clone(), f.clone(), v.clone())).collect();
+    let source: Vec<u64> = tree.iter().map(|t| id_of(e, *t)).collect();
+    let after = e.load_prefab(name).unwrap_or(prefab);
+    record(e, Cmd::PrefabWrite { name: name.to_string(), before, after, source, tags, values });
+    super::files::scan(e);
+    let note = if rep.stale > 0 { format!(" ({} other instances change when the scene is loaded again)", rep.stale) } else { String::new() };
+    say(e, format!("Saved prefab {name} ({} entities){note}", tree.len()), false);
+}
+
+/// Save As prefab: the selected entity and its children become prefab `name`, and the entity an
+/// instance of it.
+pub(crate) fn save_as_prefab(e: &mut Engine, name: String) {
+    let Some(sel) = selected(e) else { return say(e, "Select an entity first", true) };
+    let name = name.trim().to_string();
+    write_prefab(e, sel, &name, None);
+}
+
+/// Apply to prefab: write the selected instance back to its prefab file.
+pub(crate) fn apply_prefab(e: &mut Engine) {
+    let Some(sel) = selected(e) else { return };
+    let Some(root) = e.prefab_instance_root(sel) else {
+        return say(e, "The selected entity is not part of a complete prefab instance", true);
+    };
+    let Some(tag) = e.prefab_instance(root) else { return };
+    let base = tag.base().clone();
+    write_prefab(e, root, &tag.prefab().to_string(), Some(&base));
+}
+
+/// Revert: put the prefab's value back into an overridden field of the selected entity.
+pub(crate) fn revert_field(e: &mut Engine, key: FieldKey) {
+    let Some(sel) = selected(e) else { return };
+    let Some(base) = e.prefab_base_field(sel, &key.component, &key.field) else {
+        return say(e, format!("{}.{} has no prefab value", key.component, key.field), true);
+    };
+    match write_field(e, sel, &key.component, &key.field, base) {
+        Ok(()) => with_ui(e, |ui| {
+            ui.drafts.retain(|k, _| !(k.component == key.component && k.field == key.field));
+            ui.errors.retain(|k, _| !(k.component == key.component && k.field == key.field));
+        }),
+        Err(msg) => say(e, format!("{}.{}: {msg}", key.component, key.field), true),
     }
 }
 
@@ -626,7 +842,7 @@ fn step(e: &mut Engine, is_undo: bool) {
             }
             // Spawns and deletes move the selection to what came back (or nothing).
             match (&cmd, focus) {
-                (Cmd::Spawn { .. } | Cmd::Delete { .. }, f) => select(e, f),
+                (Cmd::Spawn { .. } | Cmd::Delete { .. } | Cmd::SpawnTree { .. }, f) => select(e, f),
                 (_, Some(ent)) => select(e, Some(ent)),
                 _ => {}
             }

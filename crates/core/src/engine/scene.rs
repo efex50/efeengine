@@ -38,6 +38,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::Engine;
 use super::resources::Resources;
 use super::schedule::Stage;
+use super::prefab::PrefabInstance;
 use super::types::TypeEntry;
 
 /// The scene file format this engine reads and writes.
@@ -111,7 +112,33 @@ pub struct SceneEntity {
     /// `components`): written by capture and snapshot, put back by load and restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// A placed prefab (docs/SCENES.md S5): the name of a prefab file. The entry then lists no
+    /// `components`; the entities of the prefab are spawned (root first, `id` and `name` here
+    /// are the root's), with `overrides` applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefab: Option<String>,
+    /// Field values of a placed prefab that differ from the prefab: `component -> field -> value`
+    /// for the prefab's root, `#<local id>:<component>` for another entity of the prefab. A
+    /// component the prefab lacks is added with these fields (the others zero). Only valid with
+    /// `prefab`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overrides: BTreeMap<String, BTreeMap<String, SceneValue>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub components: BTreeMap<String, BTreeMap<String, SceneValue>>,
+}
+
+/// One registered system, as [`Engine::registered_systems`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemInfo {
+    pub name: String,
+    /// The plugin that added it (`None`: added outside any plugin, a built-in).
+    pub owner: Option<String>,
+    pub stage: Stage,
+    pub enabled: bool,
+    /// Marked with `Engine::set_global_system`: scenes never toggle it.
+    pub global: bool,
+    /// Listed by the active scene (directly or through a `plugin:` entry).
+    pub in_scene: bool,
 }
 
 /// A scene file in memory.
@@ -155,10 +182,36 @@ pub enum SceneError {
     DuplicateId { scene: String, entity: usize, id: u64 },
     #[error("scene `{scene}`: entity {entity}: EditorId {id} is used by an earlier entity")]
     DuplicateEditorId { scene: String, entity: usize, id: u64 },
+    #[error("scene `{scene}`: entity {entity}: prefab `{prefab}`: {msg}")]
+    Prefab { scene: String, entity: usize, prefab: String, msg: String },
+    #[error("no scene is loaded")]
+    NoScene,
     #[error("snapshot is inconsistent: {0}")]
     Snapshot(String),
     #[error("scene file `{path}`: {msg}")]
     Io { path: String, msg: String },
+}
+
+impl SceneError {
+    /// The error with its entity index translated through `origin` (expanded index to the
+    /// index of the entry in the file): prefab placements expand to several entities.
+    pub(super) fn remap_entity(mut self, origin: &[usize]) -> SceneError {
+        match &mut self {
+            SceneError::UnknownComponent { entity, .. }
+            | SceneError::NotComponent { entity, .. }
+            | SceneError::Field { entity, .. }
+            | SceneError::Insert { entity, .. }
+            | SceneError::DuplicateId { entity, .. }
+            | SceneError::DuplicateEditorId { entity, .. }
+            | SceneError::Prefab { entity, .. } => {
+                if let Some(o) = origin.get(*entity) {
+                    *entity = *o;
+                }
+            }
+            _ => {}
+        }
+        self
+    }
 }
 
 fn f32_value(v: f32) -> f64 {
@@ -191,7 +244,7 @@ fn prim_size(p: Prim) -> usize {
     }
 }
 
-fn int_of(v: &SceneValue) -> Option<i128> {
+pub(super) fn int_of(v: &SceneValue) -> Option<i128> {
     match v {
         SceneValue::Int(i) => Some(i128::from(*i)),
         SceneValue::UInt(u) => Some(i128::from(*u)),
@@ -336,7 +389,7 @@ fn remap_entities(entry: &TypeEntry, bytes: &mut [u8], map: &BTreeMap<u64, u64>)
     }
 }
 
-fn renumber_entities(v: &mut SceneValue, map: &BTreeMap<u64, u64>) {
+pub(super) fn renumber_entities(v: &mut SceneValue, map: &BTreeMap<u64, u64>) {
     match v {
         SceneValue::UInt(u) => {
             if let Some(n) = map.get(u) {
@@ -397,6 +450,11 @@ pub struct SceneUnloaded {
 pub(crate) struct ActiveScene {
     id: u32,
     name: Arc<str>,
+    /// The entries of the scene's `systems` list as written (`plugin:` entries not expanded).
+    listed: Vec<String>,
+    /// The scene's `requires`.
+    requires: Vec<String>,
+    /// `listed` expanded to system names.
     systems: BTreeSet<String>,
 }
 
@@ -439,6 +497,10 @@ pub(crate) struct SceneState {
     next_id: u32,
     global: BTreeSet<String>,
     event_seq: u64,
+    /// Where prefab files live (`Engine::set_prefab_dir`).
+    pub(super) prefab_dir: Option<std::path::PathBuf>,
+    /// Prefabs registered in memory (`Engine::register_prefab`); they win over files.
+    pub(super) prefabs: BTreeMap<String, Arc<super::prefab::Prefab>>,
 }
 
 impl SceneState {
@@ -510,9 +572,9 @@ impl Engine {
     /// they have now and are not remapped on load; snapshots keep references intact.
     pub fn capture_scene(&self, name: &str) -> Scene {
         let mut ents: Vec<(String, SceneEntity)> = Vec::new();
-        for e in self.captured_entities(true) {
-            let ent = self.capture_entity(e);
-            if !ent.components.is_empty() {
+        let items: Vec<(Entity, SceneEntity)> = self.captured_entities(true).into_iter().map(|e| (e, self.capture_entity(e))).collect();
+        for (_, ent) in self.collapse_prefab_instances(items) {
+            if !ent.components.is_empty() || ent.prefab.is_some() {
                 let key = ron::to_string(&ent).unwrap_or_default();
                 ents.push((key, ent));
             }
@@ -544,18 +606,29 @@ impl Engine {
             })
             .collect();
         list.sort_by_key(|(id, bits, _)| (*id, *bits));
-        let mut entities = Vec::with_capacity(list.len());
+        let mut items = Vec::with_capacity(list.len());
         for (_, bits, e) in list {
             let mut ent = self.capture_entity(e);
             if !ent.components.is_empty() {
                 ent.id = Some(bits);
-                entities.push(ent);
+                items.push((e, ent));
             }
         }
+        // Complete prefab instances become one `prefab:` entry each (members and overrides).
+        let mut entities: Vec<SceneEntity> = self.collapse_prefab_instances(items).into_iter().map(|(_, e)| e).collect();
         // Ids 1, 2, ... in file order instead of raw entity bits; entity fields follow.
         let map: BTreeMap<u64, u64> = entities.iter().enumerate().filter_map(|(i, e)| e.id.map(|b| (b, i as u64 + 1))).collect();
         for ent in &mut entities {
             ent.id = ent.id.and_then(|b| map.get(&b).copied());
+            for (key, fields) in &mut ent.overrides {
+                let cname = key.split_once(':').filter(|_| key.starts_with('#')).map_or(key.as_str(), |(_, c)| c);
+                let Some(entry) = self.types().by_name(cname) else { continue };
+                for f in entry.desc().fields.iter().filter(|f| f.ty == Prim::Entity) {
+                    if let Some(v) = fields.get_mut(&f.name) {
+                        renumber_entities(v, &map);
+                    }
+                }
+            }
             for (cname, fields) in &mut ent.components {
                 let Some(entry) = self.types().by_name(cname) else { continue };
                 for f in entry.desc().fields.iter().filter(|f| f.ty == Prim::Entity) {
@@ -565,7 +638,8 @@ impl Engine {
                 }
             }
         }
-        Scene { format: SCENE_FORMAT, name: name.to_string(), requires: Vec::new(), systems: Vec::new(), entities }
+        let (requires, systems) = self.scene_state.active.as_ref().map(|a| (a.requires.clone(), a.listed.clone())).unwrap_or_default();
+        Scene { format: SCENE_FORMAT, name: name.to_string(), requires, systems, entities }
     }
 
     /// [`capture_world_scene`](Self::capture_world_scene) written to a file, named after the
@@ -604,7 +678,11 @@ impl Engine {
     /// Check `scene` against the engine without changing anything: format, `requires`,
     /// `systems` and every component and field.
     pub fn validate_scene(&self, scene: &Scene) -> Result<(), SceneError> {
-        self.decode_scene(scene).map(|_| ())
+        let expanded = self.expand_prefabs(scene)?;
+        match &expanded {
+            Some(x) => self.decode_scene(&x.scene).map(|_| ()).map_err(|e| e.remap_entity(&x.origin)),
+            None => self.decode_scene(scene).map(|_| ()),
+        }
     }
 
     /// Mark `name` as a global system: scene switches never enable or disable it, even when a
@@ -641,6 +719,11 @@ impl Engine {
         self.state.world.spawn((owned,))
     }
 
+    /// The [`SceneOwned`] tag of the active scene (`None` without one).
+    pub(super) fn active_owner(&self) -> Option<SceneOwned> {
+        self.scene_state.active.as_ref().map(|a| SceneOwned { id: a.id, name: a.name.clone() })
+    }
+
     /// `true` if `e` is alive and tagged [`SceneOwned`].
     pub fn is_scene_owned(&self, e: Entity) -> bool {
         self.state.world.get::<&SceneOwned>(e).is_ok()
@@ -673,12 +756,17 @@ impl Engine {
     /// [`Commands::load_scene`](super::commands::Commands::load_scene) instead: it runs this
     /// at the end of the stage. Returns the spawned entities in file order.
     pub fn load_scene(&mut self, scene: &Scene) -> Result<Vec<Entity>, SceneError> {
-        let (decoded, systems) = self.decode_scene_full(scene)?;
+        let expanded = self.expand_prefabs(scene)?;
+        let (plain, tags, origin): (&Scene, &[Option<PrefabInstance>], &[usize]) = match &expanded {
+            Some(x) => (&x.scene, &x.tags, &x.origin),
+            None => (scene, &[], &[]),
+        };
+        let (decoded, systems) = self.decode_scene_full(plain).map_err(|e| e.remap_entity(origin))?;
         let id = self.scene_state.next_id + 1;
         let name: Arc<str> = Arc::from(scene.name.as_str());
         let owned = SceneOwned { id, name: name.clone() };
         let owners = vec![Some(owned); decoded.len()];
-        let spawned = self.spawn_decoded(scene, &decoded, &owners)?;
+        let spawned = self.spawn_decoded(plain, &decoded, &owners, tags).map_err(|e| e.remap_entity(origin))?;
         self.scene_state.next_id = id;
         // The point of no return: the new scene is fully built.
         let old = self.scene_state.active.take();
@@ -697,7 +785,7 @@ impl Engine {
                 self.schedule.set_enabled(n, true);
             }
         }
-        self.scene_state.active = Some(ActiveScene { id, name, systems });
+        self.scene_state.active = Some(ActiveScene { id, name, listed: scene.systems.clone(), requires: scene.requires.clone(), systems });
         let seq = self.scene_state.next_seq();
         self.events.get_mut::<SceneLoaded>().send(SceneLoaded { seq, id, name: scene.name.clone() });
         Ok(spawned)
@@ -730,7 +818,7 @@ impl Engine {
     /// field holding the `id` of a scene entity can be remapped to the entity it became (the
     /// stable-id scheme of snapshots, docs/SCENES.md S3.2). Values that are no scene id are left
     /// as they are (they may name an entity outside the scene).
-    pub(super) fn spawn_decoded(&mut self, scene: &Scene, decoded: &[DecodedEntity], owners: &[Option<SceneOwned>]) -> Result<Vec<Entity>, SceneError> {
+    pub(super) fn spawn_decoded(&mut self, scene: &Scene, decoded: &[DecodedEntity], owners: &[Option<SceneOwned>], tags: &[Option<PrefabInstance>]) -> Result<Vec<Entity>, SceneError> {
         let mut spawned = Vec::with_capacity(decoded.len());
         let mut map: BTreeMap<u64, u64> = BTreeMap::new();
         for (i, owner) in owners.iter().enumerate() {
@@ -744,6 +832,9 @@ impl Engine {
             }
             if let Some(n) = &scene.entities[i].name {
                 let _ = self.state.world.insert_one(e, super::components::Name::new(n.clone()));
+            }
+            if let Some(Some(t)) = tags.get(i) {
+                let _ = self.state.world.insert_one(e, t.clone());
             }
         }
         for (i, comps) in decoded.iter().enumerate() {
@@ -766,6 +857,119 @@ impl Engine {
         Ok(spawned)
     }
 
+    /// The system names of `entries` (`plugin:<name>` expanded); an unknown system or plugin is
+    /// an error naming `scene`.
+    fn expand_systems(&self, scene: &str, entries: &[String]) -> Result<BTreeSet<String>, SceneError> {
+        let mut systems = BTreeSet::new();
+        for s in entries {
+            match s.strip_prefix("plugin:") {
+                Some(p) if self.has_plugin(p) => {
+                    for st in ALL_STAGES {
+                        for (n, o) in self.system_names(st).into_iter().zip(self.system_owners(st)) {
+                            if o == Some(p) {
+                                systems.insert(n.to_string());
+                            }
+                        }
+                    }
+                }
+                Some(_) => return Err(SceneError::System { scene: scene.to_string(), name: s.clone() }),
+                None if ALL_STAGES.iter().any(|st| self.system_names(*st).contains(&s.as_str())) => {
+                    systems.insert(s.clone());
+                }
+                None => return Err(SceneError::System { scene: scene.to_string(), name: s.clone() }),
+            }
+        }
+        Ok(systems)
+    }
+
+    /// Every registered system once (the first stage it is in), in stage order: name, owning plugin,
+    /// whether it is enabled, global ([`set_global_system`](Self::set_global_system)) and listed by
+    /// the active scene. For tools that edit a scene's system list.
+    pub fn registered_systems(&self) -> Vec<SystemInfo> {
+        let listed = self.scene_state.active.as_ref().map(|a| &a.systems);
+        let mut out: Vec<SystemInfo> = Vec::new();
+        for st in ALL_STAGES {
+            let owners = self.system_owners(st);
+            for ((name, enabled), owner) in self.system_states(st).into_iter().zip(owners) {
+                if out.iter().any(|s| s.name == name) {
+                    continue;
+                }
+                out.push(SystemInfo {
+                    name: name.to_string(),
+                    owner: owner.map(str::to_string),
+                    stage: st,
+                    enabled,
+                    global: self.scene_state.global.contains(name),
+                    in_scene: listed.is_some_and(|l| l.contains(name)),
+                });
+            }
+        }
+        out
+    }
+
+    /// The active scene's `systems` list as written (`plugin:<name>` entries not expanded), in
+    /// file order; empty without a scene.
+    pub fn scene_system_entries(&self) -> Vec<String> {
+        self.scene_state.active.as_ref().map(|a| a.listed.clone()).unwrap_or_default()
+    }
+
+    /// The list [`scene_system_entries`](Self::scene_system_entries) would become with system
+    /// `name` listed (`on`) or not. Listing adds the name; unlisting removes it, and a name that
+    /// is only covered by a `plugin:<p>` entry replaces that entry by the plugin's other systems.
+    pub fn scene_entries_with(&self, name: &str, on: bool) -> Vec<String> {
+        let mut entries = self.scene_system_entries();
+        let covered = self.scene_state.active.as_ref().is_some_and(|a| a.systems.contains(name));
+        if on {
+            if !covered {
+                entries.push(name.to_string());
+            }
+            return entries;
+        }
+        entries.retain(|x| x != name);
+        let owner = self.registered_systems().into_iter().find(|s| s.name == name).and_then(|s| s.owner);
+        if let Some(p) = owner {
+            let tag = format!("plugin:{p}");
+            if let Some(at) = entries.iter().position(|x| *x == tag) {
+                entries.remove(at);
+                let others: Vec<String> = self.registered_systems().into_iter().filter(|s| s.owner.as_deref() == Some(p.as_str()) && s.name != name).map(|s| s.name).collect();
+                for (i, o) in others.into_iter().enumerate() {
+                    entries.insert(at + i, o);
+                }
+            }
+        }
+        entries
+    }
+
+    /// Replace the active scene's `systems` list (what [`capture_world_scene`](Self::capture_world_scene)
+    /// and a save write). Every entry is checked first (an unknown system or plugin is an error, nothing changes).
+    /// With `apply_flags` the enabled flags follow like a scene switch: systems that were listed
+    /// and no longer are get disabled, newly listed ones enabled (global systems never); without
+    /// it only the list changes (an editor that froze the game keeps it frozen). Errors without
+    /// an active scene.
+    pub fn set_scene_system_entries(&mut self, entries: Vec<String>, apply_flags: bool) -> Result<(), SceneError> {
+        let Some(active) = &self.scene_state.active else { return Err(SceneError::NoScene) };
+        let scene = active.name.to_string();
+        let old = active.systems.clone();
+        let systems = self.expand_systems(&scene, &entries)?;
+        if apply_flags {
+            for n in old.difference(&systems) {
+                if !self.scene_state.global.contains(n) {
+                    self.schedule.set_enabled(n, false);
+                }
+            }
+            for n in systems.difference(&old) {
+                if !self.scene_state.global.contains(n) {
+                    self.schedule.set_enabled(n, true);
+                }
+            }
+        }
+        if let Some(a) = &mut self.scene_state.active {
+            a.listed = entries;
+            a.systems = systems;
+        }
+        Ok(())
+    }
+
     fn decode_scene(&self, scene: &Scene) -> Result<Vec<DecodedEntity>, SceneError> {
         self.decode_scene_full(scene).map(|(d, _)| d)
     }
@@ -782,25 +986,7 @@ impl Engine {
                 return Err(SceneError::Requires { scene: name.clone(), name: r.clone() });
             }
         }
-        let mut systems = BTreeSet::new();
-        for s in &scene.systems {
-            match s.strip_prefix("plugin:") {
-                Some(p) if self.has_plugin(p) => {
-                    for st in ALL_STAGES {
-                        for (n, o) in self.system_names(st).into_iter().zip(self.system_owners(st)) {
-                            if o == Some(p) {
-                                systems.insert(n.to_string());
-                            }
-                        }
-                    }
-                }
-                Some(_) => return Err(SceneError::System { scene: name.clone(), name: s.clone() }),
-                None if ALL_STAGES.iter().any(|st| self.system_names(*st).contains(&s.as_str())) => {
-                    systems.insert(s.clone());
-                }
-                None => return Err(SceneError::System { scene: name.clone(), name: s.clone() }),
-            }
-        }
+        let systems = self.expand_systems(name, &scene.systems)?;
         let mut out = Vec::with_capacity(scene.entities.len());
         let mut ids = BTreeSet::new();
         let mut editor_ids = BTreeSet::new();
@@ -844,6 +1030,10 @@ pub struct RestartSnapshot {
     pub scene: Scene,
     /// Per entity of `scene`: the `(scene id, scene name)` of its `SceneOwned`, if any.
     pub owners: Vec<Option<(u32, String)>>,
+    /// Per entity of `scene`: the prefab it belongs to and its local id in it, if linked (the
+    /// prefab is read again when the snapshot is restored).
+    #[serde(default)]
+    pub prefabs: Vec<Option<(String, u64)>>,
 }
 
 impl RestartSnapshot {
@@ -891,7 +1081,9 @@ pub struct Snapshot {
     /// Type names of resources that were present but not registered: restore leaves them as
     /// they are, so they are not part of the play-mode fidelity (docs/EDITOR.md).
     pub gaps: Vec<String>,
-    active: Option<(u32, String, BTreeSet<String>)>,
+    /// Per entity of `scene`: its prefab link, if it had one (in memory only).
+    pub(crate) tags: Vec<Option<PrefabInstance>>,
+    active: Option<ActiveScene>,
     next_id: u32,
 }
 
@@ -953,13 +1145,15 @@ impl Engine {
         list.sort_by_key(|(bits, _)| *bits);
         let mut entities = Vec::with_capacity(list.len());
         let mut owners = Vec::with_capacity(list.len());
+        let mut tags = Vec::with_capacity(list.len());
         for (bits, e) in list {
             let mut ent = self.capture_entity(e);
             ent.id = Some(bits);
             entities.push(ent);
             owners.push(self.world().get::<&SceneOwned>(e).ok().map(|o| (o.id, o.name.to_string())));
+            tags.push(self.world().get::<&PrefabInstance>(e).ok().map(|t| (*t).clone()));
         }
-        let active = self.scene_state.active.as_ref().map(|a| (a.id, a.name.to_string(), a.systems.clone()));
+        let active = self.scene_state.active.clone();
         let mut systems = Vec::new();
         for st in ALL_STAGES {
             for (n, en) in self.system_states(st) {
@@ -969,9 +1163,9 @@ impl Engine {
         Snapshot {
             scene: Scene {
                 format: SCENE_FORMAT,
-                name: active.as_ref().map(|a| a.1.clone()).unwrap_or_else(|| "<snapshot>".into()),
-                requires: Vec::new(),
-                systems: active.as_ref().map(|a| a.2.iter().cloned().collect()).unwrap_or_default(),
+                name: active.as_ref().map(|a| a.name.to_string()).unwrap_or_else(|| "<snapshot>".into()),
+                requires: active.as_ref().map(|a| a.requires.clone()).unwrap_or_default(),
+                systems: active.as_ref().map(|a| a.systems.iter().cloned().collect()).unwrap_or_default(),
                 entities,
             },
             owners,
@@ -979,6 +1173,7 @@ impl Engine {
             tick: self.change_tick().get(),
             resources: self.scene_state.snap_resources.iter().filter_map(|r| (r.capture)(&self.state.resources)).collect(),
             gaps: self.snapshot_gaps(),
+            tags,
             active,
             next_id: self.scene_state.next_id,
         }
@@ -1010,7 +1205,7 @@ impl Engine {
         for e in self.captured_entities(false) {
             let _ = self.state.world.despawn(e);
         }
-        self.spawn_decoded(&snap.scene, &decoded, &owners)?;
+        self.spawn_decoded(&snap.scene, &decoded, &owners, &snap.tags)?;
         for (st, n, en) in &snap.systems {
             self.schedule.set_enabled_in(*st, n, *en);
         }
@@ -1021,7 +1216,7 @@ impl Engine {
                 (r.put_back)(&mut self.state.resources, copy);
             }
         }
-        self.scene_state.active = snap.active.as_ref().map(|(id, name, systems)| ActiveScene { id: *id, name: Arc::from(name.as_str()), systems: systems.clone() });
+        self.scene_state.active = snap.active.clone();
         self.scene_state.next_id = self.scene_state.next_id.max(snap.next_id);
         Ok(())
     }
@@ -1032,7 +1227,8 @@ impl Engine {
     /// ownership, as a serialisable value.
     pub fn restart_snapshot(&self) -> RestartSnapshot {
         let snap = self.snapshot();
-        RestartSnapshot { scene: snap.scene, owners: snap.owners }
+        let prefabs = snap.tags.iter().map(|t| t.as_ref().map(|t| (t.prefab().to_string(), t.local()))).collect();
+        RestartSnapshot { scene: snap.scene, owners: snap.owners, prefabs }
     }
 
     /// Replace the world's captured entities with those of `snap`, tolerating a changed
@@ -1109,7 +1305,10 @@ impl Engine {
         for e in self.captured_entities(false) {
             let _ = self.state.world.despawn(e);
         }
-        let spawned = self.spawn_decoded(&snap.scene, &decoded, &owners)?;
+        let tags: Vec<Option<PrefabInstance>> = (0..owners.len())
+            .map(|i| snap.prefabs.get(i).cloned().flatten().and_then(|(name, local)| self.prefab_tag(&name, local)))
+            .collect();
+        let spawned = self.spawn_decoded(&snap.scene, &decoded, &owners, &tags)?;
         self.scene_state.next_id = next;
         Ok(RestoreReport { entities: spawned.len(), warnings })
     }

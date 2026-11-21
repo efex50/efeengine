@@ -48,7 +48,7 @@ fn load_replacing(e: &mut Engine, path: &Path) -> Result<usize, String> {
     e.load_scene(&scene).map(|v| v.len()).map_err(|x| x.to_string())
 }
 
-fn in_edit(e: &Engine) -> bool {
+pub(crate) fn in_edit(e: &Engine) -> bool {
     e.resources().get::<EditorState>().is_some_and(|s| s.mode == EditorMode::Edit)
 }
 
@@ -58,7 +58,11 @@ pub(crate) const NOT_IN_EDIT: &str = "Scene files can only be changed in Edit mo
 pub(crate) fn scan(e: &mut Engine) {
     let dir = e.resources().get::<EditorConfig>().map(|c| c.scenes_dir.clone()).unwrap_or_else(|| SCENES_DIR.to_string());
     let files = list_scenes(dir);
-    with_ui(e, |ui| ui.scene_files = files);
+    let prefabs = e.prefab_names();
+    with_ui(e, |ui| {
+        ui.scene_files = files;
+        ui.prefab_files = prefabs;
+    });
 }
 
 pub(crate) fn save(e: &mut Engine) {

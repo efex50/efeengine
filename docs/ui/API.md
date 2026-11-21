@@ -328,6 +328,12 @@ pub struct StateStyles { pub normal: Style, pub hovered: Style, pub pressed: Sty
   view rebuilds its layer every frame, like the Debug menu's own window) while the tab shows a note.
   Viewport input uses `InputState::game_input()` (a pointer over UI is not a viewport click) and
   `pointer_window()` / `mouse_pos_in(window)` to know which window the user is in.
+  Step 4 adds tabs inside the tab: the left column switches (`EditorUi::left`) between the
+  hierarchy, a Prefabs panel and a Systems panel (a list of checkboxes with a muted second line per
+  row), and the layout-B panel is sized from the window (`EditorView::window_size`, written by a
+  system only when the window is resized; `panel::panel_size`) instead of a fixed `Px` size. The toolkit has
+  no scroll offset or scroll-to-key API (a `scroll` only has `follow_end`), so the hierarchy is
+  not scrolled to a picked entity.
 - **iced:** the theme is resolved per node when the tree changes (`WidgetState` variants: normal, hovered, pressed, focused, disabled) and the widgets' status closures pick one (`button::Style` for Active / Hovered / Pressed / Disabled, `text_input` Active / Hovered / Focused / Disabled, checkbox and slider Active / Hovered(Dragged) / Disabled). iced buttons, checkboxes and sliders are not focusable, so only text inputs show `focused`. A checkbox's background / border style paints its box (not the whole row as on the web).
 - **Fallback:** resolved per node at sync time and cached until the node, its classes or the theme
   change.

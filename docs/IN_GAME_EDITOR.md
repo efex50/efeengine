@@ -1,6 +1,6 @@
 # In-game editor
 
-Status: steps 1 to 3 of 4 done (modes, hierarchy, editable inspector, entity actions, undo / redo, scene files, viewport: editor camera, picking, gizmos, reparenting, separate editor window). This replaces the separate editor
+Status: all 4 steps done (modes, hierarchy, editable inspector, entity actions, undo / redo, scene files, viewport: editor camera, picking, gizmos, reparenting, separate editor window, prefabs, the scene system list). This replaces the separate editor
 app: [`EDITOR.md`](EDITOR.md), `crates/editor` and `crates/editor-link` are deprecated (kept for their
 ideas; nothing new goes there).
 
@@ -27,6 +27,68 @@ native test bed; it loads `scenes/demo.ron` (a test keeps it equal to the demo w
 Load can be tried (F5, tab Editor). The Debug menu got one extension point for it: `DebugExtraTabs` (a tab = title + view
 function + wake check) and `DebugMsg::Ext` (tag + payload). The view still rebuilds only when
 something it shows changed; the editor writes its resources only on a real change.
+
+## Using the editor in your game
+
+1. **Feature flag.** Depend on `efeengine-ui` with the `editor` feature, in development builds only
+   (it is off by default); gate the plugin the same way:
+
+   ```toml
+   efeengine-ui = { path = "...", features = ["editor"] }
+   ```
+
+2. **Plugin setup.** After `UiPlugin` and `DebugMenuPlugin`, before the world is built (the editor
+   freezes the game on its first frame, so systems must exist by then):
+
+   ```rust
+   engine.add_plugin(UiPlugin::new())?;
+   engine.add_plugin(DebugMenuPlugin)?;
+   engine.add_plugin(
+       EditorPlugin::new()
+           .scenes_dir("scenes")      // the Load list (default "scenes")
+           .prefabs_dir("prefabs")    // prefab files (default "prefabs", or the dir the engine already has)
+           .separate_window(false),   // true: layout B, the editor camera and panels in their own window
+   )?;
+   ```
+
+   Then press F5 and open the "Editor" tab. Games that load their own scenes should call
+   `engine.set_prefab_dir(..)` themselves (scene files with `prefab:` entries need it even without the editor).
+
+3. **Make things editable.** The inspector shows what the type registry knows: Rust components
+   marked `#[script_component]` (and registered with `engine.register::<T>()`) and mod components.
+   Fields are numbers, bools and fixed arrays of them; a field marked `#[script(entity)]` is an
+   entity reference (shown read-only). Anything else (plain Rust components, `Name` aside) is
+   invisible to the editor, scenes and snapshots.
+
+4. **Survive Stop.** Play takes a snapshot; Stop restores it. Components are covered by (3).
+   Resources only if registered with `engine.register_snapshot_resource::<T>()` (`T: Clone`),
+   otherwise they keep their played value (`Engine::snapshot_gaps()` lists them).
+
+5. **`EditorId` and `Name`.** Every editable entity gets an `EditorId` (a registered component; the
+   editor adds one the first time an entity is edited, or you set them in code) and may have a
+   `Name` (the hierarchy label, kept in scene files). Entities spawned by scene files are owned by
+   the scene (a scene switch removes them); entities the game spawns with `world.spawn` are
+   listed too, saved too, but never removed by a switch.
+
+6. **Scenes, prefabs, systems.** Scene files live in the scenes directory (`Save As` writes
+   them, `Engine::load_scene_file` loads them); prefab files in the prefabs directory. A scene's
+   `systems` list is edited in the Systems panel. Mark engine-level systems that edit mode must
+   not freeze with `engine.set_global_system(name)`.
+
+Controls (also listed with their details below):
+
+| Where | Input | Action |
+|---|---|---|
+| Debug menu | F5 | open / close the window, tab "Editor" |
+| Toolbar | Edit, Play, Pause, Step, Stop | play states; Stop restores the world |
+| Anywhere in the tab | Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y | undo / redo (not while typing in a field) |
+| Viewport | middle drag, or Space + left drag | pan |
+| Viewport | wheel | zoom around the cursor |
+| Viewport | left click, drag a gizmo handle | select, move / rotate / scale (Ctrl snaps, Shift = uniform scale, Escape cancels) |
+| Viewport | W / E / R | Move / Rotate / Scale tool |
+| Viewport | F, Home | frame the selection, back to the start |
+| Viewport | G, H | grid on / off, handles of sprite-less entities on / off |
+| Left column | tabs Hierarchy, Prefabs, Systems | entity tree, prefab list, the scene's system list |
 
 ## Modes
 
@@ -84,6 +146,17 @@ entity. Entity ids change on Stop; the selection follows its `EditorId`. The edi
   (capture, snapshot, restore, `editable_entities`, `clear_editable_world`) skips it and the render extract
   prefers an `EditorOnly` camera over the game's cameras of its window. `DebugDraw2D::set_window(w)`
   sends the shapes pushed after it to window `w`'s frame (`WindowFrame::d2.draw`).
+- Prefabs (`engine::prefab`, `docs/SCENES.md` S5; see "Prefabs" below): `Prefab`, `PrefabInstance`,
+  `set_prefab_dir`, `register_prefab`, `find_prefab` / `load_prefab`, `save_prefab`, `remove_prefab`,
+  `prefab_names`, `place_prefab`, `capture_prefab`, `link_prefab`, `prefab_instance`,
+  `set_prefab_instance`, `prefab_instance_root`, `prefab_instance_entities`, `unpack_prefab`,
+  `prefab_overrides`, `prefab_base_field`, `apply_prefab_to_world`. `EntityRow::prefab` names the
+  prefab an instance root belongs to; `EntityData` keeps the link, so undo of a delete restores it.
+- Scene systems (`engine::scene`): `registered_systems() -> Vec<SystemInfo>` (name, owner plugin, stage,
+  enabled, global, listed), `scene_system_entries()` (the list as written, `plugin:` entries
+  unexpanded), `scene_entries_with(name, on)`, `set_scene_system_entries(entries, apply_flags)`.
+  The active scene now remembers its `systems` and `requires` as written, so `capture_world_scene`
+  (Save) writes them back (before, a saved scene lost its `systems` list).
 - `capture_world_scene(name)` / `save_world_scene(path)` (in `scene.rs`): every editable entity
   (not only scene-owned ones), with ids 1, 2, ... in `EditorId` order and entity fields renumbered
   to them, so `Parent` survives a file round trip.
@@ -97,9 +170,10 @@ entity. Entity ids change on Stop; the selection follows its `EditorId`. The edi
   Save As, Load, New, a path field (Enter loads), the `*.ron` files of `scenes/` (first four, a
   click loads) and a message line for the last result or error (also logged). The name is the
   file's stem, else `Engine::current_scene`.
+- Left column: three tabs, Hierarchy | Prefabs | Systems (`EditorUi::left`).
 - Hierarchy: filter box, New / Duplicate / Delete / Unparent, tree indented by `Parent`, click selects
   (`EditorSelection`, shared with viewport picking; the row of a picked entity is highlighted, the
-  list is not scrolled to it).
+  list is not scrolled to it). The root of a prefab instance shows `[PrefabName]`.
 - Inspector: a Name input, a "Parent" row (Change opens the list of possible parents plus "none"), "Add component" (a list of what the entity lacks), then per component a
   header with an `x` button and `field: widget` rows.
 - World: the grid, a handle (small circle) for every entity without a sprite, a rectangle around the
@@ -176,7 +250,7 @@ Layouts.
 |---|---|---|
 | Main window | editor camera in Edit and Paused, game camera in Play | game camera in every mode |
 | Editor camera | active only outside Play | active all the time, in its own window |
-| Editor panels | Editor tab of the Debug menu (its own window, F5) | the panel view `editor_panel` in the editor window (top left, 540x660); the Debug menu keeps its own window and its Editor tab shows only a note and Attach |
+| Editor panels | Editor tab of the Debug menu (its own window, F5) | the panel view `editor_panel` in the editor window (top left, sized to the window, see step 4); the Debug menu keeps its own window and its Editor tab shows only a note and Attach |
 | Gizmos, grid, outline | main window | editor window |
 | Close the editor window | n/a | same as Attach |
 
@@ -234,10 +308,71 @@ Tests: `crates/ui/src/editor/tests_viewport.rs` (the camera math is also unit-te
 through the real sprite renderer offscreen (`cargo test ... screenshots_of_the_viewport --
 --nocapture` prints PNGs base64 encoded).
 
-Known limitations (step 3). The hierarchy is not scrolled to a picked entity. Handles are drawn for
-every entity without a sprite, which is noisy in worlds with many logic entities. The editor camera
-does not rotate. 3D cameras are not handled (the viewport is 2D). Layout B places the panels
-at a fixed size (540x660) in the top left corner.
+Known limitations (step 3). The editor camera does not rotate. 3D cameras are not handled (the viewport
+is 2D). (The hierarchy scrolling, the handle noise and the fixed layout-B panel size were taken up in step 4.)
+
+## Prefabs and the scene system list (step 4)
+
+Prefabs. A prefab is a file `<prefabs dir>/<Name>.ron` (default `prefabs/`, `EditorPlugin::prefabs_dir`
+or `Engine::set_prefab_dir`): a tree of entities written with the scene codec; the first entity is
+the root, every entity has a local `id`, a child holds `Parent { entity: <parent's local id> }`. Names are
+letters, digits, `_` and `-`. A scene file places one with
+`(prefab: Some("Crate"), overrides: { "Transform": { "position": [3.0, 4.0] }, "#2:Sprite": { "color": [..] } })`:
+overrides are `component -> field -> value` of the root, and `#<local id>:<component>` for another
+entity of the prefab (a component the prefab lacks is added); `name` is the root's name; `id` is the
+root's scene id (so other entities can still refer to it). They are validated with the scene: an unknown prefab, component or field, or a value that does not fit gives
+an error naming the scene, the entry and the field, and nothing is loaded. A prefab file that is broken is an
+error naming the file. An override for a local id the prefab no longer has is ignored with a warning. The
+prefab is read again on every load, so editing it changes every placement and the overrides stay.
+Prefabs registered with `Engine::register_prefab` (no files, for tests and wasm builds) win over files.
+`Engine::load_scene` returns every spawned entity (a placement adds its whole tree, root first).
+
+Instances. Each entity placed from a prefab carries a `PrefabInstance` (the prefab as it was read, and the
+entity's local id). Overrides are not stored: they are the fields whose value differs from that
+prefab, so any edit (inspector, gizmo) counts as an override, and a field set back to the prefab's value is
+not one. Saving (`capture_world_scene`, so the editor's Save) writes a complete instance as one
+`prefab:` entry with only the differing fields (and the root's `EditorId`, so the hierarchy order is stable).
+An instance that is no longer complete is written as plain entities, losing the link: a member deleted, a
+component removed, a child renamed, an entity added under a member, or a non-root member referenced from
+outside the instance. Entity references inside an instance are compared in local ids; entity references are
+never listed as overrides. Snapshots (Play / Stop) and restart snapshots keep the links.
+
+Editor. The Prefabs tab: a name field with "Save as prefab" (Edit mode; the selected entity and its
+children become the prefab, the entity becomes an instance, a new prefab starts at the origin; saving over an existing name rewrites it), and the
+list of prefab files; a click places a copy at the centre of the editor camera and selects its root (placing at the cursor is not offered). The
+inspector of an instance shows `Prefab: <name> (root)`, "Apply to prefab" (Edit mode; writes the whole instance back, the root's own
+transform excepted; other instances in the open world follow: a field that still held the old prefab value takes the new one, overrides stay; instances whose entities or
+parents differ between the two versions are left until the scene is loaded again, and the message line counts them) and "Unpack" (breaks the link of
+the whole instance). A field that differs from its prefab has a `*` after its name and a "revert" button that
+writes the prefab's value back. Every one of these is an undo step: placing, Save as prefab / Apply (restores the old file, or removes a new one, and the links and values other instances took), Unpack, revert. Editing a
+prefab through the editor needs its file to be writable; a read-only file or a missing directory gives a message.
+
+Systems. The Systems tab lists every registered system (name; plugin; "global" or "engine" for the read-only
+ones: global systems, `propagate_transforms` / `render_extract` and `efeengine*` plugins) with a checkbox for
+the active scene's `systems` list. Checking adds the name; unchecking removes it, or, for a system that is only
+covered by a `plugin:<name>` entry, replaces that entry by the plugin's other systems. The list is written to
+the scene file on Save (with `requires`) and the scene is marked dirty. In Edit and Pause only the list
+changes (the game stays frozen; flags are applied the next time the scene is loaded); in Play the enabled flags follow at once, like a
+scene switch. Needs a loaded scene (the boxes are disabled without one: Save As of a New scene does not create one). Undoable.
+
+Viewport polish. H / the "Handles (H)" checkbox hide the handles of entities without a sprite (they are
+not drawn and not picked; a selected entity keeps its gizmo; `EditorView::handles`). In layout B the panel is 45% of the editor
+window (between 420 and 760 pixels, never wider than the window) and as tall as it, docked top left, and follows
+a resize of the window (`EditorView::window_size`, `panel::panel_size`).
+
+Tests: `crates/core/tests/prefab.rs` (12 tests: S5.4 two placements with different overrides, trees and `#id:`
+overrides, validation errors, propagation, save round trip, incomplete instances, apply, snapshots, registered
+prefabs, the scene system list), `crates/ui/src/editor/tests_step4.rs`, `examples/editor_demo/tests/editor.rs`
+(the demo's `prefabs/Crate.ron` and `scenes/demo.ron` are kept equal to what the code builds).
+Screenshots: `cargo test -p efeengine-ui --features editor,fallback --lib editor_step4_screenshot` with `EFE_DEBUG_MENU_SHOTS=<dir>`
+writes `step4_prefabs.png`, `step4_prefab_inspector.png`, `step4_systems.png`.
+
+Known limitations (step 4). The hierarchy is not scrolled to a picked entity: the UI toolkit has no scroll offset or
+scroll-to-key API (a `scroll` only has `follow_end`); adding one means a new `NodeKind::Scroll` field handled by the fallback, iced and web
+backends. Prefabs do not nest (a prefab file cannot contain a `prefab:` entry; a nested instance inside a captured tree is saved as plain
+entities), child names cannot be overridden (a renamed child unpacks on save), components the new prefab version adds are not added to
+live instances, and instances edited while the file changes on disk are compared with the version they were placed from. There is no "revert all". A scene
+created with New has no `systems` list until it is saved and loaded.
 
 ## Roadmap
 
@@ -260,7 +395,8 @@ Step 3: viewport (done)
 - [x] Undo for gizmo drags, reparenting (inspector picker, Unparent), child gizmos in world space
 - [x] Step-2 leftovers: names in the scene file (no `.names` sidecar), undo resolves references by `EditorId`, configurable scenes directory
 
-Step 4: scenes and prefabs
-- [ ] Prefabs (`docs/SCENES.md` S5): instantiate, edit, apply / revert overrides
-- [ ] Scene system list (S4.3): per-scene enabled systems, global systems
-- [ ] Hot reload of scripts and mods while in Edit
+Step 4: scenes and prefabs (done)
+- [x] Prefabs (`docs/SCENES.md` S5): instantiate, edit, apply / revert overrides, unpack
+- [x] Scene system list (S4.3): per-scene enabled systems, global systems read-only
+- [x] Polish: handles toggle, layout-B panel sized to its window, `editor_demo` prefab
+- [ ] Not done: scroll the hierarchy to a picked entity (needs a UI scroll-to API), hot reload of scripts and mods while in Edit

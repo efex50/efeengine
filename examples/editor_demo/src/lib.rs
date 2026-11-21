@@ -8,8 +8,15 @@
 //!
 //! The world comes from `scenes/demo.ron` when that file exists (so Save / Load round-trip), else
 //! from [`spawn_demo_world`]. The file is what `spawn_demo_world` saves (a test keeps them equal).
+//!
+//! Prefabs: `prefabs/Crate.ron` (a crate with a latch child) is placed twice by the scene, the
+//! second time with overrides (position, rotation, name, the latch's colour). The Editor tab's
+//! Prefabs panel places more, "Apply to prefab" writes the file, and the Systems panel edits the
+//! scene's `systems` list (`spin`). A test keeps `prefabs/Crate.ron` equal to [`crate_prefab`].
 use std::path::PathBuf;
 
+use efeengine_core::ecs::{Scene, SceneValue};
+use efeengine_core::engine::prefab::Prefab;
 use efeengine_core::prelude::*;
 use efeengine_ui::{DebugMenuPlugin, EditorPlugin, UiPlugin};
 
@@ -39,6 +46,22 @@ pub fn scene_path() -> Option<PathBuf> {
     [PathBuf::from(SCENE_FILE), PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SCENE_FILE)].into_iter().find(|p| p.exists())
 }
 
+/// The directory of the prefab files: `prefabs` in the current directory, else the one next to this crate.
+pub fn prefab_dir() -> PathBuf {
+    [PathBuf::from("prefabs"), PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prefabs")].into_iter().find(|p| p.exists()).unwrap_or_else(|| PathBuf::from("prefabs"))
+}
+
+/// The `Crate` prefab: a crate sprite with a small latch as its child (what `prefabs/Crate.ron` holds).
+pub fn crate_prefab(engine: &mut Engine) -> Prefab {
+    let root = engine.world_mut().spawn((Name::new("crate"), Transform::default(), sprite([0.7, 0.45, 0.25, 1.0], 64.0)));
+    engine.world_mut().spawn((Name::new("latch"), Transform::from_position(Vec2::new(0.0, 24.0)), Parent::new(root), sprite([0.95, 0.85, 0.3, 1.0], 14.0)));
+    let (prefab, tree) = engine.capture_prefab(root, "Crate").expect("the crate prefab");
+    for e in tree {
+        let _ = engine.world_mut().despawn(e);
+    }
+    prefab
+}
+
 /// The component and the game system, without a world.
 pub fn register_game(engine: &mut Engine) {
     engine.register::<Spin>().expect("Spin");
@@ -49,6 +72,7 @@ pub fn register_game(engine: &mut Engine) {
 /// when there is one (a broken file is reported and the world is spawned from code instead).
 pub fn build_game(engine: &mut Engine) {
     register_game(engine);
+    engine.set_prefab_dir(prefab_dir());
     if let Some(path) = scene_path() {
         match engine.load_scene_file(&path) {
             Ok(v) => return global_info(&format!("[editor_demo] {} entities from {}", v.len(), path.display())),
@@ -58,8 +82,13 @@ pub fn build_game(engine: &mut Engine) {
     spawn_demo_world(engine);
 }
 
-/// The demo entities, spawned from code (what `scenes/demo.ron` holds).
+/// The demo entities, spawned from code (what `scenes/demo.ron` holds). The `Crate` prefab is
+/// registered in memory (it equals `prefabs/Crate.ron`), the scene `demo` lists the `spin` system.
 pub fn spawn_demo_world(engine: &mut Engine) {
+    let prefab = crate_prefab(engine);
+    engine.register_prefab(prefab).expect("Crate");
+    let empty = Scene { format: 1, name: "demo".into(), requires: Vec::new(), systems: vec!["spin".into()], entities: Vec::new() };
+    engine.load_scene(&empty).expect("the demo scene");
     let world = engine.world_mut();
     world.spawn((Camera { zoom: 1.0, clear_color: [0.05, 0.06, 0.09, 1.0], ..Camera::orthographic_2d() }, Transform::default(), Name::new("camera"), EditorId { id: 1 }));
     let sun = world.spawn((
@@ -77,8 +106,22 @@ pub fn spawn_demo_world(engine: &mut Engine) {
         sprite([0.3, 0.6, 1.0, 1.0], 36.0),
         Spin { speed: -2.0 },
     ));
-    world.spawn((Name::new("crate"), EditorId { id: 4 }, Transform::from_position(Vec2::new(120.0, -60.0)), sprite([0.7, 0.45, 0.25, 1.0], 64.0)));
-    world.spawn((Name::new("gem"), EditorId { id: 5 }, Transform::from_position(Vec2::new(150.0, 70.0)), sprite([0.4, 1.0, 0.5, 1.0], 28.0), Spin { speed: 3.0 }));
+    // Two crates from the prefab: the first as it is (at a place), the second with overrides.
+    let a = engine.place_prefab("Crate").expect("crate");
+    engine.set_component_field(a[0], "Transform", "position", pair(120.0, -60.0)).expect("position");
+    let b = engine.place_prefab("Crate").expect("crate");
+    engine.set_component_field(b[0], "Transform", "position", pair(-150.0, -90.0)).expect("position");
+    engine.set_component_field(b[0], "Transform", "rotation", SceneValue::Float(0.4)).expect("rotation");
+    engine.set_entity_name(b[0], "crate 2");
+    engine
+        .set_component_field(b[1], "Sprite", "color", SceneValue::List([0.4, 0.8, 1.0, 1.0].into_iter().map(SceneValue::Float).collect()))
+        .expect("latch colour");
+    let gem_id = engine.next_editor_id();
+    engine.world_mut().spawn((Name::new("gem"), EditorId { id: gem_id }, Transform::from_position(Vec2::new(150.0, 70.0)), sprite([0.4, 1.0, 0.5, 1.0], 28.0), Spin { speed: 3.0 }));
+}
+
+fn pair(x: f32, y: f32) -> SceneValue {
+    SceneValue::List(vec![SceneValue::Float(x as f64), SceneValue::Float(y as f64)])
 }
 
 pub fn run() {
@@ -89,7 +132,7 @@ pub fn run() {
     let mut engine = Engine::new("editor demo").expect("engine");
     engine.add_plugin(UiPlugin::new()).expect("ui");
     engine.add_plugin(DebugMenuPlugin).expect("debug menu");
-    engine.add_plugin(EditorPlugin::new()).expect("editor");
+    engine.add_plugin(EditorPlugin::new().prefabs_dir(prefab_dir().to_string_lossy())).expect("editor");
     build_game(&mut engine);
     engine.set_renderer_2d(SpriteRenderer::new());
     global_info("[editor_demo] F5: Debug menu, tab Editor");

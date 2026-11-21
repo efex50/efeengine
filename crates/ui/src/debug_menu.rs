@@ -2006,6 +2006,66 @@ mod fallback_tests {
         }
     }
 
+    /// Step 4: the Prefabs panel (after Save as prefab and a placement), a placed instance with an
+    /// overridden field in the inspector, and the Systems panel of a scene.
+    #[cfg(feature = "editor")]
+    #[test]
+    fn editor_step4_screenshot() {
+        use crate::EditorPlugin;
+        let dir = std::env::temp_dir().join(format!("efe_editor_shots_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pdir = dir.to_string_lossy().replace('\\', "/");
+        let mut r = Rig::with(move |e| {
+            e.add_plugin(EditorPlugin::new().prefabs_dir(pdir.clone())).expect("editor");
+            e.add_system(Stage::Update, |_| {}).name("enemy_ai");
+            e.add_system(Stage::Update, |_| {}).name("coin_collect");
+            e.add_system(Stage::Update, |_| {}).name("hud");
+            e.add_system(Stage::PostUpdate, |_| {}).name("camera_follow");
+            e.set_global_system("hud").unwrap();
+            let scene = efeengine_core::ecs::Scene { format: 1, name: "level_1".into(), requires: vec![], systems: vec!["coin_collect".into(), "hud".into()], entities: vec![] };
+            e.load_scene(&scene).expect("scene");
+            let w = e.world_mut();
+            w.spawn((Camera::orthographic_2d(), Transform::default(), Name::new("camera"), EditorId { id: 1 }));
+            let crate_ = w.spawn((Name::new("crate"), EditorId { id: 2 }, Transform::from_position(Vec2::new(30.0, 10.0)), Sprite::default().with_size(Vec2::new(40.0, 40.0))));
+            w.spawn((Name::new("lid"), EditorId { id: 3 }, Transform::from_position(Vec2::new(0.0, 22.0)), Parent::new(crate_), Sprite::default().with_size(Vec2::new(40.0, 6.0))));
+        });
+        r.fb.borrow_mut().resize((640.0, 600.0), 1.0);
+        r.click("tab_editor");
+        r.frames(10);
+        let row = |r: &Rig, name: &str| {
+            let e = r.engine.world().query::<(Entity, &Name)>().iter().find(|(_, n)| n.0 == name).map(|(e, _)| e).unwrap();
+            format!("editor/hierarchy/list/e{}/row", efeengine_core::ecs::entity_to_bits(e))
+        };
+        let c = row(&r, "crate");
+        r.click(&c);
+        r.frames(8);
+        r.click("editor/left/prefabs");
+        r.frames(4);
+        r.click("editor/prefabs/name");
+        r.text("Crate");
+        r.frames(3);
+        r.click("editor/prefabs/actions/save");
+        r.frames(8);
+        r.click("editor/prefabs/list/p0");
+        r.frames(8);
+        let mut shooter = crate::fallback::offscreen::SdlShooter::new((640, 600)).ok();
+        let prefabs = shoot(&mut r, &mut shooter, "step4_prefabs");
+        // The placed copy, with its position moved: an overridden field.
+        let placed = r.engine.resources().get::<crate::editor::EditorSelection>().unwrap().entity.expect("the copy is selected");
+        r.engine.set_component_field(placed, "Transform", "position", efeengine_core::ecs::SceneValue::List(vec![efeengine_core::ecs::SceneValue::Float(75.0), efeengine_core::ecs::SceneValue::Float(-20.0)])).unwrap();
+        r.click("editor/left/hierarchy");
+        r.frames(10);
+        let inspector = shoot(&mut r, &mut shooter, "step4_prefab_inspector");
+        r.click("editor/left/systems");
+        r.frames(6);
+        let systems = shoot(&mut r, &mut shooter, "step4_systems");
+        if let (Some(a), Some(b), Some(c)) = (&prefabs, &inspector, &systems) {
+            assert_ne!(a.rgba, b.rgba);
+            assert_ne!(b.rgba, c.rgba);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn screenshots() {
         let mut shooter = None;

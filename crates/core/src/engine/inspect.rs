@@ -14,6 +14,7 @@ use hecs::Entity;
 
 use super::Engine;
 use super::components::{Camera, EditorId, Name, Parent, Sprite, Transform};
+use super::prefab::PrefabInstance;
 use super::scene::{Scene, SceneEntity, SceneError, SceneOwned, SceneValue, SCENE_FORMAT, decode_component, encode_component};
 use super::types::{TypeEntry, entity_to_bits};
 
@@ -38,6 +39,8 @@ pub struct InspectedComponent {
 pub struct EntityData {
     pub scene: SceneEntity,
     pub(crate) owner: Option<SceneOwned>,
+    /// The entity's prefab link, if it was placed from a prefab (kept when it is spawned again).
+    pub(crate) instance: Option<PrefabInstance>,
 }
 
 impl EntityData {
@@ -85,6 +88,8 @@ pub struct EntityRow {
     pub parent: Option<Entity>,
     /// Tagged `SceneOwned` by a scene (a scene switch despawns it).
     pub scene_owned: bool,
+    /// The prefab this entity is the root of an instance of.
+    pub prefab: Option<String>,
     /// Nesting level: 0 for roots.
     pub depth: usize,
     /// Direct children, in list order.
@@ -114,7 +119,16 @@ impl Engine {
             let parent = world.get::<&Parent>(e).ok().and_then(|p| p.entity());
             rows.insert(
                 entity_to_bits(e),
-                EntityRow { entity: e, name, editor_id, parent, scene_owned: self.is_scene_owned(e), depth: 0, children: Vec::new() },
+                EntityRow {
+                    entity: e,
+                    name,
+                    editor_id,
+                    parent,
+                    scene_owned: self.is_scene_owned(e),
+                    prefab: self.prefab_instance(e).filter(|t| t.is_root()).map(|t| t.prefab().to_string()),
+                    depth: 0,
+                    children: Vec::new(),
+                },
             );
         }
         // A parent that is not in the list (gone, or not a captured entity) makes the row a root.
@@ -366,7 +380,8 @@ impl Engine {
         let mut scene = self.capture_entity(e);
         scene.id = Some(entity_to_bits(e));
         let owner = self.world().get::<&SceneOwned>(e).ok().map(|o| (*o).clone());
-        Some(EntityData { scene, owner })
+        let instance = self.prefab_instance(e);
+        Some(EntityData { scene, owner, instance })
     }
 
     /// Spawn the entities `data` describes (references among them are remapped to the new
@@ -381,7 +396,8 @@ impl Engine {
             }
         }
         let owners: Vec<Option<SceneOwned>> = data.iter().map(|d| d.owner.clone()).collect();
-        self.spawn_decoded(&scene, &decoded, &owners)
+        let tags: Vec<Option<PrefabInstance>> = data.iter().map(|d| d.instance.clone()).collect();
+        self.spawn_decoded(&scene, &decoded, &owners, &tags)
     }
 
     /// Copy `e` (all its registry components, its `Name` with ` copy` added, its owner tag) as a

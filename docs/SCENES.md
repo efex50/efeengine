@@ -1,6 +1,6 @@
 # Scenes: design and roadmap
 
-Status: planned. Nothing in the engine implements scenes yet. Roadmap items: 3.7 (load/save), 7.3 (snapshot), 7.7 (seamless restart). This document is the detailed plan for them.
+Status: S1 to S3 and S5 are implemented, S4.1 and S4.3 are done in the in-game editor (`docs/IN_GAME_EDITOR.md`); S4.2 is open. Roadmap items: 3.7 (load/save), 7.3 (snapshot), 7.7 (seamless restart).
 
 ## What a scene is
 
@@ -35,6 +35,7 @@ Scene {
 ```
 
 - `SceneEntity::name` (optional) is the entity's `Name` component (Rust-only, so it is not one of `components`): capture, snapshot, restart snapshot and `save_world_scene` write it, load and restore put it back. Format stays 1 (the field is optional, older files load unchanged).
+- An entry may place a prefab instead of listing components: `(prefab: Some("Coin"), overrides: { "Transform": { "position": [3.0, 4.0] } })` (phase S5; `id` and `name` are the root's).
 - `systems` names systems, or whole plugins with `plugin:<name>`, which the engine already tags on every system.
 - Systems the **project** marks `global` (set in `project.toml`, for example the engine's transform propagation and the renderer) are never toggled by scenes.
 - A system that no scene lists and is not global is left as the game set it. This keeps existing code working.
@@ -102,16 +103,22 @@ _Done when_: a snapshot restores a running world exactly (roadmap 7.3).
 
 ### Phase S4: editor support (roadmap 7.5, 7.7)
 
-- [ ] S4.1 **Edit and play modes.** The editor takes a snapshot on play and restores it on stop, unless "keep changes" is chosen.
+- [x] S4.1 **Edit and play modes.** The editor takes a snapshot on play and restores it on stop, unless "keep changes" is chosen.
+  _Done: `crates/ui/src/editor/mode.rs` (`docs/IN_GAME_EDITOR.md`, "Modes")._
 - [ ] S4.2 **Seamless restart.** When a rebuild changes a component layout, the editor snapshots, restarts, and restores with fields mapped by name (roadmap 7.7).
-- [ ] S4.3 **Edit the system list.** The editor shows the systems a scene lists, with the registered names, and writes changes back to the scene file.
+- [x] S4.3 **Edit the system list.** The editor shows the systems a scene lists, with the registered names, and writes changes back to the scene file.
+  _Done: the editor's Systems panel; core `Engine::registered_systems`, `scene_system_entries`, `scene_entries_with`, `set_scene_system_entries` (`crates/core/src/engine/scene.rs`). `capture_world_scene` (what Save writes) now keeps the active scene's `systems` and `requires`. Global and engine systems are shown read-only. In Edit and Pause only the list changes (the game stays frozen); in Play the enabled flags follow at once. `tests/prefab.rs`, `crates/ui/src/editor/tests_step4.rs`._
 
 ### Phase S5: prefabs and reuse (after S4)
 
-- [ ] S5.1 **[S] Prefab files.** A prefab is a named bundle of components (for example `Coin`, `Player`), stored as a file with the same component codec as scenes (S1.2).
-- [ ] S5.2 **[S] Placing prefabs.** A scene entry can say `prefab: "Coin"` with optional field overrides. Overrides are checked against the registry at load time.
-- [ ] S5.3 **[S] Prefab edits propagate.** Changing a prefab file updates every scene entity placed from it on the next load. Overrides stay.
-- [ ] S5.4 **Test.** Placing one prefab twice with different overrides gives two entities with the right values (`tests/prefab.rs`).
+- [x] S5.1 **[S] Prefab files.** A prefab is a named bundle of components (for example `Coin`, `Player`), stored as a file with the same component codec as scenes (S1.2).
+  _Done: `crates/core/src/engine/prefab.rs`: `Prefab` (a tree of entities, the first is the root, local ids, `Parent` by local id), `<prefab dir>/<Name>.ron`, `Engine::set_prefab_dir`, `register_prefab` (in memory, wins over files), `load_prefab`, `save_prefab`, `prefab_names`._
+- [x] S5.2 **[S] Placing prefabs.** A scene entry can say `prefab: "Coin"` with optional field overrides. Overrides are checked against the registry at load time.
+  _Done: `SceneEntity::prefab` and `SceneEntity::overrides` (`component -> field -> value` of the root; `#<local id>:<component>` for another entity of the prefab). Validated with the scene (errors name the scene, the entry and the field); placed entities carry a `PrefabInstance`; saving (`capture_world_scene`, `capture_scene`) writes a complete instance back as one `prefab:` entry with only the fields that differ._
+- [x] S5.3 **[S] Prefab edits propagate.** Changing a prefab file updates every scene entity placed from it on the next load. Overrides stay.
+  _Done: the prefab is read again on every load; the editor's Apply to prefab also updates the other instances in the open world (`Engine::apply_prefab_to_world`)._
+- [x] S5.4 **Test.** Placing one prefab twice with different overrides gives two entities with the right values (`tests/prefab.rs`).
+  _Done: `crates/core/tests/prefab.rs` (`one_prefab_placed_twice_with_different_overrides` and 11 more)._
 
 _Done when_: a level places the same prefab ten times, and editing the prefab changes all ten after a reload.
 

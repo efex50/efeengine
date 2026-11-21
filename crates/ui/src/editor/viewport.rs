@@ -305,6 +305,7 @@ pub fn pick(e: &Engine, p: Vec2, px: f32) -> Option<Entity> {
     let world = e.world();
     let textures = e.resources().get::<Textures>();
     let rows = e.editable_entities();
+    let handles_on = e.resources().get::<EditorView>().is_none_or(|v| v.handles);
     let mut handle: Option<(f32, Entity)> = None;
     let mut sprite: Option<((i32, u32), Entity)> = None;
     for r in &rows {
@@ -325,7 +326,7 @@ pub fn pick(e: &Engine, p: Vec2, px: f32) -> Option<Entity> {
                     sprite = Some((key, ent));
                 }
             }
-        } else if world.get::<&Transform>(ent).is_ok() {
+        } else if handles_on && world.get::<&Transform>(ent).is_ok() {
             let d = world_affine_of(world, ent).translation.distance(p);
             if d <= HANDLE_PX * px && handle.is_none_or(|(b, _)| d < b) {
                 handle = Some((d, ent));
@@ -456,6 +457,11 @@ fn set_view(e: &mut Engine, f: impl FnOnce(&mut EditorView)) {
     }
 }
 
+/// The world position at the centre of the editor camera (`None` without the camera).
+pub(super) fn camera_center(e: &Engine) -> Option<Vec2> {
+    cam_state(e.resources()).map(|(p, _)| p)
+}
+
 /// Opens (`true`) or closes (`false`) the editor window (layout B / A). Layout B needs a second
 /// window: when it cannot be had (SDL mode, a custom renderer, a backend that cannot open one) a
 /// warning is logged, the message line says why and the layout stays A.
@@ -471,6 +477,7 @@ pub(crate) fn set_detached(e: &mut Engine, on: bool) {
         match e.create_window(WindowDesc::new("Editor").size(1100, 720)) {
             Ok(id) => {
                 set_view(e, |v| {
+                    v.window_size = (1100, 720);
                     v.detached = true;
                     v.window = Some(id.0);
                 });
@@ -486,6 +493,7 @@ pub(crate) fn set_detached(e: &mut Engine, on: bool) {
         e.close_window(WindowId(w));
         set_view(e, |v| {
             v.detached = false;
+            v.window_size = (0, 0);
             v.window = None;
         });
         if let Some(views) = e.resources_mut().get_mut::<crate::UiViews>() {
@@ -501,6 +509,14 @@ pub(crate) fn set_detached(e: &mut Engine, on: bool) {
 /// Closing the editor window attaches the panels again.
 pub(super) fn window_watch(cx: &mut Ctx) {
     let Some(w) = cx.resources.get::<EditorView>().and_then(|v| v.window) else { return };
+    // The panels are sized to the window: a resize changes the view (a write only on change).
+    if let Some(size) = cx.windows.get(WindowId(w)).map(|win| win.size) {
+        if cx.resources.get::<EditorView>().is_some_and(|v| v.window_size != size) {
+            if let Some(v) = cx.resources.get_mut::<EditorView>() {
+                v.window_size = size;
+            }
+        }
+    }
     let closed = cx.input.events().iter().any(|ev| ev.window.0 == w && matches!(ev.kind, InputEventKind::Window(WindowEvent::Closed)));
     // A window the engine no longer has (closed behind our back) counts too.
     if closed || cx.windows.get(WindowId(w)).is_none() {
@@ -564,6 +580,9 @@ pub(super) fn input(cx: &mut Ctx) {
         }
         if gi.just_pressed(KeyCode::G) {
             new_view.grid = !new_view.grid;
+        }
+        if gi.just_pressed(KeyCode::H) {
+            new_view.handles = !new_view.handles;
         }
         if gi.just_pressed(KeyCode::Home) {
             if let Some(rt) = cx.resources.get::<ViewportRt>() {
@@ -733,7 +752,7 @@ pub(super) fn overlay(cx: &mut Ctx) {
     let textures = cx.resources.get::<Textures>();
     let drag = cx.resources.get::<ViewportRt>().and_then(|r| r.drag);
     let mut handles: Vec<Vec2> = Vec::new();
-    if live.is_some() {
+    if live.is_some() && view.handles {
         for (e, t) in cx.world.query::<(Entity, &Transform)>().without::<&Sprite>().without::<&EditorOnly>().iter() {
             handles.push(if cx.world.get::<&Parent>(e).is_ok() { world_affine_of(cx.world, e).translation } else { t.position });
         }

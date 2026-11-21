@@ -7,10 +7,14 @@
 //! Keys under `debug_menu/editor`: `toolbar/{edit,play,pause,step,stop,undo,redo}`,
 //! `viewport/{tool_move,tool_rotate,tool_scale,grid,grid_step,detach}`,
 //! `options/{status,keep}`, `scene/{label,save,save_as,load,new,path,list/f<N>}`, `message`,
+//! `left/{hierarchy,prefabs,systems}` (the tabs of the left column),
 //! `hierarchy/filter`, `hierarchy/actions/{new,duplicate,delete,unparent}`, `hierarchy/list/e<bits>/row`
 //! (the clickable row), `inspector/entity/name` (the name input), `inspector/c<N>` (one per
 //! component: `bar/head`, `bar/remove`, and `f<M>` rows with `name` and `value`; `value` is a text
 //! input, a checkbox, a read-only text, or a row of text inputs `e<K>` for a list),
+//! `prefabs/{name,save,list/p<N>}` (the Prefabs panel: name input, Save as prefab, one place button per prefab),
+//! `systems/list/s<N>/{check,info}` (the Systems panel), `inspector/prefab/{info,apply,unpack}` and
+//! `inspector/c<N>/f<M>/revert` (an overridden field),
 //! `inspector/parent/row/{label,toggle}` and `inspector/parent/picker/{none,p<N>}` (the N-th candidate), `inspector/add/row/toggle` (under the name, so it stays in view) and `inspector/add/picker/a<N>` (the N-th of `EditorPanel::addable`).
 
 use std::collections::BTreeSet;
@@ -19,7 +23,7 @@ use efeengine_core::ecs::{SceneValue, entity_to_bits};
 use efeengine_core::engine::inspect::UNMANAGED_COMPONENTS;
 use efeengine_core::prelude::*;
 
-use super::{EditorMode, EditorMsg, EditorPanel, EditorRequest, EditorSelection, EditorState, EditorUi, EditorView, FieldKey, GizmoTool, TAB, ext};
+use super::{EditorMode, EditorMsg, EditorPanel, LeftTab, EditorRequest, EditorSelection, EditorState, EditorUi, EditorView, FieldKey, GizmoTool, TAB, ext};
 use crate::debug_menu::DebugMsg;
 use crate::style::Edges;
 use crate::view::*;
@@ -185,10 +189,13 @@ fn hierarchy(panel: &EditorPanel, selected: Option<Entity>) -> El<DebugMsg> {
     let mut list = column![].width(Size::Fill);
     for r in panel.rows.iter().filter(|r| shown.contains(&entity_to_bits(r.entity))) {
         let bits = entity_to_bits(r.entity);
-        let label = match r.editor_id {
+        let mut label = match r.editor_id {
             Some(id) => format!("{}  #{id}", r.name),
             None => r.name.clone(),
         };
+        if let Some(p) = &r.prefab {
+            label.push_str(&format!("  [{p}]"));
+        }
         let mut b = button(label).key("row").class("tab").text_align(TextAlign::Start).width(Size::Fill).on_click(ext(EditorMsg::Select(Some(r.entity))));
         if selected == Some(r.entity) {
             b = b.class("tab-active");
@@ -219,7 +226,117 @@ fn hierarchy(panel: &EditorPanel, selected: Option<Entity>) -> El<DebugMsg> {
         scroll().width(Size::Fill).height(Size::Fill).key("list").child(list),
     ]
     .key("hierarchy")
-    .width(Size::Px(210.0))
+    .width(Size::Fill)
+    .height(Size::Fill)
+}
+
+/// The width of the left column.
+const LEFT_W: f32 = 230.0;
+
+fn left_tab(label: &str, key: &str, tab: LeftTab, cur: LeftTab) -> El<DebugMsg> {
+    let b = button(label).key(key).class("tab").padding(Edges::symmetric(4.0, 5.0)).width(Size::Fill).on_click(ext(EditorMsg::Left(tab)));
+    if cur == tab { b.class("tab-active") } else { b }
+}
+
+/// The Prefabs panel: save the selection as a prefab, and the list of prefabs to place.
+fn prefabs_panel(state: &EditorState, panel: &EditorPanel, ui: &EditorUi, selected: Option<Entity>) -> El<DebugMsg> {
+    let edit = state.mode == EditorMode::Edit;
+    let name = ui.prefab_name.trim().to_string();
+    let can_save = edit && selected.is_some() && !name.is_empty();
+    let mut list = column![].width(Size::Fill);
+    for (i, f) in ui.prefab_files.iter().enumerate() {
+        list = list.child(
+            button(format!("Place {f}")).key(format!("p{i}")).class("tab").text_align(TextAlign::Start).width(Size::Fill).padding(Edges::symmetric(10.0, 4.0)).on_click(ext(EditorMsg::PlacePrefab(f.clone()))),
+        );
+    }
+    if ui.prefab_files.is_empty() {
+        list = list.child(text("(no prefabs yet)").class("muted").class("wire-row").key("empty"));
+    }
+    let hint = match (&panel.prefab, selected) {
+        (Some(p), Some(_)) => format!("The selection is part of prefab {}.", p.name),
+        (None, Some(_)) => "Saves the selection and its children.".to_string(),
+        _ => "Select an entity to save it as a prefab.".to_string(),
+    };
+    column![
+        text("Save selection as prefab").class("muted").class("wire-row").key("title"),
+        text_input(ui.prefab_name.clone())
+            .placeholder("PrefabName")
+            .class("wire-field")
+            .key("name")
+            .width(Size::Fill)
+            .on_input(|s| ext(EditorMsg::PrefabName(s)))
+            .on_submit(|_| ext(EditorMsg::SaveAsPrefab))
+            .on_focus(|on| ext(EditorMsg::Focus("@prefab".into(), on))),
+        row![small("Save as prefab", "save", EditorMsg::SaveAsPrefab, can_save)].key("actions").width(Size::Fill),
+        text(hint).class("muted").class("wire-row").key("hint").width(Size::Fill),
+        container().class("separator").key("sep"),
+        text("Prefabs (a click places a copy at the editor camera)").class("muted").class("wire-row").key("list_title").width(Size::Fill),
+        scroll().width(Size::Fill).height(Size::Fill).key("list").child(list),
+    ]
+    .key("prefabs")
+    .width(Size::Fill)
+    .height(Size::Fill)
+}
+
+/// Whether a system is the editor's or the engine's own (shown read-only, never listed by a scene).
+fn engine_system(s: &efeengine_core::engine::scene::SystemInfo) -> bool {
+    s.owner.as_deref().is_some_and(|o| o.starts_with("efeengine")) || matches!(s.name.as_str(), "propagate_transforms" | "render_extract")
+}
+
+/// The Systems panel: the active scene's `systems` list as checkboxes over every registered system.
+fn systems_panel(panel: &EditorPanel) -> El<DebugMsg> {
+    let has_scene = panel.scene.is_some();
+    let title = match &panel.scene {
+        Some(n) => format!("Systems of scene {n}"),
+        None => "No scene is loaded (Load a scene to edit its systems)".to_string(),
+    };
+    let mut rows: Vec<&efeengine_core::engine::scene::SystemInfo> = panel.systems.iter().collect();
+    rows.sort_by(|a, b| (engine_system(a) || a.global, a.owner.as_deref().unwrap_or(""), &a.name).cmp(&(engine_system(b) || b.global, b.owner.as_deref().unwrap_or(""), &b.name)));
+    let mut list = column![].width(Size::Fill);
+    for (i, s) in rows.iter().enumerate() {
+        let read_only = engine_system(s) || s.global;
+        let name = s.name.clone();
+        let tag = if s.global { "global (never toggled)" } else if engine_system(s) { "engine" } else { "" };
+        let owner = s.owner.as_deref().map(|o| format!("plugin {o}")).unwrap_or_else(|| "no plugin".to_string());
+        let info = if tag.is_empty() { owner } else { format!("{owner}, {tag}") };
+        list = list.child(
+            column![
+                checkbox(s.name.clone(), s.in_scene).key("check").enabled(has_scene && !read_only).on_toggle(move |on| ext(EditorMsg::SceneSystem(name.clone(), on))),
+                text(info).class("muted").key("info").width(Size::Fill),
+            ]
+            .key(format!("s{i}"))
+            .width(Size::Fill)
+            .class("wire-row"),
+        );
+    }
+    column![
+        text(title).class("muted").class("wire-row").key("title").width(Size::Fill),
+        scroll().width(Size::Fill).height(Size::Fill).key("list").child(list),
+    ]
+    .key("systems")
+    .width(Size::Fill)
+    .height(Size::Fill)
+}
+
+/// The left column: tabs and the panel they choose.
+fn left_column(state: &EditorState, panel: &EditorPanel, ui: &EditorUi, selected: Option<Entity>) -> El<DebugMsg> {
+    let body = match ui.left {
+        LeftTab::Hierarchy => hierarchy(panel, selected),
+        LeftTab::Prefabs => prefabs_panel(state, panel, ui, selected),
+        LeftTab::Systems => systems_panel(panel),
+    };
+    column![
+        row![
+            left_tab("Hierarchy", "hierarchy", LeftTab::Hierarchy, ui.left),
+            left_tab("Prefabs", "prefabs", LeftTab::Prefabs, ui.left),
+            left_tab("Systems", "systems", LeftTab::Systems, ui.left),
+        ]
+        .key("left")
+        .gap(2.0)
+        .width(Size::Fill),
+        body,
+    ]
+    .width(Size::Px(LEFT_W))
     .height(Size::Fill)
 }
 
@@ -309,7 +426,32 @@ fn parent_section(panel: &EditorPanel, ui: &EditorUi, sel: Entity) -> El<DebugMs
     sec
 }
 
-fn inspector(panel: &EditorPanel, ui: &EditorUi, selected: Option<Entity>) -> El<DebugMsg> {
+/// "Prefab: <name>" with Apply and Unpack. Overridden fields are marked in the component blocks.
+fn prefab_section(state: &EditorState, p: &super::PrefabInfo) -> El<DebugMsg> {
+    let role = if p.is_root { "root" } else if p.linked { "part of an instance" } else { "detached from its instance" };
+    column![
+        row![
+            text("Prefab").class("muted").key("label").width(Size::Px(90.0)),
+            text(format!("{} ({role})", p.name)).key("info").width(Size::Fill),
+        ]
+        .class("wire-row")
+        .align(Align::Center)
+        .key("row")
+        .width(Size::Fill),
+        row![
+            small("Apply to prefab", "apply", EditorMsg::ApplyPrefab, p.linked && state.mode == EditorMode::Edit),
+            small("Unpack", "unpack", EditorMsg::UnpackPrefab, true),
+        ]
+        .class("wire-row")
+        .key("actions")
+        .gap(4.0)
+        .width(Size::Fill),
+    ]
+    .key("prefab")
+    .width(Size::Fill)
+}
+
+fn inspector(state: &EditorState, panel: &EditorPanel, ui: &EditorUi, selected: Option<Entity>) -> El<DebugMsg> {
     let mut col = column![].width(Size::Fill);
     match (&panel.inspected, selected) {
         (Some(comps), Some(_)) => {
@@ -348,6 +490,9 @@ fn inspector(panel: &EditorPanel, ui: &EditorUi, selected: Option<Entity>) -> El
             col = col.child(add).child(container().class("separator").key("sep_add"));
             if let Some(sel) = selected {
                 col = col.child(parent_section(panel, ui, sel)).child(container().class("separator").key("sep_parent"));
+                if let Some(p) = &panel.prefab {
+                    col = col.child(prefab_section(state, p)).child(container().class("separator").key("sep_prefab"));
+                }
             }
             for (i, c) in comps.iter().enumerate() {
                 let title = if c.readonly { format!("{} (read-only)", c.name) } else { c.name.clone() };
@@ -358,13 +503,13 @@ fn inspector(panel: &EditorPanel, ui: &EditorUi, selected: Option<Entity>) -> El
                 let mut block = column![bar].width(Size::Fill);
                 for (j, (name, v)) in c.fields.iter().enumerate() {
                     let editable = !c.readonly && !c.entity_fields.contains(name) && !UNMANAGED_COMPONENTS.contains(&c.name.as_str());
-                    block = block.child(
-                        row![text(name.clone()).class("muted").key("name").width(Size::Px(90.0)), field_widget(ui, &c.name, name, v, editable)]
-                            .class("wire-row")
-                            .align(Align::Center)
-                            .key(format!("f{j}"))
-                            .width(Size::Fill),
-                    );
+                    let overridden = panel.overridden.iter().any(|(pc, pf)| *pc == c.name && pf == name);
+                    let label = if overridden { text(format!("{name} *")).bold(true).key("name").width(Size::Px(90.0)) } else { text(name.clone()).class("muted").key("name").width(Size::Px(90.0)) };
+                    let mut r = row![label, field_widget(ui, &c.name, name, v, editable)].class("wire-row").align(Align::Center).key(format!("f{j}")).width(Size::Fill);
+                    if overridden {
+                        r = r.child(small("revert", "revert", EditorMsg::RevertField(FieldKey::new(&c.name, name, 0)), true));
+                    }
+                    block = block.child(r);
                 }
                 col = col.child(block.key(format!("c{i}"))).child(container().class("separator").key(format!("sep{i}")));
             }
@@ -393,9 +538,23 @@ pub(super) fn view(cx: &ViewCx) -> El<DebugMsg> {
     body(cx)
 }
 
+/// The size of the panel in the editor window for a window of `window` pixels: 45% of the width
+/// (between 420 and 760, never wider than the window) and the whole height. Before the window's
+/// size is known (0) the old fixed 540x660.
+pub(super) fn panel_size(window: (u32, u32)) -> (f32, f32) {
+    let (w, h) = window;
+    if w == 0 || h == 0 {
+        return (540.0, 660.0);
+    }
+    ((w as f32 * 0.45).clamp(420.0, 760.0).min(w as f32), h as f32)
+}
+
 /// The panel view of the editor window (layout B).
 pub(super) fn window_view(cx: &ViewCx) -> El<DebugMsg> {
-    column![body(cx)].class("wire-panel").width(Size::Px(540.0)).height(Size::Px(660.0))
+    // Docked to the left of the editor window, as tall as the window and a share of its width,
+    // so the viewport stays visible beside it; a resize of the window resizes the panel.
+    let (pw, ph) = panel_size(cx.res::<EditorView>().map_or((0, 0), |v| v.window_size));
+    column![body(cx)].class("wire-panel").width(Size::Px(pw)).height(Size::Px(ph))
 }
 
 fn body(cx: &ViewCx) -> El<DebugMsg> {
@@ -413,6 +572,7 @@ fn body(cx: &ViewCx) -> El<DebugMsg> {
         toolbar(&state, &ui),
         row![
             text(status).class("muted").key("status").width(Size::Fill),
+            checkbox("Handles (H)", view.handles).key("handles").on_toggle(|on| ext(EditorMsg::Handles(on))),
             checkbox("Keep changes on Stop", state.keep_changes).key("keep").on_toggle(|on| ext(EditorMsg::KeepChanges(on))),
         ]
         .class("wire-row")
@@ -430,7 +590,7 @@ fn body(cx: &ViewCx) -> El<DebugMsg> {
         col = col.child(text("Save, Load and New are available in Edit mode (press Stop)").class("muted").class("wire-row").key("message").width(Size::Fill));
     }
     col.child(container().class("separator").key("sep_scene"))
-        .child(row![hierarchy(&panel, selected), container().class("separator-v").key("sep_mid"), inspector(&panel, &ui, selected)].width(Size::Fill).height(Size::Fill))
+        .child(row![left_column(&state, &panel, &ui, selected), container().class("separator-v").key("sep_mid"), inspector(&state, &panel, &ui, selected)].width(Size::Fill).height(Size::Fill))
         .key(TAB)
         .width(Size::Fill)
         .height(Size::Fill)

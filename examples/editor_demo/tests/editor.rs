@@ -37,6 +37,7 @@ fn the_demo_is_frozen_in_edit_runs_in_play_and_stop_puts_it_back() {
     t.step(30);
     assert_eq!(rotation(&t, "sun"), 0.0, "frozen in Edit");
     assert_eq!(t.engine.world().query::<&Spin>().iter().count(), 3);
+    assert_eq!(t.engine.scene_system_entries(), vec!["spin".to_string()], "the scene lists the spin system");
 
     press(&mut t, "play");
     t.step(30);
@@ -51,8 +52,10 @@ fn the_demo_is_frozen_in_edit_runs_in_play_and_stop_puts_it_back() {
     // the hierarchy lists the demo, planet under sun
     let rows = t.resource::<EditorPanel>().rows.clone();
     let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, ["camera", "sun", "planet", "crate", "gem"]);
+    assert_eq!(names, ["camera", "sun", "planet", "crate", "latch", "crate 2", "latch", "gem"]);
     assert_eq!(rows[2].depth, 1);
+    assert_eq!(rows[4].depth, 1, "the latch is a child of its crate");
+    assert_eq!(rows[3].prefab.as_deref(), Some("Crate"), "the hierarchy knows the instance roots");
     let _ = t.resource::<EditorSelection>();
 }
 
@@ -82,7 +85,7 @@ fn the_committed_scene_is_what_the_demo_world_saves() {
         std::fs::write(manifest("scenes/demo.ron"), &want).unwrap();
     }
     let have = std::fs::read_to_string(manifest("scenes/demo.ron")).unwrap_or_default();
-    assert_eq!(have, want, "scenes/demo.ron is out of date; EFE_BLESS_SCENES=1 rewrites it. Expected:\n{want}");
+    assert_eq!(have, want, "scenes/demo.ron is out of date; EFE_BLESS_SCENES=1 rewrites it. Expected:\n<<<DEMO\n{want}DEMO>>>");
     assert!(!manifest("scenes/demo.ron.names").exists(), "names live in the scene file now, the sidecar is gone");
 }
 
@@ -93,7 +96,9 @@ fn the_demo_starts_from_the_scene_file() {
     assert!(editor_demo::scene_path().is_some(), "the demo scene is committed");
     let rows = e.editable_entities();
     let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, ["camera", "sun", "planet", "crate", "gem"], "names come from the scene file");
+    assert_eq!(names, ["camera", "sun", "planet", "crate", "latch", "crate 2", "latch", "gem"], "names come from the scene file");
+    assert_eq!(e.scene_systems(), vec!["spin".to_string()]);
+    assert_eq!(e.prefab_names(), vec!["Crate".to_string()]);
     assert!(rows.iter().all(|r| r.scene_owned), "the file's entities belong to its scene");
     assert_eq!(rows[2].parent, Some(rows[1].entity), "planet is still under sun");
     assert_eq!(e.current_scene(), Some("demo"));
@@ -117,10 +122,44 @@ fn an_edited_demo_saves_through_the_editor_and_loads_back() {
     assert!(std::path::Path::new(&path).exists(), "saved");
 
     let mut other = bare();
+    other.set_prefab_dir(editor_demo::prefab_dir());
     let n = other.load_scene_file(&path).expect("load").len();
-    assert_eq!(n, 5);
+    assert_eq!(n, 8);
     let sun2 = other.entity_by_editor_id(2).unwrap();
     assert_eq!(other.world().get::<&Spin>(sun2).unwrap().speed, 2.5);
     assert_eq!(other.world().get::<&Name>(sun2).unwrap().0, "sun");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn the_committed_prefab_is_the_crate_prefab() {
+    let mut e = bare();
+    let want = editor_demo::crate_prefab(&mut e).to_ron();
+    if std::env::var_os("EFE_BLESS_SCENES").is_some() {
+        std::fs::create_dir_all(manifest("prefabs")).unwrap();
+        std::fs::write(manifest("prefabs/Crate.ron"), &want).unwrap();
+    }
+    let have = std::fs::read_to_string(manifest("prefabs/Crate.ron")).unwrap_or_default();
+    assert_eq!(have, want, "prefabs/Crate.ron is out of date; EFE_BLESS_SCENES=1 rewrites it. Expected:\n<<<CRATE\n{want}CRATE>>>");
+}
+
+#[test]
+fn the_scene_places_the_prefab_twice_and_the_second_has_overrides() {
+    let mut e = Engine::with_config(EngineConfig::headless()).expect("engine");
+    editor_demo::build_game(&mut e);
+    let find = |name: &str| e.world().query::<(Entity, &Name)>().iter().filter(|(_, n)| n.0 == name).map(|(en, _)| en).collect::<Vec<_>>();
+    let crate1 = find("crate")[0];
+    let crate2 = find("crate 2")[0];
+    assert_eq!(e.world().get::<&Transform>(crate1).unwrap().position, Vec2::new(120.0, -60.0));
+    assert!(e.prefab_instance(crate1).unwrap().is_root() && e.prefab_instance(crate2).unwrap().is_root());
+    assert_eq!(e.prefab_overrides(crate1), vec![("Transform".to_string(), "position".to_string())]);
+    let mut o2 = e.prefab_overrides(crate2);
+    o2.sort();
+    assert_eq!(o2, vec![("Transform".to_string(), "position".to_string()), ("Transform".to_string(), "rotation".to_string())]);
+    let latch2 = e.prefab_instance_entities(crate2)[1];
+    assert_eq!(e.prefab_overrides(latch2), vec![("Sprite".to_string(), "color".to_string())]);
+    // saving writes the references and the overrides only
+    let saved = e.capture_world_scene("demo");
+    assert_eq!(saved.entities.iter().filter(|x| x.prefab.as_deref() == Some("Crate")).count(), 2);
+    assert_eq!(saved.entities.len(), 6, "camera, sun, planet, gem and two placements");
 }

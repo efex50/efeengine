@@ -1,5 +1,5 @@
 //! The in-game scene editor (docs/IN_GAME_EDITOR.md): a plugin on top of the Debug menu. Steps 1
-//! to 3: play modes, the hierarchy and an editable inspector in an "Editor" tab, entity actions,
+//! to 4: play modes, the hierarchy and an editable inspector in an "Editor" tab, entity actions,
 //! undo / redo, scene files, and the viewport: an editor camera (pan, zoom, frame), picking,
 //! move / rotate / scale gizmos with snapping and a grid, reparenting, and an optional separate
 //! editor window. Build with feature `editor`; add it after `UiPlugin` and `DebugMenuPlugin`.
@@ -33,6 +33,11 @@
 //!   [`EditorPlugin::separate_window`]); middle drag or Space + left drag pans, the wheel zooms
 //!   at the cursor, F frames the selection, Home resets; a left click picks, W / E / R choose
 //!   the gizmo ([`GizmoTool`]), G toggles the grid, Ctrl snaps; a drag is one undo entry.
+//! - **Prefabs and scene systems** (step 4): the left column of the tab switches between the
+//!   Hierarchy, the Prefabs panel (save the selection as a prefab, place one at the editor
+//!   camera's centre) and the Systems panel (the active scene's `systems` list, with the
+//!   registered systems as checkboxes). A placed prefab shows its overridden fields in the
+//!   inspector with a revert button, "Apply to prefab" and "Unpack". See `docs/IN_GAME_EDITOR.md`.
 //! - **Selection** ([`EditorSelection`]): the entity and its `EditorId` (entity ids change on
 //!   Stop; the id is how the selection survives). A rectangle is drawn around a selected sprite
 //!   with `DebugDraw2D`.
@@ -50,6 +55,7 @@ pub use viewport::EditorCamera;
 
 use std::collections::BTreeMap;
 
+use efeengine_core::engine::scene::SystemInfo;
 use efeengine_core::engine::inspect::{EntityRow, InspectedComponent};
 use efeengine_core::prelude::*;
 
@@ -74,11 +80,18 @@ pub struct EditorPlugin {
     start: EditorMode,
     separate_window: bool,
     scenes_dir: String,
+    prefabs_dir: Option<String>,
 }
 
 impl EditorPlugin {
     pub fn new() -> Self {
-        EditorPlugin { start: EditorMode::Edit, separate_window: false, scenes_dir: SCENES_DIR.to_string() }
+        EditorPlugin { start: EditorMode::Edit, separate_window: false, scenes_dir: SCENES_DIR.to_string(), prefabs_dir: None }
+    }
+    /// The directory prefab files are read from and written to (`Engine::set_prefab_dir`). Without
+    /// this call the engine's directory is kept, or `prefabs` when none was set.
+    pub fn prefabs_dir(mut self, dir: impl Into<String>) -> Self {
+        self.prefabs_dir = Some(dir.into());
+        self
     }
     /// Layout B from the first frame: the editor camera and the editor panels get their own
     /// window (see [`EditorView`]). Without a second window (SDL mode, a custom renderer, a
@@ -141,6 +154,10 @@ pub struct EditorView {
     pub grid: bool,
     /// World units between grid lines, and the snap step while Ctrl is held.
     pub grid_step: f32,
+    /// Draw (and pick by) the small circle of every entity that has no sprite.
+    pub handles: bool,
+    /// The size of the editor window while `detached`: the panels are sized to it.
+    pub window_size: (u32, u32),
     /// Layout B: the editor camera and the panels are in their own window.
     pub detached: bool,
     /// That window (`Some` exactly while `detached`).
@@ -149,7 +166,7 @@ pub struct EditorView {
 
 impl Default for EditorView {
     fn default() -> Self {
-        EditorView { tool: GizmoTool::Move, grid: false, grid_step: 16.0, detached: false, window: None }
+        EditorView { tool: GizmoTool::Move, grid: false, grid_step: 16.0, handles: true, window_size: (0, 0), detached: false, window: None }
     }
 }
 
@@ -175,6 +192,32 @@ pub struct EditorPanel {
     pub addable: Vec<String>,
     /// The engine's current scene (`Engine::current_scene`).
     pub scene: Option<String>,
+    /// The selected entity's prefab link.
+    pub prefab: Option<PrefabInfo>,
+    /// `(component, field)` of the selected entity that differ from its prefab.
+    pub overridden: Vec<(String, String)>,
+    /// Every registered system (`Engine::registered_systems`), for the Systems panel.
+    pub systems: Vec<SystemInfo>,
+}
+
+/// A selected entity's place in a prefab instance.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrefabInfo {
+    /// The prefab's name.
+    pub name: String,
+    /// The entity is the root of its instance.
+    pub is_root: bool,
+    /// The instance is complete up to its root (`Engine::prefab_instance_root` found one): Apply works.
+    pub linked: bool,
+}
+
+/// What the left column of the tab shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LeftTab {
+    #[default]
+    Hierarchy,
+    Prefabs,
+    Systems,
 }
 
 /// One input of the inspector: component, field, element of a list field (0 for a scalar). The
@@ -236,6 +279,12 @@ pub struct EditorUi {
     pub redo_len: usize,
     /// The "Parent" list of the inspector is open.
     pub parent_picker: bool,
+    /// Which panel the left column shows.
+    pub left: LeftTab,
+    /// The prefabs a scene can place (`Engine::prefab_names`, read when the tab opens and after a save).
+    pub prefab_files: Vec<String>,
+    /// The name typed for "Save as prefab".
+    pub prefab_name: String,
 }
 
 /// What the tab's widgets send (inside `DebugMsg::Ext`) and what other code may send as an event.
@@ -281,6 +330,24 @@ pub enum EditorMsg {
     Reparent(Option<Entity>),
     /// Opens or closes the "Parent" list of the inspector.
     ParentPicker(bool),
+    /// Switch the left column.
+    Left(LeftTab),
+    /// Typing in the prefab name field.
+    PrefabName(String),
+    /// Save the selected entity and its children as a prefab named like the field says; the entity becomes an instance.
+    SaveAsPrefab,
+    /// Place a copy of this prefab at the centre of the editor camera.
+    PlacePrefab(String),
+    /// Write the selected instance back to its prefab file (other instances follow).
+    ApplyPrefab,
+    /// Break the selected entity's prefab link (the whole instance).
+    UnpackPrefab,
+    /// Put the prefab's value back into an overridden field.
+    RevertField(FieldKey),
+    /// List (`true`) or unlist a system in the active scene's `systems`.
+    SceneSystem(String, bool),
+    /// Show or hide the handles of entities without a sprite.
+    Handles(bool),
 }
 
 /// Seconds since the last refresh and a "refresh now" flag. Private: writing it never wakes the view.
@@ -434,6 +501,24 @@ fn editor_update(cx: &mut Ctx) {
                 cx.commands.engine_task(move |e| edit::reparent(e, p));
             }
             EditorMsg::ParentPicker(open) => ui.parent_picker = open,
+            EditorMsg::Left(t) => ui.left = t,
+            EditorMsg::PrefabName(t) => ui.prefab_name = t,
+            EditorMsg::SaveAsPrefab => {
+                let name = ui.prefab_name.clone();
+                cx.commands.engine_task(move |e| edit::save_as_prefab(e, name));
+            }
+            EditorMsg::PlacePrefab(name) => cx.commands.engine_task(move |e| edit::place_prefab(e, name)),
+            EditorMsg::ApplyPrefab => cx.commands.engine_task(edit::apply_prefab),
+            EditorMsg::UnpackPrefab => cx.commands.engine_task(edit::unpack_prefab),
+            EditorMsg::RevertField(key) => cx.commands.engine_task(move |e| edit::revert_field(e, key)),
+            EditorMsg::SceneSystem(name, on) => cx.commands.engine_task(move |e| edit::toggle_scene_system(e, name, on)),
+            EditorMsg::Handles(on) => {
+                if cx.resources.get::<EditorView>().is_some_and(|v| v.handles != on) {
+                    if let Some(v) = cx.resources.get_mut::<EditorView>() {
+                        v.handles = on;
+                    }
+                }
+            }
         }
     }
     if ui != before {
@@ -510,10 +595,15 @@ fn refresh_panel(e: &mut Engine) {
     let selected_name = entity.and_then(|x| e.world().get::<&Name>(x).ok().map(|n| n.0.clone()));
     let addable = entity.map(|x| e.addable_components(x).into_iter().filter(|n| n != "Parent").collect()).unwrap_or_default();
     let scene = e.current_scene().map(str::to_string);
+    let prefab = entity.and_then(|x| {
+        e.prefab_instance(x).map(|t| PrefabInfo { name: t.prefab().to_string(), is_root: t.is_root(), linked: e.prefab_instance_root(x).is_some() })
+    });
+    let overridden = entity.map(|x| e.prefab_overrides(x)).unwrap_or_default();
+    let systems = e.registered_systems();
     let stale = e
         .resources()
         .get::<EditorPanel>()
-        .is_none_or(|p| p.rows != rows || p.inspected != inspected || p.selected_name != selected_name || p.addable != addable || p.scene != scene);
+        .is_none_or(|p| p.rows != rows || p.inspected != inspected || p.selected_name != selected_name || p.addable != addable || p.scene != scene || p.prefab != prefab || p.overridden != overridden || p.systems != systems);
     if stale {
         if let Some(p) = e.resources_mut().get_mut::<EditorPanel>() {
             p.rows = rows;
@@ -521,6 +611,9 @@ fn refresh_panel(e: &mut Engine) {
             p.selected_name = selected_name;
             p.addable = addable;
             p.scene = scene;
+            p.prefab = prefab;
+            p.overridden = overridden;
+            p.systems = systems;
         }
     }
 }
@@ -561,6 +654,11 @@ impl Plugin for EditorPlugin {
         engine.insert_resource(EditorHistory::default());
         engine.insert_resource(EditorView::default());
         engine.insert_resource(EditorConfig { scenes_dir: self.scenes_dir.clone(), separate_window: self.separate_window });
+        match &self.prefabs_dir {
+            Some(d) => engine.set_prefab_dir(d),
+            None if engine.prefab_dir().is_none() => engine.set_prefab_dir(efeengine_core::engine::prefab::PREFABS_DIR),
+            None => {}
+        }
         engine.insert_resource(viewport::ViewportRt::default());
         viewport::spawn_camera(engine);
         engine.insert_resource(EditorClock { since: f32::INFINITY, force: false });
@@ -598,3 +696,5 @@ impl Plugin for EditorPlugin {
 mod tests;
 #[cfg(test)]
 mod tests_viewport;
+#[cfg(test)]
+mod tests_step4;

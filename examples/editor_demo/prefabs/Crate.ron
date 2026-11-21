@@ -1,0 +1,91 @@
+Prefab(
+    format: 1,
+    name: "Crate",
+    entities: [
+        SceneEntity(
+            id: Some(1),
+            name: Some("crate"),
+            components: {
+                "Sprite": {
+                    "auto_size": 0,
+                    "color": [
+                        0.7,
+                        0.45,
+                        0.25,
+                        1.0,
+                    ],
+                    "flip": 0,
+                    "layer": 0,
+                    "size": [
+                        64.0,
+                        64.0,
+                    ],
+                    "texture": 0,
+                    "uv_max": [
+                        1.0,
+                        1.0,
+                    ],
+                    "uv_min": [
+                        0.0,
+                        0.0,
+                    ],
+                },
+                "Transform": {
+                    "position": [
+                        0.0,
+                        0.0,
+                    ],
+                    "rotation": 0.0,
+                    "scale": [
+                        1.0,
+                        1.0,
+                    ],
+                },
+            },
+        ),
+        SceneEntity(
+            id: Some(2),
+            name: Some("latch"),
+            components: {
+                "Parent": {
+                    "entity": 1,
+                },
+                "Sprite": {
+                    "auto_size": 0,
+                    "color": [
+                        0.95,
+                        0.85,
+                        0.3,
+                        1.0,
+                    ],
+                    "flip": 0,
+                    "layer": 0,
+                    "size": [
+                        14.0,
+                        14.0,
+                    ],
+                    "texture": 0,
+                    "uv_max": [
+                        1.0,
+                        1.0,
+                    ],
+                    "uv_min": [
+                        0.0,
+                        0.0,
+                    ],
+                },
+                "Transform": {
+                    "position": [
+                        0.0,
+                        24.0,
+                    ],
+                    "rotation": 0.0,
+                    "scale": [
+                        1.0,
+                        1.0,
+                    ],
+                },
+            },
+        ),
+    ],
+)
