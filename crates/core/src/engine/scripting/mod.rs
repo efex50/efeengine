@@ -195,6 +195,18 @@ pub struct ModuleInfo {
     pub loaded: bool,
     pub version: u32,
     pub budget: u64,
+    /// Units left of the budget after the last run (`budget - budget_left` were used).
+    pub budget_left: u64,
+    /// The instance currently runs on the JIT (see [`Scripting::runs_on_jit`]).
+    pub jit: bool,
+    /// The module may use the JIT: always for game modules, the grant's `jit` for mods.
+    pub jit_allowed: bool,
+    /// Most memory pages (64 KiB each) the instance may have.
+    pub memory_pages: u32,
+    /// Id and version of the `.efmod` package behind it; `None` for game modules and bare mods.
+    pub package: Option<(String, String)>,
+    /// Number of dependencies the package declares (0 without a package).
+    pub dependencies: usize,
 }
 
 const HISTORY: usize = 256;
@@ -446,8 +458,26 @@ impl Scripting {
         self.modules
             .iter()
             .enumerate()
-            .map(|(i, m)| ModuleInfo { id: ModuleId(i as u32), name: m.name.clone(), loaded: m.loaded, version: m.version, budget: m.budget })
+            .map(|(i, m)| ModuleInfo {
+                id: ModuleId(i as u32),
+                name: m.name.clone(),
+                loaded: m.loaded,
+                version: m.version,
+                budget: m.budget,
+                budget_left: m.remaining,
+                jit: m.instance.as_ref().is_some_and(|i| i.has_backend()),
+                jit_allowed: m.jit,
+                memory_pages: m.memory_pages,
+                package: m.package.as_ref().map(|p| (p.manifest.id.clone(), p.manifest.version.to_string())),
+                dependencies: m.package.as_ref().map_or(0, |p| p.manifest.dependencies.len()),
+            })
             .collect()
+    }
+
+    /// Whether this build can run scripts on the JIT: the `jit` cargo feature is on and the
+    /// target is native (not wasm). `ScriptBackend::Jit` or `Auto` do nothing without it.
+    pub fn jit_available() -> bool {
+        cfg!(all(feature = "jit", not(target_arch = "wasm32")))
     }
 
     /// The id of the loaded module called `name`.

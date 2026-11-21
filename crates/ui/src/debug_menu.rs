@@ -14,6 +14,13 @@
 //!   is off nothing above the viewport moves (the ring buffer keeps its oldest lines meanwhile).
 //! - **Edits**: [`setting_row`]s. First: the FPS limit (digits only, Enter applies it through
 //!   `Commands::set_frame_rate`, 0 = unlimited; empty or invalid text falls back to the old value).
+//! - **Scripts**: the state of scripts and mods, read-only. A summary (configured backend, whether
+//!   the JIT is compiled in and how many modules run on it, the stats of the last run: lanes, write
+//!   conflicts, spawn overflows, dropped events), then one two-line row per module slot: name
+//!   (ellipsized like a log row), version, loaded / unloaded, JIT or interpreter, and a muted detail
+//!   line (game module or mod package `id@version`, dependency count, budget used / total, memory
+//!   page limit). The data is a [`ScriptsInfo`] snapshot copied from `engine.scripting()` by an
+//!   Update system at most twice a second, and only while the window shows this tab.
 //!
 //! Keyboard: while the FPS field has focus the UI captures the keyboard (`UiCapture`, the engine's
 //! input capture), so the game does not see the keys. Enter, Escape, a tab switch, a click
@@ -28,6 +35,7 @@ use std::sync::{Mutex, OnceLock};
 
 use efeengine_core::log::{LogMsg, Logger, NewDefaultLogger, set_global_logger};
 use efeengine_core::prelude::*;
+use efeengine_core::scripting::{ModuleInfo, ScriptBackend, ScriptStats, Scripting};
 
 use crate::view::*;
 use crate::{Align, Layer, Size, TextAlign, UiTree, UiViews, column, row};
@@ -128,6 +136,44 @@ pub enum DebugTab {
     Logs,
     /// Settings, one [`setting_row`] each.
     Edits,
+    /// Scripts, mods and the JIT (read-only, a [`ScriptsInfo`] snapshot).
+    Scripts,
+}
+
+/// How often (seconds) the Scripts tab reads the engine.
+const SCRIPTS_REFRESH: f32 = 0.5;
+
+/// A copy of the scripting state for the Scripts tab, refreshed at most twice a second while that
+/// tab is showing (so the view stays cheap). A resource.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScriptsInfo {
+    /// Whether the snapshot was ever filled (false: nothing read yet).
+    pub read: bool,
+    pub backend: ScriptBackend,
+    /// The `jit` feature is compiled in and the target supports it.
+    pub jit_available: bool,
+    pub stats: ScriptStats,
+    /// Every module slot, loaded or not, in id order.
+    pub modules: Vec<ModuleInfo>,
+    /// Seconds since the last refresh (infinite while the tab is not showing: the next show reads at once).
+    pub age: f32,
+}
+
+impl Default for ScriptsInfo {
+    fn default() -> Self {
+        ScriptsInfo { read: false, backend: ScriptBackend::default(), jit_available: false, stats: ScriptStats::default(), modules: Vec::new(), age: f32::INFINITY }
+    }
+}
+
+impl ScriptsInfo {
+    /// Loaded modules.
+    pub fn loaded(&self) -> usize {
+        self.modules.iter().filter(|m| m.loaded).count()
+    }
+    /// Loaded modules that run on the JIT.
+    pub fn on_jit(&self) -> usize {
+        self.modules.iter().filter(|m| m.loaded && m.jit).count()
+    }
 }
 
 /// What the widgets send.
@@ -289,6 +335,30 @@ fn menu_update(cx: &mut Ctx) {
     }
 }
 
+/// Copies the scripting state into [`ScriptsInfo`]: only while the window shows the Scripts tab, and
+/// at most every [`SCRIPTS_REFRESH`] seconds (at once when the tab was just opened).
+fn scripts_update(cx: &mut Ctx) {
+    let shown = cx.resources.get::<UiViews>().is_some_and(|v| v.is_enabled("debug_menu"))
+        && cx.resources.get::<DebugState>().is_some_and(|s| s.tab == DebugTab::Scripts);
+    let dt = cx.time.delta();
+    let Some(info) = cx.resources.get_mut::<ScriptsInfo>() else { return };
+    if !shown {
+        info.age = f32::INFINITY;
+        return;
+    }
+    info.age += dt;
+    if info.age < SCRIPTS_REFRESH {
+        return;
+    }
+    info.age = 0.0;
+    let sc = &*cx.scripting;
+    info.read = true;
+    info.backend = sc.backend();
+    info.jit_available = Scripting::jit_available();
+    info.stats = sc.stats();
+    info.modules = sc.modules();
+}
+
 fn fps_update(cx: &mut Ctx) {
     let dt = cx.time.delta();
     if dt <= 0.0 {
@@ -420,8 +490,73 @@ fn edits_tab(state: &DebugState) -> El<DebugMsg> {
     scroll().width(Size::Fill).height(Size::Fill).key("edits").child(column![setting_row("fps", "Fps limit here (0=infinite)", field)].width(Size::Fill))
 }
 
+fn backend_name(b: ScriptBackend) -> &'static str {
+    match b {
+        ScriptBackend::Interpreter => "Interpreter",
+        ScriptBackend::Jit => "Jit",
+        ScriptBackend::Auto => "Auto",
+    }
+}
+
+/// One module slot: a line with the name, version, state and engine, and a muted detail line.
+/// Both texts are read-only selectable inputs that ellipsize like a log row.
+fn module_row(m: &ModuleInfo) -> El<DebugMsg> {
+    let state = if m.loaded { "loaded" } else { "unloaded" };
+    let engine = match (m.loaded, m.jit, m.jit_allowed) {
+        (false, ..) => "-",
+        (true, true, _) => "JIT",
+        (true, false, _) => "interp",
+    };
+    let kind = match &m.package {
+        Some((id, ver)) => format!("mod {id}@{ver}, {} deps", m.dependencies),
+        None => "game module / bare mod".to_string(),
+    };
+    let jit_note = if m.jit_allowed { "" } else { ", no jit grant" };
+    let used = m.budget.saturating_sub(m.budget_left);
+    let detail = format!("{kind}{jit_note}, budget {used}/{}, {} pages max", m.budget, m.memory_pages);
+    let head = row![
+        selectable_text(m.name.clone(), false).ellipsize(true).key("name").class("wire-text").width(Size::Fill),
+        text(format!("v{}", m.version)).key("version").width(Size::Px(44.0)),
+        text(state).key("state").width(Size::Px(76.0)),
+        text(engine).key("jit").width(Size::Px(52.0)),
+    ]
+    .class("wire-row")
+    .align(Align::Center)
+    .width(Size::Fill)
+    .key("head");
+    let info = selectable_text(detail, false).ellipsize(true).key("detail").class("wire-text").class("muted").width(Size::Fill);
+    column![head, info, container().class("separator").key("sep")].width(Size::Fill)
+}
+
+fn scripts_tab(info: &ScriptsInfo) -> El<DebugMsg> {
+    let jit = if !info.jit_available {
+        "not compiled in".to_string()
+    } else {
+        format!("compiled in, {} of {} modules active", info.on_jit(), info.loaded())
+    };
+    let st = &info.stats;
+    let mut col = column![
+        setting_row("backend", "Backend", text(backend_name(info.backend))),
+        setting_row("jit", "JIT", text(jit)),
+        setting_row("lanes", "Lanes (last run)", text(st.lanes.to_string())),
+        setting_row("conflicts", "Write conflicts", text(st.write_conflicts.to_string())),
+        setting_row("overflows", "Spawn overflows", text(st.spawn_overflows.to_string())),
+        setting_row("dropped", "Dropped events", text(st.dropped_events.to_string())),
+        text(format!("Modules ({} loaded of {})", info.loaded(), info.modules.len())).key("modules_title").class("wire-row").bold(true),
+        container().class("separator").key("sep_modules"),
+    ]
+    .width(Size::Fill);
+    if info.modules.is_empty() {
+        col = col.child(text("(no scripts or mods loaded)").class("muted").class("wire-row").key("empty"));
+    }
+    for m in &info.modules {
+        col = col.child(module_row(m).key(&format!("m{}", m.id.0)));
+    }
+    scroll().width(Size::Fill).height(Size::Fill).key("scripts").child(col)
+}
+
 /// The whole window. `recent`: log lines, newest first.
-fn menu_view(fps: f32, state: &DebugState, recent: &[Line]) -> El<DebugMsg> {
+fn menu_view(fps: f32, state: &DebugState, recent: &[Line], scripts: &ScriptsInfo) -> El<DebugMsg> {
     let header = row![
         text(format!("{fps:.0} fps")).class("muted").key("fps").width(Size::Px(90.0)),
         text("Debug Menu").key("title").width(Size::Fill).text_align(TextAlign::Center).font_size(18.0).bold(true),
@@ -434,6 +569,8 @@ fn menu_view(fps: f32, state: &DebugState, recent: &[Line]) -> El<DebugMsg> {
         container().class("separator-v").key("tab_sep1"),
         tab_button("Edits", "tab_edits", DebugTab::Edits, state.tab),
         container().class("separator-v").key("tab_sep2"),
+        tab_button("Scripts", "tab_scripts", DebugTab::Scripts, state.tab),
+        container().class("separator-v").key("tab_sep3"),
         container().width(Size::Fill),
     ]
     .width(Size::Fill);
@@ -450,6 +587,7 @@ fn menu_view(fps: f32, state: &DebugState, recent: &[Line]) -> El<DebugMsg> {
         match state.tab {
             DebugTab::Logs => logs_tab(recent, state),
             DebugTab::Edits => edits_tab(state),
+            DebugTab::Scripts => scripts_tab(scripts),
         },
     ]
     .class("wire-panel")
@@ -462,7 +600,8 @@ fn view(cx: &ViewCx) -> El<DebugMsg> {
     let state = cx.res::<DebugState>().map(|s| s.clone()).unwrap_or_default();
     // oldest first, newest at the bottom, like a terminal
     let recent: Vec<Line> = lines().lock().map(|s| s.lines.iter().cloned().collect()).unwrap_or_default();
-    menu_view(fps, &state, &recent)
+    let scripts = cx.res::<ScriptsInfo>().map(|s| s.clone()).unwrap_or_default();
+    menu_view(fps, &state, &recent, &scripts)
 }
 
 /// Adds the Debug menu window. Add it after `UiPlugin`. Hidden until F5 is pressed.
@@ -474,10 +613,17 @@ impl Plugin for DebugMenuPlugin {
         // logger again.
         static LOGGER: std::sync::Once = std::sync::Once::new();
         LOGGER.call_once(|| set_global_logger(Box::new(Capture(Box::new(NewDefaultLogger())))));
+        // The engine has a logger of its own (`Engine::logger`): script and mod `engine.log`
+        // lines, the mod load report and `Message::Say` go through it, not through the global
+        // one. Wrap it too, once per engine.
+        let previous = std::mem::replace(&mut engine.logger, Box::new(NewDefaultLogger()));
+        engine.logger = Box::new(Capture(previous));
         // The FPS field starts at the engine's current cap (None or invalid = unlimited = 0).
         let limit = engine.config().max_fps.filter(|f| f.is_finite() && *f > 0.0).map_or(0, |f| f.round() as u32);
         engine.insert_resource(Fps::default());
         engine.insert_resource(DebugState::with_limit(limit));
+        engine.insert_resource(ScriptsInfo::default());
+        engine.add_system(Stage::Update, scripts_update).name("debug_menu_scripts");
         engine.add_system(Stage::Update, menu_update).order(order::EARLY).name("debug_menu_update");
         engine.add_system(Stage::Update, fps_update).name("debug_menu_fps");
         engine.insert_resource(DebugWindow::default());
@@ -508,6 +654,20 @@ fn serial() {
             }
         }
     });
+}
+
+/// A tiny module (one exported function), for the Scripts tab tests.
+#[cfg(test)]
+fn tiny_module() -> Vec<u8> {
+    use efeengine_core::efevm::ValType::I64;
+    use efeengine_core::efevm::{FuncType, FunctionBuilder, ModuleBuilder};
+    let mut mb = ModuleBuilder::new();
+    let mut f = FunctionBuilder::new(4);
+    f.const_i64(1, 7);
+    f.ret(1);
+    let id = mb.add_func(FuncType::new([], [I64]), f);
+    mb.export_func("entry", id);
+    mb.finish().unwrap().encode()
 }
 
 #[cfg(test)]
@@ -578,6 +738,126 @@ mod tests {
         t.click("debug_menu/tab_logs");
         t.step(2);
         assert!(t.ui().find("debug_menu/log_scroll").is_some() && t.ui().find(FPS_INPUT).is_none());
+    }
+
+    fn scripts(t: &mut UiTest) {
+        t.click("debug_menu/tab_scripts");
+        t.step(2);
+    }
+
+    #[test]
+    fn the_scripts_tab_builds_and_the_three_tabs_switch() {
+        let mut t = menu();
+        assert!(t.ui().find("debug_menu/tab_scripts").is_some());
+        scripts(&mut t);
+        assert_eq!(t.resource::<DebugState>().tab, DebugTab::Scripts);
+        let tab = t.id("debug_menu/tab_scripts");
+        assert!(t.ui().has_class(tab, "tab") && t.ui().has_class(tab, "tab-active"));
+        assert!(!t.ui().has_class(t.id("debug_menu/tab_logs"), "tab-active"));
+        assert!(!t.ui().has_class(t.id("debug_menu/tab_edits"), "tab-active"));
+        for k in ["scripts", "scripts/backend", "scripts/jit", "scripts/lanes", "scripts/conflicts", "scripts/overflows", "scripts/dropped", "scripts/modules_title"] {
+            assert!(t.ui().find(&format!("debug_menu/{k}")).is_some(), "Scripts tab has `{k}`");
+        }
+        assert!(t.ui().find("debug_menu/log_scroll").is_none() && t.ui().find("debug_menu/edits").is_none() && t.ui().find("debug_menu/copy_all").is_none());
+        assert!(t.ui().has_class(t.id("debug_menu/scripts/backend/sep"), "separator"));
+        let want = efeengine_core::scripting::ScriptBackend::default();
+        assert_eq!(t.text("debug_menu/scripts/backend/label"), "Backend");
+        assert_eq!(t.resource::<ScriptsInfo>().backend, want);
+        assert!(t.resource::<ScriptsInfo>().read);
+        // back to the others
+        edits(&mut t);
+        assert!(t.ui().find(FPS_INPUT).is_some() && t.ui().find("debug_menu/scripts").is_none());
+        t.click("debug_menu/tab_logs");
+        t.step(2);
+        assert!(t.ui().find("debug_menu/log_scroll").is_some());
+    }
+
+    #[test]
+    fn the_scripts_tab_is_empty_without_modules_and_lists_a_loaded_one() {
+        let mut t = menu();
+        scripts(&mut t);
+        assert_eq!(t.text("debug_menu/scripts/empty"), "(no scripts or mods loaded)");
+        assert!(t.ui().has_class(t.id("debug_menu/scripts/empty"), "muted"));
+
+        let id = t.engine.load_module("tiny_mod", &tiny_module()).expect("module");
+        // read within half a second, not at once (the snapshot is throttled)
+        t.step(40);
+        assert!(t.ui().find("debug_menu/scripts/empty").is_none());
+        let m = format!("debug_menu/scripts/m{}", id.0);
+        assert_eq!(t.text(&format!("{m}/head/name")), "tiny_mod");
+        assert_eq!(t.text(&format!("{m}/head/version")), "v1");
+        assert_eq!(t.text(&format!("{m}/head/state")), "loaded");
+        assert!(t.text(&format!("{m}/detail")).contains("game module"));
+        assert!(t.text(&format!("{m}/detail")).contains("pages max"));
+        assert!(t.ui().find(&format!("{m}/sep")).is_some());
+        assert!(t.text("debug_menu/scripts/modules_title").contains("1 loaded of 1"));
+        let jit = t.text(&format!("{m}/head/jit"));
+        assert!(jit == "JIT" || jit == "interp", "{jit}");
+        // The jit row follows the build.
+        let line = t.text("debug_menu/scripts/jit/label");
+        assert_eq!(line, "JIT");
+
+        // unloaded slots stay listed
+        t.engine.unload_module(id).expect("unload");
+        t.step(40);
+        assert_eq!(t.text(&format!("{m}/head/state")), "unloaded");
+        assert_eq!(t.text(&format!("{m}/head/jit")), "-");
+    }
+
+    #[test]
+    fn the_scripts_snapshot_is_throttled() {
+        let mut t = menu();
+        scripts(&mut t);
+        let a = t.engine.load_module("late_mod", &tiny_module()).expect("module");
+        // two frames (about 0.03 s) after the read: not refreshed yet
+        t.step(2);
+        assert!(t.ui().find(&format!("debug_menu/scripts/m{}", a.0)).is_none(), "not read every frame");
+        t.step(40);
+        assert!(t.ui().find(&format!("debug_menu/scripts/m{}", a.0)).is_some());
+        // not on the tab: the engine is not read at all
+        edits(&mut t);
+        let b = t.engine.load_module("unseen_mod", &tiny_module()).expect("module");
+        t.step(40);
+        assert!(t.resource::<ScriptsInfo>().modules.iter().all(|m| m.id != b));
+        scripts(&mut t);
+        assert!(t.resource::<ScriptsInfo>().modules.iter().any(|m| m.id == b), "opening the tab reads at once");
+    }
+
+    #[test]
+    fn a_long_module_name_is_ellipsized_like_a_log_row() {
+        let mut t = menu();
+        scripts(&mut t);
+        let long = format!("module_{}", "n".repeat(120));
+        let id = t.engine.load_module(&long, &tiny_module()).expect("module");
+        t.step(40);
+        let name = format!("debug_menu/scripts/m{}/head/name", id.0);
+        assert_eq!(t.text(&name), long);
+        assert!(matches!(t.ui().kind(t.id(&name)), Some(NodeKind::TextInput { read_only: true, ellipsize: true, .. })));
+        assert!(t.ui().has_class(t.id(&name), "wire-text"));
+        let detail = format!("debug_menu/scripts/m{}/detail", id.0);
+        assert!(matches!(t.ui().kind(t.id(&detail)), Some(NodeKind::TextInput { ellipsize: true, .. })));
+    }
+
+    #[test]
+    fn switching_through_the_scripts_tab_releases_the_focus() {
+        let mut t = menu();
+        edits(&mut t);
+        focus_fps(&mut t);
+        t.set_text(FPS_INPUT, "77");
+        t.step(1);
+        scripts(&mut t);
+        assert!(!t.capture().keyboard, "keys go back to the game");
+        assert_eq!(t.backend().focused(), None);
+        assert!(!t.resource::<DebugState>().fps_focused);
+        t.click("debug_menu/tab_logs");
+        t.step(2);
+        scripts(&mut t);
+        edits(&mut t);
+        assert_eq!(t.text(FPS_INPUT), "60", "the unsent edit did not survive");
+        focus_fps(&mut t);
+        scripts(&mut t);
+        assert!(!t.capture().keyboard);
+        assert_eq!(t.resource::<DebugState>().tab, DebugTab::Scripts);
     }
 
     #[test]
@@ -882,6 +1162,15 @@ mod tests {
         assert_eq!(ui.text_of(ui.find("v/vsync/label").unwrap()), Some("V-sync"));
         assert!(ui.find("v/vsync/toggle").is_some() && ui.find("v/vsync/sep").is_some());
         assert!(ui.has_class(ui.find("v/vsync/sep").unwrap(), "separator"));
+    }
+
+    #[test]
+    fn the_engine_logger_is_captured_too() {
+        // Script and mod `engine.log` lines go through `Engine::logger`, not the global logger.
+        let mut e = menu();
+        let msg = "logged through the engine logger";
+        e.engine.logger.info(msg);
+        assert_eq!(lines().lock().unwrap().lines.iter().filter(|l| l.text == msg).count(), 1);
     }
 
     #[test]
@@ -1268,8 +1557,17 @@ mod fallback_tests {
         let expanded = shoot(&mut r, &mut shooter, "logs_expanded");
         r.click("tab_edits");
         let edits = shoot(&mut r, &mut shooter, "edits");
-        if let (Some(a), Some(b), Some(c)) = (&collapsed, &expanded, &edits) {
-            for s in [a, b, c] {
+        // the Scripts tab: a few modules, one with a very long name
+        r.engine.load_module("coin_dash", &super::tiny_module()).expect("module");
+        r.engine.load_module(&format!("a_module_with_a_really_long_name_{}", "x".repeat(80)), &super::tiny_module()).expect("module");
+        let gone = r.engine.load_module("unloaded_one", &super::tiny_module()).expect("module");
+        r.engine.unload_module(gone).expect("unload");
+        r.click("tab_scripts");
+        r.frames(40);
+        assert_eq!(r.state().tab, DebugTab::Scripts);
+        let scripts = shoot(&mut r, &mut shooter, "scripts");
+        if let (Some(a), Some(b), Some(c), Some(d)) = (&collapsed, &expanded, &edits, &scripts) {
+            for s in [a, b, c, d] {
                 assert!(line_pixels(s, 4, 516, 0) > 400, "top border");
                 assert!(line_pixels(s, 4, 516, 459) > 400, "bottom border");
                 let rules = (1..120).filter(|y| line_pixels(s, 4, 516, *y) > 400).count();

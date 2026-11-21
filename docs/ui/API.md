@@ -306,6 +306,9 @@ pub struct StateStyles { pub normal: Style, pub hovered: Style, pub pressed: Sty
   `wire-row` (padded row), `tab` and `tab-active` (a tab bar is a row of buttons with `tab`, the
   current one also `tab-active`; there is no tab widget), `wire-text` (a read-only input that reads
   as plain text) and `wire-field` (a small bordered input).
+  The Debug menu (`debug_menu.rs`, F5) has three tabs built from these: Logs, Edits and Scripts (a
+  read-only view of the scripting runtime: backend and JIT state, last-run stats and one two-line
+  row per module slot; long names ellipsize like log rows).
 - **iced:** the theme is resolved per node when the tree changes (`WidgetState` variants: normal, hovered, pressed, focused, disabled) and the widgets' status closures pick one (`button::Style` for Active / Hovered / Pressed / Disabled, `text_input` Active / Hovered / Focused / Disabled, checkbox and slider Active / Hovered(Dragged) / Disabled). iced buttons, checkboxes and sliders are not focusable, so only text inputs show `focused`. A checkbox's background / border style paints its box (not the whole row as on the web).
 - **Fallback:** resolved per node at sync time and cached until the node, its classes or the theme
   change.
