@@ -1,30 +1,24 @@
-//! Scene files (docs/IN_GAME_EDITOR.md, step 2): Save, Save As, Load, New and the `scenes/` list.
+//! Scene files (docs/IN_GAME_EDITOR.md, step 2): Save, Save As, Load, New and the scene list.
 //!
-//! A saved scene is `Engine::save_world_scene` (every entity the editor lists, with ids, so
-//! `Parent` survives) plus a sidecar `<file>.names` with the `Name` of every entity that has one
-//! and an `EditorId` (`Name` is Rust-only, scene files cannot hold it). Paths are relative to the
-//! current directory (the project dir when the game runs from it).
+//! A saved scene is `Engine::save_world_scene`: every entity the editor lists, with ids (so
+//! `Parent` survives) and its `Name` (`SceneEntity::name`). Paths are relative to the current
+//! directory (the project dir when the game runs from it); the list shows the `*.ron` files of
+//! the plugin's scenes directory ([`EditorPlugin::scenes_dir`](super::EditorPlugin::scenes_dir)).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use efeengine_core::ecs::Scene;
 use efeengine_core::prelude::*;
 
 use super::edit::{reset, say, select, with_ui};
-use super::{EditorMode, EditorState};
+use super::{EditorConfig, EditorMode, EditorState};
 
-/// The directory whose `*.ron` files the Load list shows.
+/// The default directory whose `*.ron` files the Load list shows.
 pub const SCENES_DIR: &str = "scenes";
 
-fn names_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_owned();
-    s.push(".names");
-    PathBuf::from(s)
-}
-
-/// The `.ron` files of `scenes/`, sorted, as paths text (`scenes/demo.ron`).
-pub fn list_scenes() -> Vec<String> {
-    let mut out: Vec<String> = std::fs::read_dir(SCENES_DIR)
+/// The `.ron` files of `dir`, sorted, as path text (`scenes/demo.ron`).
+pub fn list_scenes(dir: impl AsRef<Path>) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir.as_ref())
         .into_iter()
         .flatten()
         .filter_map(|d| d.ok())
@@ -36,48 +30,22 @@ pub fn list_scenes() -> Vec<String> {
     out
 }
 
-/// Saves the editable world to `path` (and the names next to it). Creates missing directories.
-pub fn save_scene_with_names(e: &Engine, path: impl AsRef<Path>) -> Result<(), String> {
-    let path = path.as_ref();
+/// Saves the editable world to `path`, creating missing directories.
+fn save_to(e: &Engine, path: &Path) -> Result<(), String> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|x| format!("{}: {x}", dir.display()))?;
     }
-    e.save_world_scene(path).map_err(|x| x.to_string())?;
-    let mut lines: Vec<(u64, String)> =
-        e.world().query::<(&EditorId, &Name)>().iter().filter(|(_, n)| !n.0.is_empty()).map(|(i, n)| (i.id, n.0.replace(['\n', '\r', '\t'], " "))).collect();
-    lines.sort();
-    let side = names_path(path);
-    if lines.is_empty() {
-        let _ = std::fs::remove_file(&side);
-    } else {
-        let text: String = lines.iter().map(|(id, n)| format!("{id}\t{n}\n")).collect();
-        std::fs::write(&side, text).map_err(|x| format!("{}: {x}", side.display()))?;
-    }
-    Ok(())
+    e.save_world_scene(path).map_err(|x| x.to_string())
 }
 
-/// Reads, validates and loads the scene at `path` (nothing changes when it is invalid), then puts
-/// the names back. `replace` first empties the editable world and unloads the current scene
-/// (what the editor's Load does); without it the scene is loaded next to what is there (what a
-/// game does at startup). Returns the number of entities.
-pub fn load_scene_with_names(e: &mut Engine, path: impl AsRef<Path>, replace: bool) -> Result<usize, String> {
-    let path = path.as_ref();
+/// Reads, validates and loads the scene at `path` (nothing changes when it is invalid), replacing
+/// the editable world and the current scene. Returns the number of entities.
+fn load_replacing(e: &mut Engine, path: &Path) -> Result<usize, String> {
     let text = std::fs::read_to_string(path).map_err(|x| format!("{}: {x}", path.display()))?;
     let scene = Scene::from_ron(&text).map_err(|x| x.to_string())?;
     e.validate_scene(&scene).map_err(|x| x.to_string())?;
-    if replace {
-        e.clear_editable_world();
-    }
-    let spawned = e.load_scene(&scene).map_err(|x| x.to_string())?;
-    if let Ok(names) = std::fs::read_to_string(names_path(path)) {
-        for line in names.lines() {
-            let Some((id, name)) = line.split_once('\t') else { continue };
-            if let Some(ent) = id.parse::<u64>().ok().and_then(|id| e.entity_by_editor_id(id)) {
-                e.set_entity_name(ent, name);
-            }
-        }
-    }
-    Ok(spawned.len())
+    e.clear_editable_world();
+    e.load_scene(&scene).map(|v| v.len()).map_err(|x| x.to_string())
 }
 
 fn in_edit(e: &Engine) -> bool {
@@ -88,7 +56,8 @@ pub(crate) const NOT_IN_EDIT: &str = "Scene files can only be changed in Edit mo
 
 /// Refreshes the list of `scenes/*.ron`.
 pub(crate) fn scan(e: &mut Engine) {
-    let files = list_scenes();
+    let dir = e.resources().get::<EditorConfig>().map(|c| c.scenes_dir.clone()).unwrap_or_else(|| SCENES_DIR.to_string());
+    let files = list_scenes(dir);
     with_ui(e, |ui| ui.scene_files = files);
 }
 
@@ -115,7 +84,7 @@ pub(crate) fn save_as(e: &mut Engine, text: String) {
 }
 
 fn write(e: &mut Engine, path: String) {
-    match save_scene_with_names(e, &path) {
+    match save_to(e, Path::new(&path)) {
         Ok(()) => {
             global_info(&format!("[editor] saved {path}"));
             with_ui(e, |ui| {
@@ -139,7 +108,7 @@ pub(crate) fn load(e: &mut Engine, text: String) {
     if path.is_empty() {
         return say(e, "Type a file path first, or pick one from the list", true);
     }
-    match load_scene_with_names(e, &path, true) {
+    match load_replacing(e, Path::new(&path)) {
         Ok(n) => {
             global_info(&format!("[editor] loaded {path} ({n} entities)"));
             reset(e);

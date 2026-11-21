@@ -3,7 +3,7 @@
 use glam::{Affine2, Mat4, Vec2};
 use hecs::Entity;
 
-use crate::engine::components::{Camera, GlobalTransform, MeshHandle, Sprite, TextureHandle, Transform, Visibility};
+use crate::engine::components::{Camera, EditorOnly, GlobalTransform, MeshHandle, Sprite, TextureHandle, Transform, Visibility};
 use crate::engine::schedule::Ctx;
 use super::frame::{CameraView, MeshInstance, RenderFrame, RenderWarnings, SpriteInstance, WindowFrame};
 use crate::engine::input::WindowId;
@@ -80,7 +80,9 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
     let ids: Vec<WindowId> = cx.windows.iter().map(|(id, _)| id).collect();
     let mut chosen: Vec<[Option<(Entity, Camera, Affine2)>; 2]> = ids.iter().map(|_| [None, None]).collect();
     let mut active: Vec<[usize; 2]> = ids.iter().map(|_| [0, 0]).collect();
-    for (e, cam, g, t) in cx.world.query::<(Entity, &Camera, Option<&GlobalTransform>, Option<&Transform>)>().iter() {
+    // An `EditorOnly` camera (the in-game editor's) beats the game's cameras of its window.
+    let mut editor_won: Vec<[bool; 2]> = ids.iter().map(|_| [false, false]).collect();
+    for (e, cam, g, t, tool) in cx.world.query::<(Entity, &Camera, Option<&GlobalTransform>, Option<&Transform>, Option<&EditorOnly>)>().iter() {
         if cam.active == 0 {
             continue;
         }
@@ -88,12 +90,18 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
         let Some(w) = ids.iter().position(|id| id.0 == cam.target) else { continue };
         let k = usize::from(cam.kind == Camera::PERSPECTIVE);
         active[w][k] += 1;
-        if chosen[w][k].as_ref().is_none_or(|(c, _, _)| e.id() < c.id()) {
+        let tool = tool.is_some();
+        let better = chosen[w][k].as_ref().is_none_or(|(c, _, _)| (tool && !editor_won[w][k]) || (tool == editor_won[w][k] && e.id() < c.id()));
+        if better {
             chosen[w][k] = Some((e, *cam, world_affine(g, t)));
+            editor_won[w][k] = tool;
         }
     }
     for (w, a) in active.iter().enumerate() {
         for (k, n) in a.iter().enumerate() {
+            if editor_won[w][k] {
+                continue;
+            }
             let flag = if k == 0 { &mut warnings.multiple_cameras } else { &mut warnings.multiple_cameras_3d };
             if *n > 1 && !*flag {
                 *flag = true;
@@ -189,6 +197,13 @@ pub fn render_extract(cx: &mut Ctx<'_>) {
     // ---- debug draw: queued shapes -> screen pixels (one frame of life) ----
     if let Some(dd) = cx.resources.get_mut::<super::DebugDraw2D>() {
         dd.flush_into(frame.d2.camera.as_ref(), &mut frame.d2.draw);
+        for w in &mut frame.windows {
+            w.d2.draw.clear();
+            if w.d2.camera.is_some() {
+                dd.flush_window_into(w.window, w.d2.camera.as_ref(), &mut w.d2.draw);
+            }
+        }
+        dd.discard();
     }
 
     // ---- meshes ----

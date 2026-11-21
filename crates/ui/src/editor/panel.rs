@@ -1,12 +1,17 @@
 //! The Editor tab body: toolbar, scene row, hierarchy (left) and inspector (right).
 //!
+//! The same body is shown in the Debug menu's tab (keys under `debug_menu/editor`) and, in layout
+//! B (separate editor window), by the `editor_panel` view (keys under `editor_panel/editor`); while
+//! detached the tab only says so and offers Attach (`debug_menu/editor/detached/row/attach`).
+//!
 //! Keys under `debug_menu/editor`: `toolbar/{edit,play,pause,step,stop,undo,redo}`,
+//! `viewport/{tool_move,tool_rotate,tool_scale,grid,grid_step,detach}`,
 //! `options/{status,keep}`, `scene/{label,save,save_as,load,new,path,list/f<N>}`, `message`,
-//! `hierarchy/filter`, `hierarchy/actions/{new,duplicate,delete}`, `hierarchy/list/e<bits>/row`
+//! `hierarchy/filter`, `hierarchy/actions/{new,duplicate,delete,unparent}`, `hierarchy/list/e<bits>/row`
 //! (the clickable row), `inspector/entity/name` (the name input), `inspector/c<N>` (one per
 //! component: `bar/head`, `bar/remove`, and `f<M>` rows with `name` and `value`; `value` is a text
 //! input, a checkbox, a read-only text, or a row of text inputs `e<K>` for a list),
-//! `inspector/add/row/toggle` (under the name, so it stays in view) and `inspector/add/picker/a<N>` (the N-th of `EditorPanel::addable`).
+//! `inspector/parent/row/{label,toggle}` and `inspector/parent/picker/{none,p<N>}` (the N-th candidate), `inspector/add/row/toggle` (under the name, so it stays in view) and `inspector/add/picker/a<N>` (the N-th of `EditorPanel::addable`).
 
 use std::collections::BTreeSet;
 
@@ -14,7 +19,7 @@ use efeengine_core::ecs::{SceneValue, entity_to_bits};
 use efeengine_core::engine::inspect::UNMANAGED_COMPONENTS;
 use efeengine_core::prelude::*;
 
-use super::{EditorMode, EditorMsg, EditorPanel, EditorRequest, EditorSelection, EditorState, EditorUi, FieldKey, TAB, ext};
+use super::{EditorMode, EditorMsg, EditorPanel, EditorRequest, EditorSelection, EditorState, EditorUi, EditorView, FieldKey, GizmoTool, TAB, ext};
 use crate::debug_menu::DebugMsg;
 use crate::style::Edges;
 use crate::view::*;
@@ -59,6 +64,43 @@ fn toolbar(state: &EditorState, ui: &EditorUi) -> El<DebugMsg> {
     ]
     .key("toolbar")
     .align(Align::Center)
+    .width(Size::Fill)
+}
+
+/// The viewport row: gizmo tool, grid, grid step, Detach / Attach.
+fn viewport_bar(view: &EditorView, ui: &EditorUi) -> El<DebugMsg> {
+    let tool = |label: &str, key: &str, t: GizmoTool| {
+        let b = button(label).key(key).class("tab").padding(Edges::symmetric(10.0, 5.0)).on_click(ext(EditorMsg::Tool(t)));
+        if view.tool == t { b.class("tab-active") } else { b }
+    };
+    let grid_key = FieldKey::grid();
+    let step_text = ui.drafts.get(&grid_key).cloned().unwrap_or_else(|| edit_text(&SceneValue::Float(view.grid_step as f64)));
+    let (k_in, k_sub, k_focus) = (grid_key.clone(), grid_key.clone(), grid_key.clone());
+    let mut step = text_input(step_text)
+        .class("wire-field")
+        .key("grid_step")
+        .width(Size::Px(56.0))
+        .on_input(move |s| ext(EditorMsg::Draft(k_in.clone(), s)))
+        .on_submit(move |s| ext(EditorMsg::Commit(k_sub.clone(), s)))
+        .on_focus(move |on| ext(EditorMsg::Focus(k_focus.tag(), on)));
+    if ui.errors.contains_key(&grid_key) {
+        step = step.class("wire-error");
+    }
+    row![
+        tool("Move (W)", "tool_move", GizmoTool::Move),
+        tool("Rotate (E)", "tool_rotate", GizmoTool::Rotate),
+        tool("Scale (R)", "tool_scale", GizmoTool::Scale),
+        container().class("separator-v").key("sep_grid"),
+        checkbox("Grid (G)", view.grid).key("grid").on_toggle(|on| ext(EditorMsg::Grid(on))),
+        text("step").class("muted").key("step_label"),
+        step,
+        container().width(Size::Fill),
+        small(if view.detached { "Attach" } else { "Detach" }, "detach", EditorMsg::Detach(!view.detached), true),
+    ]
+    .class("wire-row")
+    .align(Align::Center)
+    .gap(4.0)
+    .key("viewport")
     .width(Size::Fill)
 }
 
@@ -138,6 +180,7 @@ fn visible(panel: &EditorPanel) -> BTreeSet<u64> {
 
 fn hierarchy(panel: &EditorPanel, selected: Option<Entity>) -> El<DebugMsg> {
     let has = selected.is_some();
+    let has_parent = selected.is_some_and(|s| panel.rows.iter().any(|r| r.entity == s && r.parent.is_some()));
     let shown = visible(panel);
     let mut list = column![].width(Size::Fill);
     for r in panel.rows.iter().filter(|r| shown.contains(&entity_to_bits(r.entity))) {
@@ -169,6 +212,7 @@ fn hierarchy(panel: &EditorPanel, selected: Option<Entity>) -> El<DebugMsg> {
             small("New", "new", EditorMsg::NewEntity, true),
             small("Duplicate", "duplicate", EditorMsg::Duplicate, has),
             small("Delete", "delete", EditorMsg::Delete, has),
+            small("Unparent", "unparent", EditorMsg::Reparent(None), has_parent),
         ]
         .key("actions")
         .width(Size::Fill),
@@ -228,6 +272,43 @@ fn field_widget(ui: &EditorUi, component: &str, field: &str, v: &SceneValue, edi
     }
 }
 
+/// "Parent: <name>" with a button that opens the list of possible parents (everything but the
+/// entity and its descendants) and "None" to unparent.
+fn parent_section(panel: &EditorPanel, ui: &EditorUi, sel: Entity) -> El<DebugMsg> {
+    let row_of = |e: Entity| panel.rows.iter().find(|r| r.entity == e);
+    let current = row_of(sel).and_then(|r| r.parent).and_then(row_of).map(|r| r.name.clone());
+    let mut banned: BTreeSet<u64> = BTreeSet::new();
+    let mut stack = vec![sel];
+    while let Some(e) = stack.pop() {
+        if banned.insert(entity_to_bits(e)) {
+            stack.extend(row_of(e).map(|r| r.children.clone()).unwrap_or_default());
+        }
+    }
+    let mut sec = column![
+        row![
+            text("Parent").class("muted").key("label").width(Size::Px(90.0)),
+            text(current.unwrap_or_else(|| "(none)".to_string())).key("value").width(Size::Fill),
+            small(if ui.parent_picker { "Close" } else { "Change" }, "toggle", EditorMsg::ParentPicker(!ui.parent_picker), true),
+        ]
+        .class("wire-row")
+        .align(Align::Center)
+        .key("row")
+        .width(Size::Fill),
+    ]
+    .key("parent")
+    .width(Size::Fill);
+    if ui.parent_picker {
+        let mut list = column![button("(none: unparent)").key("none").class("tab").text_align(TextAlign::Start).width(Size::Fill).padding(Edges::symmetric(14.0, 4.0)).on_click(ext(EditorMsg::Reparent(None)))]
+            .key("picker")
+            .width(Size::Fill);
+        for (i, r) in panel.rows.iter().filter(|r| !banned.contains(&entity_to_bits(r.entity))).enumerate() {
+            list = list.child(button(r.name.clone()).key(format!("p{i}")).class("tab").text_align(TextAlign::Start).width(Size::Fill).padding(Edges::symmetric(14.0, 4.0)).on_click(ext(EditorMsg::Reparent(Some(r.entity)))));
+        }
+        sec = sec.child(list);
+    }
+    sec
+}
+
 fn inspector(panel: &EditorPanel, ui: &EditorUi, selected: Option<Entity>) -> El<DebugMsg> {
     let mut col = column![].width(Size::Fill);
     match (&panel.inspected, selected) {
@@ -265,6 +346,9 @@ fn inspector(panel: &EditorPanel, ui: &EditorUi, selected: Option<Entity>) -> El
                 add = add.child(list);
             }
             col = col.child(add).child(container().class("separator").key("sep_add"));
+            if let Some(sel) = selected {
+                col = col.child(parent_section(panel, ui, sel)).child(container().class("separator").key("sep_parent"));
+            }
             for (i, c) in comps.iter().enumerate() {
                 let title = if c.readonly { format!("{} (read-only)", c.name) } else { c.name.clone() };
                 let mut bar = row![text(title).bold(true).key("head").width(Size::Fill)].class("wire-row").align(Align::Center).key("bar").width(Size::Fill);
@@ -290,7 +374,32 @@ fn inspector(panel: &EditorPanel, ui: &EditorUi, selected: Option<Entity>) -> El
     scroll().width(Size::Fill).height(Size::Fill).key("inspector").child(col)
 }
 
+/// The Debug menu tab: the whole editor, or a note while the editor has its own window.
 pub(super) fn view(cx: &ViewCx) -> El<DebugMsg> {
+    let detached = cx.res::<EditorView>().is_some_and(|v| v.detached);
+    if detached {
+        return column![
+            column![
+                text("The editor panels are in the Editor window.").class("muted").class("wire-row").key("note"),
+                row![small("Attach", "attach", EditorMsg::Detach(false), true)].class("wire-row").key("row").width(Size::Fill),
+            ]
+            .key("detached")
+            .width(Size::Fill),
+        ]
+        .key(TAB)
+        .width(Size::Fill)
+        .height(Size::Fill);
+    }
+    body(cx)
+}
+
+/// The panel view of the editor window (layout B).
+pub(super) fn window_view(cx: &ViewCx) -> El<DebugMsg> {
+    column![body(cx)].class("wire-panel").width(Size::Px(540.0)).height(Size::Px(660.0))
+}
+
+fn body(cx: &ViewCx) -> El<DebugMsg> {
+    let view = cx.res::<EditorView>().map(|v| (*v).clone()).unwrap_or_default();
     let state = cx.res::<EditorState>().map(|s| (*s).clone()).unwrap_or(EditorState { mode: EditorMode::Edit, keep_changes: false, frozen: 0 });
     let panel = cx.res::<EditorPanel>().map(|p| (*p).clone()).unwrap_or_default();
     let ui = cx.res::<EditorUi>().map(|u| (*u).clone()).unwrap_or_default();
@@ -310,6 +419,7 @@ pub(super) fn view(cx: &ViewCx) -> El<DebugMsg> {
         .align(Align::Center)
         .key("options")
         .width(Size::Fill),
+        viewport_bar(&view, &ui),
         container().class("separator").key("sep_toolbar"),
         scene_bar(&state, &panel, &ui),
     ];

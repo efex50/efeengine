@@ -13,6 +13,8 @@
 //!   pixel) is set with [`DebugDraw2D::set_width`] and applies to the shapes pushed after it. It is
 //!   always in screen pixels, whatever the zoom. Colours are straight RGBA, sRGB-encoded 0..1.
 //! * Shapes are drawn in the order they were pushed, over everything the sprite pass drew.
+//! * Shapes go to the main window unless [`DebugDraw2D::set_window`] named another one (then they
+//!   use that window's 2D camera and size).
 
 use glam::Vec2;
 
@@ -37,6 +39,8 @@ struct Shape {
     world: bool,
     color: [f32; 4],
     width: f32,
+    /// The window it is drawn in (0 = the main window).
+    window: u32,
 }
 
 /// The debug draw queue (a resource). See the module docs.
@@ -44,11 +48,12 @@ struct Shape {
 pub struct DebugDraw2D {
     shapes: Vec<Shape>,
     width: f32,
+    window: u32,
 }
 
 impl Default for DebugDraw2D {
     fn default() -> Self {
-        Self { shapes: Vec::new(), width: 1.0 }
+        Self { shapes: Vec::new(), width: 1.0, window: 0 }
     }
 }
 
@@ -70,8 +75,16 @@ impl DebugDraw2D {
         self
     }
 
+    /// The window the shapes pushed from now on are drawn in (`WindowId` or its raw `u32`; 0 = the
+    /// main window, the default). Shapes of a window that has no 2D camera are dropped. Back to
+    /// 0 after the frame's extract.
+    pub fn set_window(&mut self, window: impl Into<u32>) -> &mut Self {
+        self.window = window.into();
+        self
+    }
+
     fn push(&mut self, kind: Kind, world: bool, color: [f32; 4]) -> &mut Self {
-        self.shapes.push(Shape { kind, world, color, width: self.width });
+        self.shapes.push(Shape { kind, world, color, width: self.width, window: self.window });
         self
     }
 
@@ -112,6 +125,14 @@ impl DebugDraw2D {
         self.push(Kind::Circle(center, radius), false, color)
     }
 
+    /// Drop everything still queued (shapes of windows without a camera); the extract calls it
+    /// after all windows were flushed.
+    pub fn discard(&mut self) {
+        self.shapes.clear();
+        self.width = 1.0;
+        self.window = 0;
+    }
+
     pub fn len(&self) -> usize {
         self.shapes.len()
     }
@@ -120,11 +141,19 @@ impl DebugDraw2D {
         self.shapes.is_empty()
     }
 
-    /// Convert the queued shapes into `out` (screen pixels) with `camera` (world shapes are
-    /// dropped without one) and empty the queue (the width resets to 1).
+    /// Convert the queued shapes of the MAIN window into `out` (screen pixels) with `camera`
+    /// (world shapes are dropped without one) and remove them from the queue (the width and the
+    /// target window reset). Shapes of other windows stay for [`flush_window_into`](Self::flush_window_into).
     pub fn flush_into(&mut self, camera: Option<&CameraView>, out: &mut DrawList) {
-        let shapes = std::mem::take(&mut self.shapes);
+        self.flush_window_into(0, camera, out);
         self.width = 1.0;
+        self.window = 0;
+    }
+
+    /// Like [`flush_into`](Self::flush_into) for the shapes queued for `window`.
+    pub fn flush_window_into(&mut self, window: u32, camera: Option<&CameraView>, out: &mut DrawList) {
+        let (shapes, rest): (Vec<Shape>, Vec<Shape>) = std::mem::take(&mut self.shapes).into_iter().partition(|s| s.window == window);
+        self.shapes = rest;
         let project = |p: Vec2| -> Option<[f32; 2]> {
             let cam = camera?;
             let m = &cam.view_projection;

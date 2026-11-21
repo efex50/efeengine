@@ -4,8 +4,8 @@
 //! It uses the scene codec ([`SceneValue`], the same one scene files and snapshots use), so what a
 //! tool shows is what `save_scene` would write. Only components the [`TypeRegistry`](super::types::TypeRegistry)
 //! knows are visible (Rust components marked `#[script_component]`, mod components); `Name`,
-//! `Children` and other Rust-only components are not fields, `Name` is only read for the display
-//! name.
+//! `Children` and other Rust-only components are not fields; `Name` is only read for the display
+//! name (it travels in [`EntityData`] and in scene files as `SceneEntity::name`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,12 +32,11 @@ pub struct InspectedComponent {
 }
 
 /// A copy of one entity, enough to spawn it again (undo of a delete, duplicate): its registry
-/// components (with `id` = its entity bits, so references among a group of copies are remapped
-/// when the group is spawned), its `Name` and its scene owner tag.
+/// components and `Name` (`scene`, with `id` = its entity bits, so references among a group of
+/// copies are remapped when the group is spawned) and its scene owner tag.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityData {
     pub scene: SceneEntity,
-    pub name: Option<String>,
     pub(crate) owner: Option<SceneOwned>,
 }
 
@@ -322,6 +321,12 @@ impl Engine {
         e
     }
 
+    /// Names of the fields of registry component `component` that hold an entity reference
+    /// (empty for an unknown component). For tools that keep references across a delete / respawn.
+    pub fn entity_field_names(&self, component: &str) -> Vec<String> {
+        self.types().by_name(component).map(|t| t.desc().fields.iter().filter(|f| f.ty == Prim::Entity).map(|f| f.name.clone()).collect()).unwrap_or_default()
+    }
+
     /// `e` and its descendants (entities whose `Parent` chain leads to it), depth first, parents
     /// before children, each once. Empty for a dead entity.
     pub fn entity_tree(&self, e: Entity) -> Vec<Entity> {
@@ -360,9 +365,8 @@ impl Engine {
         }
         let mut scene = self.capture_entity(e);
         scene.id = Some(entity_to_bits(e));
-        let name = self.world().get::<&Name>(e).ok().map(|n| n.0.clone());
         let owner = self.world().get::<&SceneOwned>(e).ok().map(|o| (*o).clone());
-        Some(EntityData { scene, name, owner })
+        Some(EntityData { scene, owner })
     }
 
     /// Spawn the entities `data` describes (references among them are remapped to the new
@@ -377,13 +381,7 @@ impl Engine {
             }
         }
         let owners: Vec<Option<SceneOwned>> = data.iter().map(|d| d.owner.clone()).collect();
-        let spawned = self.spawn_decoded(&scene, &decoded, &owners)?;
-        for (e, d) in spawned.iter().zip(data) {
-            if let Some(n) = &d.name {
-                self.set_entity_name(*e, n);
-            }
-        }
-        Ok(spawned)
+        self.spawn_decoded(&scene, &decoded, &owners)
     }
 
     /// Copy `e` (all its registry components, its `Name` with ` copy` added, its owner tag) as a
@@ -392,7 +390,7 @@ impl Engine {
     pub fn duplicate_entity(&mut self, e: Entity) -> Result<Entity, SceneError> {
         let mut data = self.capture_entity_data(e).ok_or_else(|| inspect_err("no such entity", "<entity>"))?;
         data.set_editor_id(self.next_editor_id());
-        if let Some(n) = &mut data.name {
+        if let Some(n) = &mut data.scene.name {
             n.push_str(" copy");
         }
         Ok(self.spawn_entity_data(&[data])?[0])

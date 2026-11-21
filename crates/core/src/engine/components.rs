@@ -238,6 +238,13 @@ pub struct EditorId {
     pub id: u64,
 }
 
+/// Marks an entity that belongs to a tool (the in-game editor's camera), not to the game's world:
+/// scene capture, snapshots, restore, the editor's entity list and "clear world" skip it, and the
+/// render extract prefers an `EditorOnly` camera over the game's cameras of the same window.
+/// Rust-only (no layout, never saved).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EditorOnly;
+
 /// The entity this one is attached to: its `Transform` is relative to the parent's. A parent
 /// that is gone (or has no `Transform`) makes this entity a root.
 #[script_component]

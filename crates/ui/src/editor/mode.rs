@@ -55,8 +55,6 @@ pub(crate) struct ModeRuntime {
     pub pause_list: Vec<String>,
     /// 0 idle; 1 a Step was queued; 2 the stepped frame is running.
     pub step: u8,
-    /// `EditorId` -> `Name`, saved at Play (`Name` is Rust-only and is not in a snapshot).
-    pub names: Vec<(u64, String)>,
 }
 
 /// A system the editor may freeze: not global, not an engine or tool system.
@@ -131,7 +129,6 @@ pub(crate) fn apply(e: &mut Engine, req: EditorRequest) {
     match (req, mode) {
         (EditorRequest::Play, EditorMode::Edit) => {
             // The snapshot is taken with the game still frozen, so Stop brings the frozen flags back.
-            r.names = e.world().query::<(&EditorId, &Name)>().iter().map(|(i, n)| (i.id, n.0.clone())).collect();
             r.snapshot = Some(e.snapshot());
             set_all(e, &r.edit_list, true);
             set_state(e, EditorMode::Play, 0);
@@ -163,7 +160,6 @@ pub(crate) fn apply(e: &mut Engine, req: EditorRequest) {
                 Some(snap) if !keep => match e.restore(&snap) {
                     Ok(()) => {
                         // The restored flags are the ones the snapshot saw: Edit's frozen state.
-                        reapply_names(e, &r.names);
                         super::edit::reset(e);
                         let sel = e.resources().get::<EditorSelection>().map(|s| s.editor_id);
                         if let Some(id) = sel {
@@ -192,14 +188,6 @@ pub(crate) fn apply(e: &mut Engine, req: EditorRequest) {
         _ => {}
     }
     put_rt(e, r);
-}
-
-fn reapply_names(e: &mut Engine, names: &[(u64, String)]) {
-    for (id, n) in names {
-        if let Some(ent) = e.entity_by_editor_id(*id) {
-            let _ = e.world_mut().insert_one(ent, Name::new(n.clone()));
-        }
-    }
 }
 
 /// End of a Step: after one full frame of the game, freeze it again.

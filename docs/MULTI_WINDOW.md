@@ -75,7 +75,7 @@ cx.commands.set_window_title(id, "x");  cx.commands.set_window_fullscreen(id, tr
   per open secondary window, and `RenderFrame::window(id)` finds either. The extract picks, per window and
   kind (2D / 3D), the active camera with the lowest entity id whose `target` is that window; sprites and meshes
   are shared by all windows (copied into a window's frame only when it has a camera of that kind). `CameraView`
-  matrices use the window's own size. Debug draw (`DebugDraw2D`) belongs to the main window.
+  matrices use the window's own size. Debug draw (`DebugDraw2D`) goes to the main window unless `set_window(w)` was called (then to window `w`'s `WindowFrame::d2.draw`, with that window's camera; shapes for a window without a 2D camera are dropped). An `EditorOnly` camera (the in-game editor's) beats the game's cameras of its window.
   A window with no camera is cleared and draws nothing.
 - **Renderers**: the same `Renderer2D` / `Renderer3D` instances draw every window; `Gpu` gained `window: u32`
   and its `size`, `scale_factor`, `surface_format` are those of the target window. `Renderer::resize`
@@ -162,7 +162,7 @@ adds `<aside id="sidebar">` with `<div id="map-box">`.
 ## Not supported / known limits
 
 - SDL mode (see above). `CustomRenderer` only draws the main window. `Renderer::resize` is main-only.
-- Debug draw, `DebugDraw2D`, is main-window only. Touch on native goes to the main window.
+- Touch on native goes to the main window.
 - No window positions, borderless / always-on-top flags or per-window `set_cursor_*` (they follow the focused window).
 - Web `Body` windows are plain page boxes; there is no OS-style dragging or closing (use `close_window`).
 - The WebGPU path of secondary canvases is compile-checked only. WebGL2 secondary windows pay a readback per frame.

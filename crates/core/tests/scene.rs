@@ -97,3 +97,53 @@ fn bad_files_fail_without_changing_the_world() {
     }
     assert!(matches!(e.load_scene_file("/no/such/scene.ron"), Err(SceneError::Io { .. })));
 }
+
+#[test]
+fn names_are_part_of_the_scene_file_and_survive_load_capture_and_snapshot() {
+    let mut a = engine();
+    let e1 = a.spawn_scene_owned();
+    a.world_mut().insert(e1, (Transform::from_position(Vec2::new(1.0, 2.0)), Name::new("hero"), EditorId { id: 7 })).unwrap();
+    let e2 = a.spawn_scene_owned();
+    a.world_mut().insert(e2, (Transform::default(),)).unwrap();
+    let text = a.capture_scene("named").to_ron();
+    assert!(text.contains("name: Some(\"hero\")") || text.contains("name: \"hero\""), "{text}");
+    // only the named entity has a name key
+    assert_eq!(text.matches("name: ").count(), 2, "scene name + one entity name: {text}");
+
+    let mut b = engine();
+    let ents = b.load_scene_str(&text).expect("loads");
+    let names: Vec<Option<String>> = ents.iter().map(|e| b.world().get::<&Name>(*e).ok().map(|n| n.0.clone())).collect();
+    assert_eq!(names.iter().filter(|n| n.as_deref() == Some("hero")).count(), 1);
+    assert_eq!(names.iter().filter(|n| n.is_none()).count(), 1);
+    // byte-for-byte round trip
+    assert_eq!(b.capture_scene("named").to_ron(), text);
+
+    // snapshot / restore and the restart snapshot keep it
+    let snap = b.snapshot();
+    let hero = b.world().query::<(Entity, &Name)>().iter().map(|(e, _)| e).next().unwrap();
+    b.world_mut().remove_one::<Name>(hero).unwrap();
+    b.restore(&snap).unwrap();
+    assert_eq!(b.world().query::<&Name>().iter().map(|n| n.0.clone()).collect::<Vec<_>>(), ["hero"]);
+    let rs = b.restart_snapshot();
+    let mut c = engine();
+    c.restore_lenient(&rs).unwrap();
+    assert_eq!(c.world().query::<&Name>().iter().map(|n| n.0.clone()).collect::<Vec<_>>(), ["hero"]);
+    // world scene (editor) too
+    assert!(b.capture_world_scene("w").to_ron().contains("hero"));
+}
+
+#[test]
+fn editor_only_entities_are_never_captured_snapshotted_or_cleared() {
+    let mut a = engine();
+    let cam = a.world_mut().spawn((Camera::orthographic_2d(), Transform::default(), EditorOnly));
+    let hero = a.world_mut().spawn((Transform::default(), Name::new("hero")));
+    assert!(!a.capture_world_scene("w").to_ron().contains("Camera"));
+    let snap = a.snapshot();
+    assert_eq!(snap.scene.entities.len(), 1);
+    a.restore(&snap).unwrap();
+    assert!(a.world().contains(cam), "restore leaves the editor camera alone");
+    assert!(!a.world().contains(hero));
+    assert!(a.editable_entities().iter().all(|r| r.entity != cam));
+    a.clear_editable_world();
+    assert!(a.world().contains(cam));
+}

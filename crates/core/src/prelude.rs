@@ -12,7 +12,7 @@ pub use crate::engine::{
     schedule::{Stage, Ctx, SystemEntry, RunCtx},
     parallel::{Access, ParCtx},
     commands::Commands,
-    components::{Transform, Velocity, MeshHandle, Name, Camera, TextureHandle, Sprite, Visibility, Parent, Children, GlobalTransform, EditorId},
+    components::{Transform, Velocity, MeshHandle, Name, Camera, TextureHandle, Sprite, Visibility, Parent, Children, GlobalTransform, EditorId, EditorOnly},
     types::{ScriptType, ScriptBool, ComponentInfo},
     resources::{Res, ResMut},
     events::Events,

@@ -30,10 +30,11 @@ Scene {
     name: "level_1",
     requires: ["coin_dash_mods"],     // mods/plugins that must be loaded; error if missing
     systems: ["coin_collect", "hud"], // systems to enable while this scene is active
-    entities: [ ... ],                // components by registry name
+    entities: [ ... ],                // components by registry name; an entity may also carry `id` and `name`
 }
 ```
 
+- `SceneEntity::name` (optional) is the entity's `Name` component (Rust-only, so it is not one of `components`): capture, snapshot, restart snapshot and `save_world_scene` write it, load and restore put it back. Format stays 1 (the field is optional, older files load unchanged).
 - `systems` names systems, or whole plugins with `plugin:<name>`, which the engine already tags on every system.
 - Systems the **project** marks `global` (set in `project.toml`, for example the engine's transform propagation and the renderer) are never toggled by scenes.
 - A system that no scene lists and is not global is left as the game set it. This keeps existing code working.

@@ -18,7 +18,7 @@ struct Knob {
 struct Ticks(u32);
 struct Kept(u32);
 /// `DebugDraw2D::len()` as seen just before the render step empties it.
-struct Drawn(usize);
+pub(super) struct Drawn(pub usize);
 
 fn game_tick(cx: &mut Ctx) {
     if let Some(t) = cx.resources.get_mut::<Ticks>() {
@@ -58,7 +58,7 @@ fn world_setup(e: &mut Engine) {
     w.spawn((Name::new("rock"), EditorId { id: 3 }, Transform::default(), Knob { level: 4, ..Default::default() }));
 }
 
-fn editor_with(plugin: EditorPlugin) -> UiTest {
+pub(super) fn editor_with(plugin: EditorPlugin) -> UiTest {
     crate::debug_menu::serial();
     let mut t = UiTest::new(|e| {
         e.add_plugin(DebugMenuPlugin).expect("debug menu");
@@ -70,14 +70,14 @@ fn editor_with(plugin: EditorPlugin) -> UiTest {
     t
 }
 
-fn editor() -> UiTest {
+pub(super) fn editor() -> UiTest {
     let mut t = editor_with(EditorPlugin::new());
     t.click("debug_menu/tab_editor");
     t.step(3);
     t
 }
 
-fn press(t: &mut UiTest, key: &str) {
+pub(super) fn press(t: &mut UiTest, key: &str) {
     t.click(&format!("debug_menu/editor/toolbar/{key}"));
     t.step(2);
 }
@@ -86,19 +86,19 @@ fn ticks(t: &UiTest) -> u32 {
     t.resource::<Ticks>().0
 }
 
-fn entity(t: &UiTest, name: &str) -> Entity {
+pub(super) fn entity(t: &UiTest, name: &str) -> Entity {
     t.engine.world().query::<(Entity, &Name)>().iter().find(|(_, n)| n.0 == name).map(|(e, _)| e).unwrap_or_else(|| panic!("no entity `{name}`"))
 }
 
-fn x_of(t: &UiTest, name: &str) -> f32 {
+pub(super) fn x_of(t: &UiTest, name: &str) -> f32 {
     t.engine.world().get::<&Transform>(entity(t, name)).unwrap().position.x
 }
 
-fn row_key(t: &UiTest, name: &str) -> String {
+pub(super) fn row_key(t: &UiTest, name: &str) -> String {
     format!("debug_menu/editor/hierarchy/list/e{}/row", entity_to_bits(entity(t, name)))
 }
 
-fn mode(t: &UiTest) -> EditorMode {
+pub(super) fn mode(t: &UiTest) -> EditorMode {
     t.resource::<EditorState>().mode
 }
 
@@ -422,16 +422,19 @@ fn a_selection_whose_entity_is_gone_clears() {
 }
 
 #[test]
-fn the_selected_sprite_gets_an_outline() {
+fn the_selected_sprite_gets_an_outline_and_a_gizmo() {
     let mut t = editor();
     t.step(3);
-    assert_eq!(t.resource::<Drawn>().0, 0, "nothing selected, nothing drawn");
+    // Entities without a sprite (the game's camera, pet, rock) show a handle each.
+    let base = t.resource::<Drawn>().0;
+    assert_eq!(base, 3, "three handles, nothing selected");
     t.click(&row_key(&t, "hero"));
     t.step(3);
-    assert_eq!(t.resource::<Drawn>().0, 4, "four edges around the sprite");
+    assert!(t.resource::<Drawn>().0 >= base + 4 + 3, "four edges and the move gizmo around the sprite: {}", t.resource::<Drawn>().0);
     t.click(&row_key(&t, "rock"));
     t.step(3);
-    assert_eq!(t.resource::<Drawn>().0, 0, "rock has no sprite");
+    let n = t.resource::<Drawn>().0;
+    assert!(n > base && n < base + 4 + 3 + 1, "rock has no sprite: no outline, but a gizmo: {n}");
 }
 
 #[test]
@@ -506,7 +509,7 @@ const INSP: &str = "debug_menu/editor/inspector";
 const HIER: &str = "debug_menu/editor/hierarchy";
 const SCENE: &str = "debug_menu/editor/scene";
 
-fn pick(t: &mut UiTest, name: &str) {
+pub(super) fn pick(t: &mut UiTest, name: &str) {
     t.click(&row_key(t, name));
     t.step(3);
 }
@@ -559,7 +562,7 @@ fn type_into(t: &mut UiTest, key: &str, text: &str) {
     t.step(3);
 }
 
-fn position(t: &UiTest, name: &str) -> Vec2 {
+pub(super) fn position(t: &UiTest, name: &str) -> Vec2 {
     t.engine.world().get::<&Transform>(entity(t, name)).unwrap().position
 }
 
@@ -568,11 +571,11 @@ fn knob(t: &UiTest) -> (bool, i32) {
     (k.on.get(), k.level)
 }
 
-fn ui_state(t: &UiTest) -> EditorUi {
+pub(super) fn ui_state(t: &UiTest) -> EditorUi {
     (*t.resource::<EditorUi>()).clone()
 }
 
-fn by_id(t: &UiTest, id: u64) -> Entity {
+pub(super) fn by_id(t: &UiTest, id: u64) -> Entity {
     t.engine.entity_by_editor_id(id).unwrap_or_else(|| panic!("no entity #{id}"))
 }
 
@@ -580,11 +583,11 @@ fn insp(t: &UiTest, id: u64) -> Vec<InspectedComponent> {
     t.engine.inspect_entity(by_id(t, id)).unwrap()
 }
 
-type Dump = Vec<(Option<u64>, String, Vec<InspectedComponent>)>;
+pub(super) type Dump = Vec<(Option<u64>, String, Vec<InspectedComponent>)>;
 
 /// The whole editable world as a comparable value: `(EditorId, name, components)` sorted by id.
 /// `Parent` is left out (an undone delete makes new entities, so the stored bits differ).
-fn dump(t: &UiTest) -> Dump {
+pub(super) fn dump(t: &UiTest) -> Dump {
     let mut out: Dump = t
         .engine
         .editable_entities()
@@ -599,7 +602,7 @@ fn dump(t: &UiTest) -> Dump {
     out
 }
 
-fn ctrl_key(t: &mut UiTest, code: KeyCode, ch: &str, shift: bool) {
+pub(super) fn ctrl_key(t: &mut UiTest, code: KeyCode, ch: &str, shift: bool) {
     let mods = if shift { Modifiers(Modifiers::LCTRL.0 | Modifiers::LSHIFT.0) } else { Modifiers::LCTRL };
     for state in [ElementState::Pressed, ElementState::Released] {
         t.engine.inject(InputEvent::with_time(InputEventKind::key(code, Key::character(ch), state, false, mods), 0, WindowId::MAIN));
@@ -607,12 +610,12 @@ fn ctrl_key(t: &mut UiTest, code: KeyCode, ch: &str, shift: bool) {
     t.step(4);
 }
 
-fn click_button(t: &mut UiTest, key: &str) {
+pub(super) fn click_button(t: &mut UiTest, key: &str) {
     t.click(&format!("debug_menu/editor/{key}"));
     t.step(4);
 }
 
-fn msg(t: &UiTest) -> String {
+pub(super) fn msg(t: &UiTest) -> String {
     t.ui().find("debug_menu/editor/message").map(|_| t.text("debug_menu/editor/message")).unwrap_or_default()
 }
 
@@ -1083,7 +1086,9 @@ fn save_as_writes_a_file_that_loads_back_and_the_dirty_marker_follows() {
     assert_eq!(scene.entities.len(), 4);
     assert!(scene.entities.iter().all(|e| e.id.is_some()), "ids keep Parent working");
     assert!(text.contains("12"), "the edit is in the file");
-    assert!(std::fs::read_to_string(format!("{path}.names")).unwrap().contains("1\thero"));
+    assert!(text.contains("name: Some(\"hero\")"), "names live in the scene file");
+    assert!(!std::path::Path::new(&format!("{path}.names")).exists(), "no sidecar file any more");
+    assert!(scene.entities.iter().any(|e| e.name.as_deref() == Some("pet")) && scene.entities.iter().any(|e| e.name.as_deref() == Some("rock")), "every name is in the file");
 
     // change the world, then Load: the file's world comes back, with names and the tree
     let saved = dump(&t);
@@ -1128,7 +1133,6 @@ fn save_as_writes_a_file_that_loads_back_and_the_dirty_marker_follows() {
     let fresh = t.engine.editable_entities().into_iter().find(|r| r.name.starts_with("entity")).unwrap();
     assert!(fresh.scene_owned);
     std::fs::remove_file(&path).ok();
-    std::fs::remove_file(format!("{path}.names")).ok();
 }
 
 #[test]
@@ -1188,29 +1192,27 @@ fn scene_files_are_disabled_in_play_and_pause() {
     click_button(&mut t, "scene/bar/save_as");
     assert!(std::path::Path::new(&path).exists());
     std::fs::remove_file(&path).ok();
-    std::fs::remove_file(format!("{path}.names")).ok();
 }
 
 #[test]
 fn the_scenes_dir_is_listed_and_a_click_loads() {
     let dir = std::env::temp_dir().join(format!("efe_editor_scenes_{}", std::process::id()));
-    std::fs::create_dir_all(dir.join("scenes")).unwrap();
-    std::fs::write(dir.join("scenes/b.ron"), "(format: 1, name: \"b\", entities: [])").unwrap();
-    std::fs::write(dir.join("scenes/a.ron"), "(format: 1, name: \"a\", entities: [])").unwrap();
-    std::fs::write(dir.join("scenes/notes.txt"), "x").unwrap();
-    // `scenes/` is relative to the current directory
-    let here = std::env::current_dir().unwrap();
-    std::env::set_current_dir(&dir).unwrap();
-    let mut t = editor();
-    t.step(3);
+    let scenes = dir.join("scenes");
+    std::fs::create_dir_all(&scenes).unwrap();
+    std::fs::write(scenes.join("b.ron"), "(format: 1, name: \"b\", entities: [])").unwrap();
+    std::fs::write(scenes.join("a.ron"), "(format: 1, name: \"a\", entities: [])").unwrap();
+    std::fs::write(scenes.join("notes.txt"), "x").unwrap();
+    let scenes_text = scenes.to_string_lossy().replace('\\', "/");
+    let mut t = editor_with(EditorPlugin::new().scenes_dir(scenes_text.clone()));
+    t.click("debug_menu/tab_editor");
+    t.step(5);
     let files = ui_state(&t).scene_files;
-    assert_eq!(files, ["scenes/a.ron", "scenes/b.ron"], "sorted, .ron only");
-    assert_eq!(t.text(&format!("{SCENE}/list/f0")), "scenes/a.ron");
+    assert_eq!(files, [format!("{scenes_text}/a.ron"), format!("{scenes_text}/b.ron")], "sorted, .ron only");
+    assert_eq!(t.text(&format!("{SCENE}/list/f0")), format!("{scenes_text}/a.ron"));
     t.click(&format!("{SCENE}/list/f1"));
     t.step(4);
-    std::env::set_current_dir(here).unwrap();
     assert_eq!(t.engine.current_scene(), Some("b"));
-    assert_eq!(ui_state(&t).path.as_deref(), Some("scenes/b.ron"));
+    assert_eq!(ui_state(&t).path, Some(format!("{scenes_text}/b.ron")));
     assert!(t.resource::<EditorPanel>().rows.is_empty(), "b is an empty scene");
     std::fs::remove_dir_all(&dir).ok();
 }

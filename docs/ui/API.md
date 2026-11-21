@@ -322,7 +322,12 @@ pub struct StateStyles { pub normal: Style, pub hovered: Style, pub pressed: Sty
   view keeps what the user typed, a field commits on `on_submit` or when `on_focus(false)` fires,
   a rejected text gets the `wire-error` theme class (red border and text, add it after
   `wire-field`), and `on_focus` of every input is tracked so keyboard shortcuts wait while one
-  has focus. The Debug menu window opens at 640x600.
+  has focus. The Debug menu window opens at 640x600. Since step 3 the editor also registers a
+  second `UiView<DebugMsg>`, `editor_panel`, that shows the same body in the editor window (layout B;
+  placed by a system with `UiTree::layer_in(window, "editor_panel", Layer::top_left(40))` because a
+  view rebuilds its layer every frame, like the Debug menu's own window) while the tab shows a note.
+  Viewport input uses `InputState::game_input()` (a pointer over UI is not a viewport click) and
+  `pointer_window()` / `mouse_pos_in(window)` to know which window the user is in.
 - **iced:** the theme is resolved per node when the tree changes (`WidgetState` variants: normal, hovered, pressed, focused, disabled) and the widgets' status closures pick one (`button::Style` for Active / Hovered / Pressed / Disabled, `text_input` Active / Hovered / Focused / Disabled, checkbox and slider Active / Hovered(Dragged) / Disabled). iced buttons, checkboxes and sliders are not focusable, so only text inputs show `focused`. A checkbox's background / border style paints its box (not the whole row as on the web).
 - **Fallback:** resolved per node at sync time and cached until the node, its classes or the theme
   change.

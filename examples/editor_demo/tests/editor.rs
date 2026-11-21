@@ -56,7 +56,6 @@ fn the_demo_is_frozen_in_edit_runs_in_play_and_stop_puts_it_back() {
     let _ = t.resource::<EditorSelection>();
 }
 
-use efeengine_ui::editor::{load_scene_with_names, save_scene_with_names};
 
 fn bare() -> Engine {
     let mut e = Engine::with_config(EngineConfig::headless()).expect("engine");
@@ -74,18 +73,17 @@ fn the_committed_scene_is_what_the_demo_world_saves() {
     editor_demo::spawn_demo_world(&mut e);
     let dir = std::env::temp_dir().join(format!("editor_demo_scene_{}", std::process::id()));
     let fresh = dir.join("demo.ron");
-    save_scene_with_names(&e, &fresh).expect("save");
-    let (want, want_names) = (std::fs::read_to_string(&fresh).unwrap(), std::fs::read_to_string(dir.join("demo.ron.names")).unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    e.save_world_scene(&fresh).expect("save");
+    let want = std::fs::read_to_string(&fresh).unwrap();
     std::fs::remove_dir_all(&dir).ok();
     if std::env::var_os("EFE_BLESS_SCENES").is_some() {
         std::fs::create_dir_all(manifest("scenes")).unwrap();
         std::fs::write(manifest("scenes/demo.ron"), &want).unwrap();
-        std::fs::write(manifest("scenes/demo.ron.names"), &want_names).unwrap();
     }
     let have = std::fs::read_to_string(manifest("scenes/demo.ron")).unwrap_or_default();
-    let have_names = std::fs::read_to_string(manifest("scenes/demo.ron.names")).unwrap_or_default();
     assert_eq!(have, want, "scenes/demo.ron is out of date; EFE_BLESS_SCENES=1 rewrites it. Expected:\n{want}");
-    assert_eq!(have_names, want_names, "scenes/demo.ron.names is out of date. Expected:\n{want_names}");
+    assert!(!manifest("scenes/demo.ron.names").exists(), "names live in the scene file now, the sidecar is gone");
 }
 
 #[test]
@@ -95,7 +93,7 @@ fn the_demo_starts_from_the_scene_file() {
     assert!(editor_demo::scene_path().is_some(), "the demo scene is committed");
     let rows = e.editable_entities();
     let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, ["camera", "sun", "planet", "crate", "gem"], "names come from the sidecar");
+    assert_eq!(names, ["camera", "sun", "planet", "crate", "gem"], "names come from the scene file");
     assert!(rows.iter().all(|r| r.scene_owned), "the file's entities belong to its scene");
     assert_eq!(rows[2].parent, Some(rows[1].entity), "planet is still under sun");
     assert_eq!(e.current_scene(), Some("demo"));
@@ -119,7 +117,7 @@ fn an_edited_demo_saves_through_the_editor_and_loads_back() {
     assert!(std::path::Path::new(&path).exists(), "saved");
 
     let mut other = bare();
-    let n = load_scene_with_names(&mut other, &path, false).expect("load");
+    let n = other.load_scene_file(&path).expect("load").len();
     assert_eq!(n, 5);
     let sun2 = other.entity_by_editor_id(2).unwrap();
     assert_eq!(other.world().get::<&Spin>(sun2).unwrap().speed, 2.5);

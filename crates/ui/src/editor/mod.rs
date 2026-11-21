@@ -1,6 +1,8 @@
 //! The in-game scene editor (docs/IN_GAME_EDITOR.md): a plugin on top of the Debug menu. Steps 1
-//! and 2: play modes, the hierarchy and an editable inspector in an "Editor" tab, entity actions,
-//! undo / redo, scene files, and a selection outline in the world. Build with feature `editor`; add it after `UiPlugin` and `DebugMenuPlugin`.
+//! to 3: play modes, the hierarchy and an editable inspector in an "Editor" tab, entity actions,
+//! undo / redo, scene files, and the viewport: an editor camera (pan, zoom, frame), picking,
+//! move / rotate / scale gizmos with snapping and a grid, reparenting, and an optional separate
+//! editor window. Build with feature `editor`; add it after `UiPlugin` and `DebugMenuPlugin`.
 //!
 //! ```ignore
 //! engine.add_plugin(UiPlugin::new())?;
@@ -13,7 +15,7 @@
 //!   `Engine::set_global_system`), Play snapshots the world and runs, Pause freezes again, Step
 //!   runs one frame, Stop restores the snapshot (or keeps the changes, `keep_changes`). Requests:
 //!   [`EditorRequest`] events or the toolbar. Only `#[script_component]` components and resources
-//!   registered with `register_snapshot_resource` survive Stop; `Name` is put back by `EditorId`.
+//!   registered with `register_snapshot_resource` survive Stop (`Name` too: it is in the snapshot).
 //! - **Hierarchy and inspector**: `Engine::editable_entities` / `inspect_entity`, copied into
 //!   [`EditorPanel`] at most every [`REFRESH`] seconds while the tab shows, and at once after a
 //!   selection or mode change. The panel resource is written only when its content changed, so
@@ -26,6 +28,11 @@
 //!   Ctrl+Y (not while a text input has focus) or the toolbar undo and redo.
 //! - **Scene files** (`files.rs`): Save, Save As, Load, New and the `scenes/*.ron` list; the dirty
 //!   marker `*` shows unsaved edits. Edit mode only.
+//! - **Viewport** (`viewport.rs`): [`EditorCamera`] (an `EditorOnly` camera, never saved) renders
+//!   the main window in Edit / Paused (layout A) or its own window (layout B,
+//!   [`EditorPlugin::separate_window`]); middle drag or Space + left drag pans, the wheel zooms
+//!   at the cursor, F frames the selection, Home resets; a left click picks, W / E / R choose
+//!   the gizmo ([`GizmoTool`]), G toggles the grid, Ctrl snaps; a drag is one undo entry.
 //! - **Selection** ([`EditorSelection`]): the entity and its `EditorId` (entity ids change on
 //!   Stop; the id is how the selection survives). A rectangle is drawn around a selected sprite
 //!   with `DebugDraw2D`.
@@ -34,10 +41,12 @@ mod edit;
 mod files;
 mod mode;
 mod panel;
+pub mod viewport;
 
 pub use edit::{EditorHistory, HISTORY_LIMIT, parse_scalar, removable, with_element};
-pub use files::{SCENES_DIR, list_scenes, load_scene_with_names, save_scene_with_names};
+pub use files::{SCENES_DIR, list_scenes};
 pub use mode::{EditorMode, EditorRequest};
+pub use viewport::EditorCamera;
 
 use std::collections::BTreeMap;
 
@@ -45,13 +54,16 @@ use efeengine_core::engine::inspect::{EntityRow, InspectedComponent};
 use efeengine_core::prelude::*;
 
 use crate::debug_menu::{DebugExtraTabs, DebugMsg, DebugState, DebugTab};
-use crate::view::UiViews;
+use crate::view::{RunCondition, UiView, UiViews};
 
 /// The id of the tab in [`DebugExtraTabs`] (view keys live under `debug_menu/editor`).
 pub const TAB: &str = "editor";
 
 /// How often (seconds) the hierarchy and the inspector read the world while the tab shows.
 pub const REFRESH: f32 = 0.25;
+
+/// The name of the panel view that lives in the editor window (layout B).
+pub(crate) const PANEL_VIEW: &str = "editor_panel";
 
 /// The plugin name: systems of plugins whose name starts with `efeengine` are never frozen.
 const PLUGIN_NAME: &str = "efeengine-editor";
@@ -60,11 +72,27 @@ const PLUGIN_NAME: &str = "efeengine-editor";
 /// until the first Pause; Stop then freezes without restoring, there is no snapshot).
 pub struct EditorPlugin {
     start: EditorMode,
+    separate_window: bool,
+    scenes_dir: String,
 }
 
 impl EditorPlugin {
     pub fn new() -> Self {
-        EditorPlugin { start: EditorMode::Edit }
+        EditorPlugin { start: EditorMode::Edit, separate_window: false, scenes_dir: SCENES_DIR.to_string() }
+    }
+    /// Layout B from the first frame: the editor camera and the editor panels get their own
+    /// window (see [`EditorView`]). Without a second window (SDL mode, a custom renderer, a
+    /// backend that cannot) a warning is logged and the layout stays A. The toolbar's Detach /
+    /// Attach button switches at runtime.
+    pub fn separate_window(mut self, on: bool) -> Self {
+        self.separate_window = on;
+        self
+    }
+    /// The directory whose `*.ron` files the Load list shows (default `scenes`, relative to the
+    /// current directory).
+    pub fn scenes_dir(mut self, dir: impl Into<String>) -> Self {
+        self.scenes_dir = dir.into();
+        self
     }
     /// `Edit` or `Play` (`Paused` is `Edit`).
     pub fn start_in(mut self, mode: EditorMode) -> Self {
@@ -87,6 +115,42 @@ pub struct EditorState {
     pub keep_changes: bool,
     /// How many game systems the current mode keeps frozen.
     pub frozen: usize,
+}
+
+/// Plugin settings, readable by the systems. A resource.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EditorConfig {
+    pub scenes_dir: String,
+    pub separate_window: bool,
+}
+
+/// The gizmo the viewport shows for the selection (keys W / E / R).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GizmoTool {
+    #[default]
+    Move,
+    Rotate,
+    Scale,
+}
+
+/// Viewport settings and layout. A resource; written only on a real change (the toolbar shows it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditorView {
+    pub tool: GizmoTool,
+    /// Draw the grid (key G).
+    pub grid: bool,
+    /// World units between grid lines, and the snap step while Ctrl is held.
+    pub grid_step: f32,
+    /// Layout B: the editor camera and the panels are in their own window.
+    pub detached: bool,
+    /// That window (`Some` exactly while `detached`).
+    pub window: Option<u32>,
+}
+
+impl Default for EditorView {
+    fn default() -> Self {
+        EditorView { tool: GizmoTool::Move, grid: false, grid_step: 16.0, detached: false, window: None }
+    }
 }
 
 /// The selected entity. A resource.
@@ -123,6 +187,13 @@ pub struct FieldKey {
 }
 
 impl FieldKey {
+    /// The key of the grid step input of the toolbar.
+    pub fn grid() -> Self {
+        FieldKey::new("@grid", "", 0)
+    }
+    pub fn is_grid(&self) -> bool {
+        self.component == "@grid"
+    }
     pub fn new(component: &str, field: &str, index: usize) -> Self {
         FieldKey { component: component.to_string(), field: field.to_string(), index }
     }
@@ -163,6 +234,8 @@ pub struct EditorUi {
     pub dirty: bool,
     pub undo_len: usize,
     pub redo_len: usize,
+    /// The "Parent" list of the inspector is open.
+    pub parent_picker: bool,
 }
 
 /// What the tab's widgets send (inside `DebugMsg::Ext`) and what other code may send as an event.
@@ -198,6 +271,16 @@ pub enum EditorMsg {
     Load(String),
     /// Unload the scene and empty the world.
     NewScene,
+    /// The toolbar's tool buttons.
+    Tool(GizmoTool),
+    /// Grid on / off.
+    Grid(bool),
+    /// Open (`true`) or close (`false`) the separate editor window.
+    Detach(bool),
+    /// Make the selected entity a child of this one (`None`: unparent), keeping its world position.
+    Reparent(Option<Entity>),
+    /// Opens or closes the "Parent" list of the inspector.
+    ParentPicker(bool),
 }
 
 /// Seconds since the last refresh and a "refresh now" flag. Private: writing it never wakes the view.
@@ -269,6 +352,7 @@ fn editor_update(cx: &mut Ctx) {
                     ui.drafts.clear();
                     ui.errors.clear();
                     ui.picker_open = false;
+                    ui.parent_picker = false;
                     ui.status.clear();
                     ui.status_error = false;
                 }
@@ -277,6 +361,23 @@ fn editor_update(cx: &mut Ctx) {
                 ui.errors.remove(&key);
                 ui.drafts.insert(key, text);
             }
+            EditorMsg::Commit(key, text) if key.is_grid() => match text.trim().parse::<f32>() {
+                Ok(v) if v.is_finite() && v > 0.0 => {
+                    ui.drafts.remove(&key);
+                    ui.errors.remove(&key);
+                    if cx.resources.get::<EditorView>().is_some_and(|x| x.grid_step != v) {
+                        if let Some(x) = cx.resources.get_mut::<EditorView>() {
+                            x.grid_step = v;
+                        }
+                    }
+                }
+                _ => {
+                    ui.errors.insert(key.clone(), "not a positive number".to_string());
+                    ui.drafts.insert(key, text);
+                    ui.status = "grid step: type a number above 0".to_string();
+                    ui.status_error = true;
+                }
+            },
             EditorMsg::Commit(key, text) => {
                 ui.drafts.insert(key.clone(), text.clone());
                 cx.commands.engine_task(move |e| edit::commit_field(e, key, text));
@@ -313,6 +414,26 @@ fn editor_update(cx: &mut Ctx) {
             }
             EditorMsg::Load(path) => cx.commands.engine_task(move |e| files::load(e, path)),
             EditorMsg::NewScene => cx.commands.engine_task(files::new_scene),
+            EditorMsg::Tool(t) => {
+                if cx.resources.get::<EditorView>().is_some_and(|v| v.tool != t) {
+                    if let Some(v) = cx.resources.get_mut::<EditorView>() {
+                        v.tool = t;
+                    }
+                }
+            }
+            EditorMsg::Grid(on) => {
+                if cx.resources.get::<EditorView>().is_some_and(|v| v.grid != on) {
+                    if let Some(v) = cx.resources.get_mut::<EditorView>() {
+                        v.grid = on;
+                    }
+                }
+            }
+            EditorMsg::Detach(on) => cx.commands.engine_task(move |e| viewport::set_detached(e, on)),
+            EditorMsg::Reparent(p) => {
+                ui.parent_picker = false;
+                cx.commands.engine_task(move |e| edit::reparent(e, p));
+            }
+            EditorMsg::ParentPicker(open) => ui.parent_picker = open,
         }
     }
     if ui != before {
@@ -326,7 +447,7 @@ fn editor_update(cx: &mut Ctx) {
 /// a text input has focus (the UI captures the keyboard then, and the editor tracks its own inputs).
 fn editor_keys(cx: &mut Ctx) {
     let mods = cx.input.modifiers();
-    if !mods.ctrl() || !(cx.input.just_pressed(KeyCode::Z) || cx.input.just_pressed(KeyCode::Y)) || !tab_shown(cx) {
+    if !mods.ctrl() || !(cx.input.just_pressed(KeyCode::Z) || cx.input.just_pressed(KeyCode::Y)) || !(tab_shown(cx) || viewport::detached_focused(cx)) {
         return;
     }
     let typing = cx.input.capture().keyboard || cx.resources.get::<EditorUi>().is_none_or(|u| u.focus.is_some());
@@ -407,6 +528,8 @@ fn refresh_panel(e: &mut Engine) {
 /// The first frame: freeze the game when starting in Edit.
 fn editor_boot(cx: &mut Ctx) {
     let Some(start) = cx.resources.get_mut::<Boot>().and_then(|b| b.0.take()) else { return };
+    let detach = cx.resources.get::<EditorConfig>().is_some_and(|c| c.separate_window);
+    viewport::boot(cx, detach);
     match start {
         EditorMode::Edit => cx.commands.engine_task(mode::enter_edit),
         _ => cx.commands.engine_task(mode::enter_play_unrecorded),
@@ -418,28 +541,6 @@ struct Boot(Option<EditorMode>);
 fn editor_step_end(cx: &mut Ctx) {
     if mode::step_active(cx) {
         cx.commands.engine_task(mode::step_end);
-    }
-}
-
-/// A rectangle around the selected sprite.
-fn editor_outline(cx: &mut Ctx) {
-    let Some(entity) = cx.resources.get::<EditorSelection>().and_then(|s| s.entity) else { return };
-    let mut q = cx.world.query_one::<(&Sprite, &GlobalTransform)>(entity);
-    let Ok((s, g)) = q.get() else { return };
-    let size = if s.auto_size != 0 {
-        cx.resources.get::<Textures>().and_then(|t| t.size(s.texture)).map_or(Vec2::ONE, |(w, h)| Vec2::new(w as f32, h as f32))
-    } else {
-        s.size
-    };
-    let m = g.affine();
-    let h = size * 0.5;
-    let c = [m.transform_point2(Vec2::new(-h.x, -h.y)), m.transform_point2(Vec2::new(h.x, -h.y)), m.transform_point2(Vec2::new(h.x, h.y)), m.transform_point2(Vec2::new(-h.x, h.y))];
-    drop(q);
-    if let Some(d) = cx.resources.get_mut::<DebugDraw2D>() {
-        let color = [1.0, 0.8, 0.1, 1.0];
-        for i in 0..4 {
-            d.line(c[i], c[(i + 1) % 4], color);
-        }
     }
 }
 
@@ -458,6 +559,10 @@ impl Plugin for EditorPlugin {
         engine.insert_resource(EditorPanel::default());
         engine.insert_resource(EditorUi::default());
         engine.insert_resource(EditorHistory::default());
+        engine.insert_resource(EditorView::default());
+        engine.insert_resource(EditorConfig { scenes_dir: self.scenes_dir.clone(), separate_window: self.separate_window });
+        engine.insert_resource(viewport::ViewportRt::default());
+        viewport::spawn_camera(engine);
         engine.insert_resource(EditorClock { since: f32::INFINITY, force: false });
         engine.insert_resource(mode::ModeRuntime::default());
         engine.insert_resource(Boot(Some(self.start)));
@@ -465,17 +570,31 @@ impl Plugin for EditorPlugin {
         engine.add_system(Stage::Update, editor_update).order(order::EARLY + 1).name("editor_update");
         engine.add_system(Stage::Update, editor_keys).order(order::EARLY + 2).name("editor_keys");
         engine.add_system(Stage::PostUpdate, editor_refresh).order(order::LATE).name("editor_refresh");
-        engine.add_system(Stage::PostUpdate, editor_outline).order(order::TRANSFORM + 1).name("editor_outline");
+        engine.add_system(Stage::Update, viewport::input).order(order::EARLY + 3).name("editor_viewport_input");
+        engine.add_system(Stage::Update, viewport::window_watch).order(order::EARLY + 4).name("editor_window_watch");
+        engine.add_system(Stage::PostUpdate, viewport::camera_apply).order(order::LATE).name("editor_camera");
+        engine.add_system(Stage::PostUpdate, viewport::overlay).order(order::TRANSFORM + 1).name("editor_overlay");
+        engine.add_system(Stage::PostUpdate, viewport::place_panel).order(order::LATE + 12).name("editor_place_panel");
+        engine
+            .add_plugin(
+                UiView::with(PANEL_VIEW, panel::window_view)
+                    .layer(crate::Layer::top_left(40))
+                    .enabled(false)
+                    .when(RunCondition::custom(|cx| cx.res_changed::<EditorState>() || cx.res_changed::<EditorSelection>() || cx.res_changed::<EditorPanel>() || cx.res_changed::<EditorUi>() || cx.res_changed::<EditorView>())),
+            )
+            .expect("editor panel view");
         engine.add_system(Stage::RenderExtract, editor_step_end).order(order::EARLY).name("editor_step_end");
         let tabs = engine.resources_mut().get_mut::<DebugExtraTabs>().expect("EditorPlugin needs DebugMenuPlugin added first");
         tabs.add(
             TAB,
             "Editor",
             panel::view,
-            |cx| cx.res_changed::<EditorState>() || cx.res_changed::<EditorSelection>() || cx.res_changed::<EditorPanel>() || cx.res_changed::<EditorUi>(),
+            |cx| cx.res_changed::<EditorState>() || cx.res_changed::<EditorSelection>() || cx.res_changed::<EditorPanel>() || cx.res_changed::<EditorUi>() || cx.res_changed::<EditorView>(),
         );
     }
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_viewport;

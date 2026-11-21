@@ -6,10 +6,12 @@
 //! (an entity without one gets one the first time it is edited), so a deleted entity that comes
 //! back by undo is found again by the commands before it.
 
-use efeengine_core::ecs::SceneValue;
+use efeengine_core::ecs::{SceneValue, entity_from_bits, entity_to_bits};
 use efeengine_core::engine::inspect::{EntityData, UNMANAGED_COMPONENTS};
+use efeengine_core::math::Affine2;
 use efeengine_core::prelude::*;
 
+use super::viewport::{decompose, world_affine_of};
 use super::{EditorSelection, EditorUi, FieldKey};
 
 /// How many edits the log keeps (the oldest are dropped).
@@ -21,13 +23,65 @@ pub(crate) enum Cmd {
     /// A field written: the whole field value before and after (a list for `[x, y]`).
     Set { id: u64, component: String, field: String, old: SceneValue, new: SceneValue },
     AddComponent { id: u64, component: String },
-    /// A component removed, with its field values (put back by undo).
-    RemoveComponent { id: u64, component: String, fields: Vec<(String, SceneValue)> },
+    /// A component removed, with its field values (put back by undo). `refs` says which of the
+    /// fields are entity references and the `EditorId` of the entity each one pointed at: undo
+    /// looks that entity up again instead of trusting the old raw bits (the target may have been
+    /// deleted and brought back in between).
+    RemoveComponent { id: u64, component: String, fields: Vec<(String, SceneValue)>, refs: Vec<(String, Option<u64>)> },
     Rename { id: u64, old: Option<String>, new: String },
-    /// A new entity (New, Duplicate): undo deletes it, redo spawns it again.
-    Spawn { data: EntityData },
+    /// A new entity (New, Duplicate): undo deletes it, redo spawns it again. `refs`: see [`RefFix`].
+    Spawn { data: EntityData, refs: Vec<RefFix> },
     /// An entity and its descendants deleted, in tree order.
-    Delete { data: Vec<EntityData> },
+    Delete { data: Vec<EntityData>, refs: Vec<RefFix> },
+    /// A viewport drag (move, rotate, scale): the whole local `Transform` before and after.
+    Transform { id: u64, old: Transform, new: Transform },
+    /// A parent change that kept the world position: the parents by `EditorId` (`None`: a root)
+    /// and the local `Transform` before and after.
+    Reparent { id: u64, old_parent: Option<u64>, new_parent: Option<u64>, old: Transform, new: Transform },
+}
+
+/// An entity reference of a saved copy that points outside the copied group, kept by the
+/// target's `EditorId` and resolved when the copy is spawned again.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RefFix {
+    index: usize,
+    component: String,
+    field: String,
+    target: Option<u64>,
+}
+
+fn ref_bits(v: &SceneValue) -> Option<u64> {
+    match v {
+        SceneValue::UInt(u) => Some(*u),
+        SceneValue::Int(i) => u64::try_from(*i).ok(),
+        _ => None,
+    }
+}
+
+/// The references of `data` that point outside the group (their `scene.id`s), by `EditorId`.
+fn externalize(e: &mut Engine, data: &[EntityData]) -> Vec<RefFix> {
+    let group: Vec<u64> = data.iter().filter_map(|d| d.scene.id).collect();
+    let mut out = Vec::new();
+    for (index, d) in data.iter().enumerate() {
+        for (component, fields) in &d.scene.components {
+            for field in e.entity_field_names(component) {
+                let Some(bits) = fields.get(&field).and_then(ref_bits).filter(|b| *b != 0 && !group.contains(b)) else { continue };
+                let target = entity_from_bits(bits).filter(|t| e.world().contains(*t)).and_then(|t| e.ensure_editor_id(t));
+                out.push(RefFix { index, component: component.clone(), field, target });
+            }
+        }
+    }
+    out
+}
+
+/// Writes the current entity of every [`RefFix`] into `data` (0, no entity, when the target is gone).
+fn internalize(e: &Engine, data: &mut [EntityData], refs: &[RefFix]) {
+    for r in refs {
+        let bits = r.target.and_then(|id| e.entity_by_editor_id(id)).map_or(0, entity_to_bits);
+        if let Some(f) = data.get_mut(r.index).and_then(|d| d.scene.components.get_mut(&r.component)) {
+            f.insert(r.field.clone(), SceneValue::UInt(bits));
+        }
+    }
 }
 
 impl Cmd {
@@ -39,6 +93,8 @@ impl Cmd {
             Cmd::Rename { .. } => "rename".to_string(),
             Cmd::Spawn { .. } => "new entity".to_string(),
             Cmd::Delete { .. } => "delete entity".to_string(),
+            Cmd::Transform { .. } => "transform".to_string(),
+            Cmd::Reparent { .. } => "reparent".to_string(),
         }
     }
 }
@@ -268,10 +324,17 @@ pub(crate) fn remove_component(e: &mut Engine, component: String) {
     if !removable(&c.name, c.readonly) {
         return say(e, format!("{} cannot be removed", c.name), true);
     }
+    // Entity references are remembered by the target's EditorId, not by the raw bits.
+    let mut refs: Vec<(String, Option<u64>)> = Vec::new();
+    for f in &c.entity_fields {
+        let bits = c.fields.iter().find(|(n, _)| n == f).and_then(|(_, v)| ref_bits(v)).unwrap_or(0);
+        let target = entity_from_bits(bits).filter(|t| e.world().contains(*t)).and_then(|t| e.ensure_editor_id(t));
+        refs.push((f.clone(), target));
+    }
     match e.remove_component(entity, &component) {
         Ok(()) => {
             if let Some(id) = e.ensure_editor_id(entity) {
-                record(e, Cmd::RemoveComponent { id, component, fields: c.fields });
+                record(e, Cmd::RemoveComponent { id, component, fields: c.fields, refs });
             }
             with_ui(e, |ui| {
                 ui.drafts.clear();
@@ -314,7 +377,8 @@ fn set_name(e: &mut Engine, entity: Entity, name: Option<&str>) {
 pub(crate) fn new_entity(e: &mut Engine) {
     let n = e.new_editor_entity();
     if let Some(data) = e.capture_entity_data(n) {
-        record(e, Cmd::Spawn { data });
+        let refs = externalize(e, std::slice::from_ref(&data));
+        record(e, Cmd::Spawn { data, refs });
     }
     select(e, Some(n));
 }
@@ -325,7 +389,8 @@ pub(crate) fn duplicate(e: &mut Engine) {
     match e.duplicate_entity(entity) {
         Ok(n) => {
             if let Some(data) = e.capture_entity_data(n) {
-                record(e, Cmd::Spawn { data });
+                let refs = externalize(e, std::slice::from_ref(&data));
+                record(e, Cmd::Spawn { data, refs });
             }
             select(e, Some(n));
         }
@@ -343,8 +408,88 @@ pub(crate) fn delete(e: &mut Engine) {
     if data.is_empty() {
         return;
     }
-    record(e, Cmd::Delete { data });
+    let refs = externalize(e, &data);
+    record(e, Cmd::Delete { data, refs });
     select(e, None);
+}
+
+fn write_transform(e: &mut Engine, ent: Entity, t: Transform) -> Result<(), String> {
+    let mut cur = e.world_mut().get::<&mut Transform>(ent).map_err(|_| "the entity has no Transform".to_string())?;
+    *cur = t;
+    Ok(())
+}
+
+/// `parent` (an `EditorId`, resolved now) or no parent.
+fn set_parent(e: &mut Engine, ent: Entity, parent: Option<u64>) -> Result<(), String> {
+    match parent {
+        Some(id) => {
+            let p = find(e, id)?;
+            e.world_mut().insert_one(ent, Parent::new(p)).map_err(|x| x.to_string())
+        }
+        None => {
+            let _ = e.world_mut().remove_one::<Parent>(ent);
+            Ok(())
+        }
+    }
+}
+
+/// Records a finished viewport drag as one undo entry (the entity already holds `new`).
+pub(crate) fn record_transform(e: &mut Engine, entity: Entity, old: Transform, new: Transform) {
+    if old == new {
+        return;
+    }
+    let Some(id) = e.ensure_editor_id(entity) else { return };
+    record(e, Cmd::Transform { id, old, new });
+}
+
+/// Makes the selected entity a child of `new_parent` (`None`: a root), keeping its world
+/// transform; recorded for undo. Refuses a cycle (a parent that is the entity or one of its
+/// descendants) and a parent without a `Transform`.
+pub(crate) fn reparent(e: &mut Engine, new_parent: Option<Entity>) {
+    let Some(ent) = selected(e) else { return };
+    if let Err(msg) = reparent_entity(e, ent, new_parent) {
+        say(e, format!("reparent: {msg}"), true);
+    }
+}
+
+pub(crate) fn reparent_entity(e: &mut Engine, ent: Entity, new_parent: Option<Entity>) -> Result<(), String> {
+    if let Some(p) = new_parent {
+        if !e.world().contains(p) {
+            return Err("that parent is gone".to_string());
+        }
+        if e.entity_tree(ent).contains(&p) {
+            return Err("an entity cannot be its own parent or a child of its own descendant".to_string());
+        }
+        if e.world().get::<&Transform>(p).is_err() {
+            return Err("the new parent has no Transform".to_string());
+        }
+    }
+    let has_parent = e.world().get::<&Parent>(ent).is_ok();
+    let old_parent = e.world().get::<&Parent>(ent).ok().and_then(|p| p.entity()).filter(|p| e.world().contains(*p));
+    if old_parent == new_parent && has_parent == new_parent.is_some() {
+        return Ok(());
+    }
+    let old = *e.world().get::<&Transform>(ent).map_err(|_| "the entity has no Transform".to_string())?;
+    let world_aff = world_affine_of(e.world(), ent);
+    let parent_aff = new_parent.map_or(Affine2::IDENTITY, |p| world_affine_of(e.world(), p));
+    if parent_aff.matrix2.determinant().abs() < 1e-12 {
+        return Err("the new parent has a zero scale".to_string());
+    }
+    let new = decompose(parent_aff.inverse() * world_aff);
+    let id = e.ensure_editor_id(ent).ok_or("the entity is gone")?;
+    let old_id = old_parent.and_then(|p| e.ensure_editor_id(p));
+    let new_id = new_parent.and_then(|p| e.ensure_editor_id(p));
+    match new_parent {
+        Some(p) => {
+            e.world_mut().insert_one(ent, Parent::new(p)).map_err(|x| x.to_string())?;
+        }
+        None => {
+            let _ = e.world_mut().remove_one::<Parent>(ent);
+        }
+    }
+    write_transform(e, ent, new)?;
+    record(e, Cmd::Reparent { id, old_parent: old_id, new_parent: new_id, old, new });
+    Ok(())
 }
 
 fn find(e: &Engine, id: u64) -> Result<Entity, String> {
@@ -371,10 +516,17 @@ impl Cmd {
                 e.remove_component(ent, component).map_err(|x| x.to_string())?;
                 Ok(Some(ent))
             }
-            Cmd::RemoveComponent { id, component, fields } => {
+            Cmd::RemoveComponent { id, component, fields, refs } => {
                 let ent = find(e, *id)?;
                 e.add_component_default(ent, component).map_err(|x| x.to_string())?;
-                write_fields(e, ent, component, fields)?;
+                let mut fields = fields.clone();
+                for (name, target) in refs {
+                    let bits = target.and_then(|t| e.entity_by_editor_id(t)).map_or(0, entity_to_bits);
+                    if let Some(f) = fields.iter_mut().find(|(n, _)| n == name) {
+                        f.1 = SceneValue::UInt(bits);
+                    }
+                }
+                write_fields(e, ent, component, &fields)?;
                 Ok(Some(ent))
             }
             Cmd::Rename { id, old, .. } => {
@@ -382,14 +534,27 @@ impl Cmd {
                 set_name(e, ent, old.as_deref());
                 Ok(Some(ent))
             }
-            Cmd::Spawn { data } => {
+            Cmd::Spawn { data, .. } => {
                 let ent = find(e, data.editor_id().ok_or("the entity has no id")?)?;
                 e.delete_entity_tree(ent);
                 Ok(None)
             }
-            Cmd::Delete { data } => {
-                let spawned = e.spawn_entity_data(data).map_err(|x| x.to_string())?;
+            Cmd::Delete { data, refs } => {
+                let mut data = data.clone();
+                internalize(e, &mut data, refs);
+                let spawned = e.spawn_entity_data(&data).map_err(|x| x.to_string())?;
                 Ok(spawned.first().copied())
+            }
+            Cmd::Transform { id, old, .. } => {
+                let ent = find(e, *id)?;
+                write_transform(e, ent, *old)?;
+                Ok(Some(ent))
+            }
+            Cmd::Reparent { id, old_parent, old, .. } => {
+                let ent = find(e, *id)?;
+                set_parent(e, ent, *old_parent)?;
+                write_transform(e, ent, *old)?;
+                Ok(Some(ent))
             }
         }
     }
@@ -416,14 +581,27 @@ impl Cmd {
                 set_name(e, ent, Some(new));
                 Ok(Some(ent))
             }
-            Cmd::Spawn { data } => {
-                let spawned = e.spawn_entity_data(std::slice::from_ref(data)).map_err(|x| x.to_string())?;
+            Cmd::Spawn { data, refs } => {
+                let mut data = data.clone();
+                internalize(e, std::slice::from_mut(&mut data), refs);
+                let spawned = e.spawn_entity_data(std::slice::from_ref(&data)).map_err(|x| x.to_string())?;
                 Ok(spawned.first().copied())
             }
-            Cmd::Delete { data } => {
+            Cmd::Delete { data, .. } => {
                 let ent = find(e, data.first().and_then(|d| d.editor_id()).ok_or("the entity has no id")?)?;
                 e.delete_entity_tree(ent);
                 Ok(None)
+            }
+            Cmd::Transform { id, new, .. } => {
+                let ent = find(e, *id)?;
+                write_transform(e, ent, *new)?;
+                Ok(Some(ent))
+            }
+            Cmd::Reparent { id, new_parent, new, .. } => {
+                let ent = find(e, *id)?;
+                set_parent(e, ent, *new_parent)?;
+                write_transform(e, ent, *new)?;
+                Ok(Some(ent))
             }
         }
     }

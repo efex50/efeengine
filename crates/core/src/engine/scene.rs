@@ -107,6 +107,10 @@ pub struct SceneEntity {
     /// written by [`Engine::save_scene`] have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<u64>,
+    /// The entity's [`Name`](super::components::Name) (Rust-only component, so it is not one of
+    /// `components`): written by capture and snapshot, put back by load and restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub components: BTreeMap<String, BTreeMap<String, SceneValue>>,
 }
 
@@ -470,8 +474,9 @@ impl Engine {
             .iter()
             .map(|r| r.entity())
             .filter(|&e| {
-                world.get::<&SceneOwned>(e).is_ok()
-                    || (!owned_only && types.entries().iter().any(|t| t.is_component() && !t.readonly() && t.has(world, e)))
+                world.get::<&super::components::EditorOnly>(e).is_err()
+                    && (world.get::<&SceneOwned>(e).is_ok()
+                    || (!owned_only && types.entries().iter().any(|t| t.is_component() && !t.readonly() && t.has(world, e))))
             })
             .collect()
     }
@@ -479,6 +484,7 @@ impl Engine {
     pub(super) fn capture_entity(&self, e: Entity) -> SceneEntity {
         let world = self.world();
         let mut ent = SceneEntity::default();
+        ent.name = world.get::<&super::components::Name>(e).ok().map(|n| n.0.clone()).filter(|n| !n.is_empty());
         for entry in self.types().entries() {
             if !entry.is_component() || entry.readonly() || !entry.has(world, e) {
                 continue;
@@ -735,6 +741,9 @@ impl Engine {
             spawned.push(e);
             if let Some(id) = scene.entities[i].id {
                 map.insert(id, super::types::entity_to_bits(e));
+            }
+            if let Some(n) = &scene.entities[i].name {
+                let _ = self.state.world.insert_one(e, super::components::Name::new(n.clone()));
             }
         }
         for (i, comps) in decoded.iter().enumerate() {

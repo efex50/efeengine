@@ -11,7 +11,6 @@
 use std::path::PathBuf;
 
 use efeengine_core::prelude::*;
-use efeengine_ui::editor::load_scene_with_names;
 use efeengine_ui::{DebugMenuPlugin, EditorPlugin, UiPlugin};
 
 /// The scene file the demo loads at startup, relative to the current directory.
@@ -51,8 +50,8 @@ pub fn register_game(engine: &mut Engine) {
 pub fn build_game(engine: &mut Engine) {
     register_game(engine);
     if let Some(path) = scene_path() {
-        match load_scene_with_names(engine, &path, false) {
-            Ok(n) => return global_info(&format!("[editor_demo] {n} entities from {}", path.display())),
+        match engine.load_scene_file(&path) {
+            Ok(v) => return global_info(&format!("[editor_demo] {} entities from {}", v.len(), path.display())),
             Err(e) => global_warn(&format!("[editor_demo] {}: {e}; spawning the demo world from code", path.display())),
         }
     }

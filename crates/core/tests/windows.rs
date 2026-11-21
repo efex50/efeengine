@@ -214,3 +214,34 @@ fn set_window_title_and_close_unknown_are_harmless() {
     e.close_window(a);
     assert_eq!(e.state.windows.len(), 1);
 }
+
+#[test]
+fn an_editor_only_camera_wins_its_window_and_debug_draw_goes_to_the_named_window() {
+    let mut e = engine();
+    let w = e.create_window(WindowDesc::new("Tools").size(200, 100)).unwrap();
+    e.run_frames(1, DT);
+    let game = e.world_mut().spawn((Camera::new_2d().zoom(1.0), Transform::from_position(Vec2::new(5.0, 0.0))));
+    let tool = e.world_mut().spawn((Camera::new_2d().zoom(2.0), Transform::default(), EditorOnly));
+    let tool_w = e.world_mut().spawn((Camera::new_2d().target(w), Transform::default(), EditorOnly));
+    e.run_frames(2, DT);
+    {
+        let f = e.render_frame();
+        assert_eq!(f.d2.camera.as_ref().unwrap().entity, tool, "the editor camera beats the game camera (lower id or not)");
+        assert_ne!(f.d2.camera.as_ref().unwrap().entity, game);
+        assert_eq!(f.window(w.0).unwrap().0.camera.as_ref().unwrap().entity, tool_w);
+    }
+    // debug draw: one shape per window
+    e.add_system(Stage::Update, move |cx| {
+        let d = cx.resources.get_mut::<DebugDraw2D>().unwrap();
+        d.line(Vec2::ZERO, Vec2::new(10.0, 0.0), DebugDraw2D::RED);
+        d.set_window(w).line(Vec2::ZERO, Vec2::new(0.0, 10.0), DebugDraw2D::GREEN).line(Vec2::ZERO, Vec2::new(0.0, 20.0), DebugDraw2D::GREEN);
+        d.set_window(77u32).line(Vec2::ZERO, Vec2::ONE, DebugDraw2D::BLUE);
+    });
+    e.run_frames(1, DT);
+    let f = e.render_frame();
+    let main_cmds = f.d2.draw.commands().len();
+    let win_cmds = f.window(w.0).unwrap().0.draw.commands().len();
+    assert!(main_cmds >= 1 && win_cmds >= 1, "{main_cmds} {win_cmds}");
+    assert!(f.window(w.0).unwrap().0.draw.vertices().len() > f.d2.draw.vertices().len(), "two lines in the window, one in main");
+    assert!(e.resources().get::<DebugDraw2D>().unwrap().is_empty(), "nothing is left over, not even for a missing window");
+}

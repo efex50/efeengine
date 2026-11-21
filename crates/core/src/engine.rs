@@ -1384,6 +1384,12 @@ impl Engine {
         Ok(())
     }
 
+    /// A [`CustomRenderer`] is installed: it draws the main window only (secondary windows are
+    /// cleared), so tools that need a second window with content (the in-game editor) check this.
+    pub fn has_custom_renderer(&self) -> bool {
+        self.renderer.has_custom()
+    }
+
     /// Close a secondary window: its surface, camera targets and UI go away; a `Closed` event is
     /// delivered next frame. Ignored for the main window (use `commands.quit()`) and unknown ids.
     pub fn close_window(&mut self, id: WindowId) {
