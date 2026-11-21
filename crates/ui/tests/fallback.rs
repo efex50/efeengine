@@ -14,12 +14,19 @@ struct H {
     cx: UiBackendCx,
     /// Every signal drained so far.
     log: Vec<UiSignal>,
+    /// The process clipboard is one global store and tests run on parallel threads: a test that
+    /// sets it, copies and reads back must not see another test's text in between. Every
+    /// harness holds this lock for its whole life (the tests are headless and fast).
+    _clipboard: std::sync::MutexGuard<'static, ()>,
 }
+
+static CLIPBOARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const ATLAS: TextureHandle = TextureHandle { id: 777 };
 
 impl H {
     fn new(window: (f32, f32), build: impl FnOnce(&mut UiTree)) -> H {
+        let guard = CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
         let mut tree = UiTree::new();
         build(&mut tree);
         let mut b = FallbackBackend::new();
@@ -27,7 +34,7 @@ impl H {
         let mut cx = UiBackendCx::new(window, 1.0);
         b.init(&mut cx);
         b.set_atlas_texture(ATLAS);
-        let mut h = H { b, tree, cx, log: Vec::new() };
+        let mut h = H { b, tree, cx, log: Vec::new(), _clipboard: guard };
         h.sync();
         h
     }
@@ -876,6 +883,7 @@ fn setting_follow_end_again_snaps_to_the_end() {
     h.frame();
     assert!(in_view(&mut h, "r19"));
     // without follow_end the position never moves when content is added
+    drop(h); // the harness holds the clipboard lock: one at a time
     let mut h = H::new((400.0, 300.0), |t| {
         scroller(t);
         let sc = t.find("sc").unwrap();
