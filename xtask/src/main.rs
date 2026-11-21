@@ -61,7 +61,7 @@ enum Cmd {
     /// Build an example without running it.
     Build(BuildArgs),
     /// Run an example with the editor link on (EFE_EDITOR=1) and the editor window in front of it.
-    /// The port is EFE_EDITOR_PORT (default 7878). Ends the game when the editor closes.
+    /// They talk over a private local socket (EFE_EDITOR_SOCKET, chosen per session). Ends the game when the editor closes.
     Editor(EditorArgs),
     /// Build an example natively and write its API index (.efapi), the file scripts are checked against.
     ApiExport {
@@ -75,6 +75,9 @@ enum Cmd {
         /// Build SDL3 from source and link statically.
         #[arg(long = "static")]
         static_sdl: bool,
+        /// Add the script JIT (cargo feature efeengine-core/jit).
+        #[arg(long)]
+        jit: bool,
     },
     /// Release web build ready to publish (dist/<example>/, with <example>.efapi and mods/).
     Dist {
@@ -140,6 +143,9 @@ struct BuildArgs {
     /// Build SDL3 from source and link statically (native; needs cmake + a C compiler).
     #[arg(long = "static")]
     static_sdl: bool,
+    /// Add the script JIT (cargo feature efeengine-core/jit; native only).
+    #[arg(long)]
+    jit: bool,
     #[command(flatten)]
     server: ServerArgs,
 }
@@ -154,6 +160,9 @@ struct EditorArgs {
     /// Build SDL3 from source and link statically.
     #[arg(long = "static")]
     static_sdl: bool,
+    /// Add the script JIT (cargo feature efeengine-core/jit; native only).
+    #[arg(long)]
+    jit: bool,
 }
 
 #[derive(Args, Clone)]
@@ -217,13 +226,13 @@ fn real_main(cli: Cli) -> Result<()> {
         Cmd::Run(a) => build_or_run(Action::Run, a, preflight),
         Cmd::Build(a) => build_or_run(Action::Build, a, preflight),
         Cmd::Editor(a) => editor_cmd(a, preflight),
-        Cmd::ApiExport { example, output, release, static_sdl } => {
+        Cmd::ApiExport { example, output, release, static_sdl, jit } => {
             let project = Project::load()?;
             let ex = pick_example(&project, example.as_deref())?;
             if preflight {
                 preflight_native(static_sdl)?;
             }
-            api::api_export(&project, &ex, output, release, static_sdl)
+            api::api_export(&project, &ex, output, release, static_sdl, jit)
         }
         Cmd::Dist { example } => {
             need_local("dist")?;
@@ -329,7 +338,7 @@ fn interactive(preflight: bool) -> Result<()> {
     let target = pick_target(&ex, None)?;
     let action = [Action::Run, Action::Build][choose("What to do?", &["run", "build only"])?];
     let server = ServerArgs { port: 8080, host: "127.0.0.1".into() };
-    dispatch(&project, &ex, target, action, false, false, &server, preflight)
+    dispatch(&project, &ex, target, action, false, false, false, &server, preflight)
 }
 
 fn build_or_run(action: Action, mut a: BuildArgs, preflight: bool) -> Result<()> {
@@ -343,7 +352,7 @@ fn build_or_run(action: Action, mut a: BuildArgs, preflight: bool) -> Result<()>
             }
     let ex = pick_example(&project, a.example.as_deref())?;
     let target = pick_target(&ex, a.target)?;
-    dispatch(&project, &ex, target, action, a.release, a.static_sdl, &a.server, preflight)
+    dispatch(&project, &ex, target, action, a.release, a.static_sdl, a.jit, &a.server, preflight)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -354,15 +363,19 @@ fn dispatch(
     action: Action,
     release: bool,
     static_sdl: bool,
+    jit: bool,
     server: &ServerArgs,
     preflight: bool,
 ) -> Result<()> {
     match target {
-        Target::Native => native(&project, ex, action, release, static_sdl, preflight),
+        Target::Native => native(&project, ex, action, release, static_sdl, jit, preflight),
         Target::Web => {
             need_local("web")?;
             if static_sdl {
                 warn("--static is ignored for web");
+            }
+            if jit {
+                warn("--jit is ignored for web (the browser always uses the interpreter)");
             }
             step(format!("web {}: {}", if action == Action::Run { "run" } else { "build" }, ex.dir));
             let out = web::build(project, ex, release)?;
@@ -429,15 +442,16 @@ fn preflight_native(static_sdl: bool) -> Result<()> {
     Ok(())
 }
 
-fn native(project: &Project, ex: &Example, action: Action, release: bool, static_sdl: bool, preflight: bool) -> Result<()> {
+fn native(project: &Project, ex: &Example, action: Action, release: bool, static_sdl: bool, jit: bool, preflight: bool) -> Result<()> {
     if preflight {
         preflight_native(static_sdl)?;
     }
-    let extra = api::build_flags(release, static_sdl);
+    let extra = api::build_flags(release, static_sdl, jit);
     let desc = format!(
-        "{}{}",
+        "{}{}{}",
         if release { "release" } else { "debug" },
-        if static_sdl { ", static SDL3" } else { "" }
+        if static_sdl { ", static SDL3" } else { "" },
+        if jit { ", jit" } else { "" }
     );
     if !ex.native_bin {
         if !mods::mod_folders(ex)?.is_empty() {
@@ -459,7 +473,7 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
         return Ok(());
     }
     step(format!("native build: {} ({desc}){}", ex.package, remote::get().map_or(String::new(), |r| format!(" on {}", r.host))));
-    api::build_native(project, ex, release, static_sdl).inspect_err(|_| {
+    api::build_native(project, ex, release, static_sdl, jit).inspect_err(|_| {
         if static_sdl {
             eprintln!("{STATIC_DEPS_HINT}");
         }
@@ -492,7 +506,8 @@ fn native(project: &Project, ex: &Example, action: Action, release: bool, static
 /// when the editor closes. The game binary is started directly so that stopping it kills the game
 /// and not a `cargo run` wrapper.
 fn editor_session(project: &Project, ex: &Example, release: bool, scripts: Option<PathBuf>) -> Result<()> {
-    let port = std::env::var("EFE_EDITOR_PORT").unwrap_or_else(|_| "7878".into());
+    // The editor is started by this process, so the session name uses this process id.
+    let socket = format!("efe-editor-{}", std::process::id());
     let profile = api::profile_dir(project, release);
     let game = profile.join(format!("{}{}", ex.package, std::env::consts::EXE_SUFFIX));
     if let Some(r) = remote::get() {
@@ -513,23 +528,23 @@ fn editor_session(project: &Project, ex: &Example, release: bool, scripts: Optio
         // With --remote the editor binary was fetched: start it directly, no local cargo.
         if remote::get().is_some() {
             let mut c = std::process::Command::new(profile.join(format!("efe-editor{}", std::env::consts::EXE_SUFFIX)));
-            c.args(["--port", &port]);
+            c.args(["--socket", &socket]);
             return c;
         }
         let mut c = cargo();
-        c.args(["run", "-p", "efeengine-editor", "--bin", "efe-editor", "--", "--port", &port]);
+        c.args(["run", "-p", "efeengine-editor", "--bin", "efe-editor", "--", "--socket", &socket]);
         if release {
             c.arg("--release");
         }
         c
     };
-    step(format!("editor: {} on port {port}", ex.package));
+    step(format!("editor: {} on socket {socket}", ex.package));
     if dry_run() {
-        println!("[dry-run] EFE_EDITOR=1 EFE_EDITOR_PORT={port} {} &", game.display());
+        println!("[dry-run] EFE_EDITOR=1 EFE_EDITOR_SOCKET={socket} {} &", game.display());
         return run(editor_run());
     }
     let mut g = std::process::Command::new(&game);
-    g.current_dir(root()).env("EFE_EDITOR", "1").env("EFE_EDITOR_PORT", &port);
+    g.current_dir(root()).env("EFE_EDITOR", "1").env("EFE_EDITOR_SOCKET", &socket);
     if let Some(dir) = scripts {
         g.env("EFE_SCRIPT_DIR", dir);
     }
@@ -563,7 +578,7 @@ fn editor_cmd(a: EditorArgs, preflight: bool) -> Result<()> {
         );
     }
     let server = ServerArgs { port: 8080, host: "127.0.0.1".into() };
-    dispatch(&project, &ex, Target::Native, Action::Editor, a.release, a.static_sdl, &server, preflight)
+    dispatch(&project, &ex, Target::Native, Action::Editor, a.release, a.static_sdl, a.jit, &server, preflight)
 }
 
 // -------------------------------------------------------------- other commands --

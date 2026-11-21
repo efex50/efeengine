@@ -24,12 +24,12 @@ USAGE = """\
 Usage: build.py [--dry-run] [--no-preflight] [--remote[=HOST]] [<command> ...]
 
   ./build.py                                  interactive: pick example, native/web, build or run
-  ./build.py run   [<example>] [native|web] [--release] [--static] [--port N]
-  ./build.py build [<example>] [native|web] [--release] [--static]
+  ./build.py run   [<example>] [native|web] [--release] [--static] [--jit] [--port N]
+  ./build.py build [<example>] [native|web] [--release] [--static] [--jit]
   ./build.py dist  [<example>]                web publish folder (scripts/web.py dist)
-  ./build.py editor [<example>] [--release] [--static]
+  ./build.py editor [<example>] [--release] [--static] [--jit]
                                               run the game with the editor link (EFE_EDITOR=1),
-                                              then the editor window; port: EFE_EDITOR_PORT (7878)
+                                              then the editor window; they talk over a private local socket
   ./build.py list                             list examples
   ./build.py check                            cargo check --workspace + wasm check of core/examples
   ./build.py test                             cargo test for calc, efepages, efescript
@@ -41,6 +41,8 @@ Usage: build.py [--dry-run] [--no-preflight] [--remote[=HOST]] [<command> ...]
 Options:
   --release        optimised build
   --static         build SDL3 from source and link it statically (needs cmake + a C compiler)
+  --jit            native only: compile the script JIT in (cargo feature efeengine-core/jit);
+                   the debug menu's Scripts tab can then switch Interpreter / Auto / JIT
   --port N         web server port (default 8080)
   --dry-run        print commands instead of running them
   --no-preflight   skip the SDL3 / cmake / cc checks before native builds
@@ -253,13 +255,19 @@ def preflight_native(static):
 
 
 # ------------------------------------------------------ build/run actions --
-def do_native(action, ex, release, static):
+def native_features(static, jit):
+    """`--features a,b` cargo arguments for the optional engine features."""
+    feats = ((["efeengine-core/static"] if static else []) + (["efeengine-core/jit"] if jit else []))
+    return ["--features", ",".join(feats)] if feats else []
+
+
+def do_native(action, ex, release, static, jit=False):
     pkg = web.package_name(ex)
     if not Ctx.remote:
         need_cargo()
     native_preflight_or_remote(static)
-    extra = (["--release"] if release else []) + (["--features", "efeengine-core/static"] if static else [])
-    desc = ("release" if release else "debug") + (", static SDL3" if static else "")
+    extra = (["--release"] if release else []) + native_features(static, jit)
+    desc = ("release" if release else "debug") + (", static SDL3" if static else "") + (", jit" if jit else "")
     if has_native_bin(ex):
         step(f"native {action}: {pkg} ({desc})" + (f" on {Ctx.remote.host}" if Ctx.remote else ""))
         try:
@@ -325,10 +333,12 @@ def cmd_build_run(a, action, interactive=False):
         action = "run" if prompt_choice("What to do?", ["run", "build only"]) == "run" else "build"
     if tgt == "web" and a.static:
         warn("--static is ignored for web")
+    if tgt == "web" and getattr(a, "jit", False):
+        warn("--jit is ignored for web (the browser always uses the interpreter)")
     if tgt == "native" and getattr(a, "port", None) is not None:
         warn("--port is ignored for native")
     if tgt == "native":
-        do_native(action, ex, a.release, a.static)
+        do_native(action, ex, a.release, a.static, getattr(a, "jit", False))
     else:
         do_web(action, ex, a.release, getattr(a, "port", None) or 8080)
 
@@ -481,7 +491,7 @@ def links_editor(ex):
     return any("EditorLink" in f.read_text(errors="ignore") for f in src_dir.glob("*.rs"))
 
 
-def do_editor(ex, release, static):
+def do_editor(ex, release, static, jit=False):
     """Run the game with the editor link on (EFE_EDITOR=1), then the editor in front of it."""
     pkg = web.package_name(ex)
     if not Ctx.remote:
@@ -492,8 +502,9 @@ def do_editor(ex, release, static):
     if not links_editor(ex):
         raise Fail(f"example '{ex}' does not start the editor link: add EditorLink::from_env() "
                    "to its engine setup (examples/script_demo does this)")
-    port = os.environ.get("EFE_EDITOR_PORT", "7878")
-    extra = (["--release"] if release else []) + (["--features", "efeengine-core/static"] if static else [])
+    # The editor is started by this process, so the session name uses this process id.
+    sock = f"efe-editor-{os.getpid()}"
+    extra = (["--release"] if release else []) + native_features(static, jit)
     profile = "release" if release else "debug"
     target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
     if not target.is_absolute():
@@ -501,22 +512,22 @@ def do_editor(ex, release, static):
     game = target / profile / (pkg + (".exe" if os.name == "nt" else ""))
     if Ctx.remote:
         # Both binaries are built there and fetched; the editor is started directly, not via cargo run.
-        editor_cmd = [str(remote_exe("efe-editor", release)), "--port", port]
+        editor_cmd = [str(remote_exe("efe-editor", release)), "--socket", sock]
     else:
-        editor_cmd = ["cargo", "run", "-p", "efeengine-editor", "--bin", "efe-editor", "--", "--port", port]
-    step(f"editor: {pkg} ({'release' if release else 'debug'}) on port {port}"
+        editor_cmd = ["cargo", "run", "-p", "efeengine-editor", "--bin", "efe-editor", "--", "--socket", sock]
+    step(f"editor: {pkg} ({'release' if release else 'debug'}) on socket {sock}"
          + (f", built on {Ctx.remote.host}" if Ctx.remote else ""))
     cargo_build(["-p", pkg, "--bin", pkg] + extra, [pkg])
     cargo_build(["-p", "efeengine-editor", "--bin", "efe-editor"] + (["--release"] if release else []),
                 ["efe-editor"])
     if Ctx.dry:
-        print(f"[dry-run] EFE_EDITOR=1 EFE_EDITOR_PORT={port} {game} &")
+        print(f"[dry-run] EFE_EDITOR=1 EFE_EDITOR_SOCKET={sock} {game} &")
         if Ctx.remote:
             print("[dry-run] " + subprocess.list2cmdline(editor_cmd))
         else:
             run(editor_cmd)
         return
-    env = dict(os.environ, EFE_EDITOR="1", EFE_EDITOR_PORT=port)
+    env = dict(os.environ, EFE_EDITOR="1", EFE_EDITOR_SOCKET=sock)
     proc = subprocess.Popen([str(game)], cwd=str(ROOT), env=env)
     # SIGTERM (e.g. `timeout`) should stop the game too: raise the same interrupt as Ctrl+C,
     # so the editor's child process and the game are cleaned up below.
@@ -537,7 +548,7 @@ def do_editor(ex, release, static):
 
 def cmd_editor(a):
     ex = pick_example(a.example)
-    do_editor(ex, a.release, a.static)
+    do_editor(ex, a.release, a.static, a.jit)
 
 
 def build_parser():
@@ -550,6 +561,7 @@ def build_parser():
         sp.add_argument("target", nargs="?", choices=["native", "web"])
         sp.add_argument("--release", action="store_true")
         sp.add_argument("--static", action="store_true")
+        sp.add_argument("--jit", action="store_true")
         if run_opts:
             sp.add_argument("--port", type=int)
 
@@ -565,6 +577,7 @@ def build_parser():
     ed.add_argument("example", nargs="?")
     ed.add_argument("--release", action="store_true")
     ed.add_argument("--static", action="store_true")
+    ed.add_argument("--jit", action="store_true")
     c = sub.add_parser("clean", add_help=False)
     c.add_argument("example", nargs="?")
     return p
@@ -599,7 +612,7 @@ def main(argv):
     if a.cmd is None:
         if not sys.stdin.isatty():
             raise need_args("no command given and stdin is not a terminal")
-        a = argparse.Namespace(example=None, target=None, release=False, static=False, port=None)
+        a = argparse.Namespace(example=None, target=None, release=False, static=False, jit=False, port=None)
         cmd_build_run(a, "run", interactive=True)
         return 0
     if a.cmd == "run" or a.cmd == "build":

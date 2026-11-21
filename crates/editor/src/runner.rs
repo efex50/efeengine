@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn game_gets_the_env_and_reports_its_exit() {
         let mut g = GameHolder::default();
-        g.start(&sh("test \"$EFE_EDITOR\" = 1 && test \"$EFE_EDITOR_PORT\" = 4321", &[("EFE_EDITOR", "1"), ("EFE_EDITOR_PORT", "4321")])).unwrap();
+        g.start(&sh("test \"$EFE_EDITOR\" = 1 && test \"$EFE_EDITOR_SOCKET\" = efe-editor-4", &[("EFE_EDITOR", "1"), ("EFE_EDITOR_SOCKET", "efe-editor-4")])).unwrap();
         assert_eq!(wait_exit(&mut g), "exit status: 0");
         assert!(!g.running());
         g.start(&sh("exit 3", &[])).unwrap();

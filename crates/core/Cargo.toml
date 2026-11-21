@@ -59,6 +59,8 @@ efemod = { path = "../efemod", features = ["write"] }
 [features]
 default = ["efa"]
 efa = ["dep:efa"]
+# Dev-time translation of `.wasm` mod folders (native only; off by default).
+wasm-mods = ["efa", "efa/wasm", "dep:efe-wasm"]
 debug_log = []
 # Cranelift JIT for script code (native only; never built for wasm32, where the dependency is absent)
 jit = ["dep:efevm-jit"]
@@ -69,6 +71,7 @@ vcpkg = "0.2.15"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 efevm-jit = { path = "../efevm-jit", optional = true }
+efe-wasm = { path = "../efe-wasm", optional = true }
 pollster = "1.0.2"
 sdl3-sys = "0.7.3"
 sdl3 = { version = "0.22.1", features = ["raw-window-handle"] }

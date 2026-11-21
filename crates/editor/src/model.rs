@@ -109,24 +109,6 @@ pub fn validate_scene_path(path: &str) -> Result<(), String> {
     resolve_project_path(Path::new("."), path.trim()).map(|_| ())
 }
 
-/// The port from `--port N` or `EFE_EDITOR_PORT`, default 7878.
-pub fn parse_port(args: &[String], env: Option<&str>) -> Result<u16, String> {
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "--port" {
-            let v = it.next().ok_or("--port needs a value")?;
-            return v.parse().map_err(|_| format!("bad port `{v}`"));
-        }
-        if let Some(v) = a.strip_prefix("--port=") {
-            return v.parse().map_err(|_| format!("bad port `{v}`"));
-        }
-    }
-    match env {
-        Some(v) => v.parse().map_err(|_| format!("bad EFE_EDITOR_PORT `{v}`")),
-        None => Ok(7878),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,17 +189,5 @@ mod tests {
         for bad in ["", "   ", "/etc/x", "../x", "a/../../b"] {
             assert!(validate_scene_path(bad).is_err(), "{bad:?}");
         }
-    }
-
-    #[test]
-    fn ports() {
-        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(parse_port(&a(&[]), None), Ok(7878));
-        assert_eq!(parse_port(&a(&[]), Some("9000")), Ok(9000));
-        assert_eq!(parse_port(&a(&["--port", "1234"]), Some("9000")), Ok(1234));
-        assert_eq!(parse_port(&a(&["--port=55"]), None), Ok(55));
-        assert!(parse_port(&a(&["--port"]), None).is_err());
-        assert!(parse_port(&a(&["--port", "x"]), None).is_err());
-        assert!(parse_port(&a(&[]), Some("nope")).is_err());
     }
 }

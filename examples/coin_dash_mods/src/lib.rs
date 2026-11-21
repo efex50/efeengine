@@ -292,6 +292,8 @@ pub fn setup(engine: &mut Engine) -> Game {
     // anything that exports the API index (the mods are packed against it); iced on native, DOM
     // on the web, headless in tests
     engine.add_plugin(efeengine_ui::UiPlugin::new()).expect("UiPlugin");
+    // the Debug menu window (F5): FPS and the log
+    engine.add_plugin(efeengine_ui::DebugMenuPlugin).expect("DebugMenuPlugin");
     let game = register_api(engine);
     engine.insert_resource(Freed::default());
     engine.set_mod_policy(mod_policy);

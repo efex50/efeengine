@@ -387,3 +387,114 @@ fn an_api_path_outside_the_folder_is_refused() {
     assert!(matches!(&err, ModError::Build(m) if m.contains("api")), "{err:?}");
 }
 
+fn minimal_wasm_bytes(mul: u8) -> Vec<u8> {
+    // memory(1), immutable i32 global efe_scratch=1024, fn efe_provide_scale(i32) -> i32 (x * mul), fn init() ()
+    let mut wasm = Vec::new();
+    wasm.extend_from_slice(b"\0asm\x01\0\0\0");
+    wasm.extend_from_slice(&[1, 9, 2, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 0, 0]); // type 0: (i32)->i32, type 1: ()->()
+    wasm.extend_from_slice(&[3, 3, 2, 0, 1]); // func 0: type 0, func 1: type 1
+    wasm.extend_from_slice(&[5, 3, 1, 0, 1]); // memory: min 1
+    wasm.extend_from_slice(&[6, 7, 1, 0x7f, 0, 0x41, 0x80, 0x08, 0x0b]); // global 0: i32 = 1024
+    let ex0 = b"\x11efe_provide_scale\x00\x00";
+    let ex1 = b"\x04init\x00\x01";
+    let ex2 = b"\x0befe_scratch\x03\x00";
+    wasm.push(7);
+    wasm.push((1 + ex0.len() + ex1.len() + ex2.len()) as u8);
+    wasm.push(3);
+    wasm.extend_from_slice(ex0);
+    wasm.extend_from_slice(ex1);
+    wasm.extend_from_slice(ex2);
+    // code: 2 bodies: body 0 = local.get 0, i32.const mul, i32.mul, end; body 1 = end
+    let b0 = [0x00, 0x20, 0x00, 0x41, mul & 0x3f, 0x6c, 0x0b];
+    let b1 = [0x00, 0x0b];
+    wasm.push(10);
+    wasm.push((1 + 1 + b0.len() + 1 + b1.len()) as u8);
+    wasm.push(2);
+    wasm.push(b0.len() as u8);
+    wasm.extend_from_slice(&b0);
+    wasm.push(b1.len() as u8);
+    wasm.extend_from_slice(&b1);
+    wasm
+}
+
+const WASM_TOML: &str = r#"[mod]
+id = "wmod"
+version = "1.0.0"
+
+[build]
+wasm = "mod.wasm"
+scratch = 256
+
+[[provide]]
+name = "scale"
+doc = "Scale `x`."
+params = ["x: i32"]
+results = ["r: i32"]
+"#;
+
+#[cfg(not(feature = "wasm-mods"))]
+#[test]
+fn wasm_mod_folder_requires_wasm_mods_feature() {
+    let files = MemSource::new()
+        .with("mod.toml", WASM_TOML)
+        .with_bytes("mod.wasm", &minimal_wasm_bytes(2));
+    let err = mod_err(load_folder(&files, &[]).unwrap_err());
+    assert!(matches!(&err, ModError::Build(m) if m.contains("wasm-mods")), "{err:?}");
+}
+
+#[cfg(feature = "wasm-mods")]
+#[test]
+fn wasm_mod_folder_loads_caches_and_hot_reloads() {
+    use efeengine_core::scripting::LogLevel;
+
+    let d = temp("wasm_folder");
+    let mod_dir = d.join("wmod");
+    std::fs::create_dir_all(mod_dir.join("assets")).unwrap();
+    std::fs::write(mod_dir.join("mod.toml"), WASM_TOML).unwrap();
+    std::fs::write(mod_dir.join("mod.wasm"), minimal_wasm_bytes(2)).unwrap();
+    std::fs::write(mod_dir.join("assets/a.txt"), "ok").unwrap();
+    // Unrelated files (like target/) must not cause extra hashing or fail builds.
+    std::fs::create_dir_all(mod_dir.join("target")).unwrap();
+    std::fs::write(mod_dir.join("target/ignored.bin"), b"ignored").unwrap();
+
+    let cache_dir = d.join("cache");
+    let (mut e1, _) = engine_with(CacheDir::Path(cache_dir.clone()), false);
+    let loaded = e1.load(&mod_dir).expect("load wasm mod folder");
+    let id = loaded.id();
+    assert_eq!(e1.package_asset(id, "a.txt"), Some(&b"ok"[..]));
+    assert_eq!(e1.api_index().function("wmod", "scale").unwrap().doc, "Scale `x`.");
+    let s1 = e1.cache().stats();
+    assert_eq!((s1.compiles, s1.disk_hits), (1, 0), "{s1:?}");
+
+    // Second engine hits the disk cache without re-translating.
+    let (mut e2, _) = engine_with(CacheDir::Path(cache_dir.clone()), false);
+    e2.load(&mod_dir).expect("load wasm mod folder from disk cache");
+    let s2 = e2.cache().stats();
+    assert_eq!((s2.compiles, s2.disk_hits), (0, 1), "{s2:?}");
+
+    // Changing the API index misses the cache.
+    let (mut e3, _) = engine_with(CacheDir::Path(cache_dir.clone()), true);
+    e3.load(&mod_dir).expect("load wasm mod folder with new index");
+    let s3 = e3.cache().stats();
+    assert_eq!((s3.compiles, s3.disk_hits), (1, 0), "{s3:?}");
+
+    // Hot reload via DirSource when mod.wasm changes.
+    let mods_dir = d.join("mods");
+    std::fs::create_dir_all(mods_dir.join("wmod")).unwrap();
+    std::fs::write(mods_dir.join("wmod/mod.toml"), WASM_TOML).unwrap();
+    std::fs::write(mods_dir.join("wmod/mod.wasm"), minimal_wasm_bytes(2)).unwrap();
+    let (mut e4, _) = engine_with(CacheDir::Path(cache_dir.clone()), false);
+    e4.add_mod_source(DirSource::new(&mods_dir));
+    let report = e4.load_mods();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let w_id = report.loaded[0].1;
+
+    std::fs::write(mods_dir.join("wmod/mod.wasm"), minimal_wasm_bytes(3)).unwrap();
+    e4.run_frames(2, 0.3);
+    let logs: Vec<_> = e4.scripting().log_lines().map(|l| (l.level, l.text.clone())).collect();
+    assert!(logs.iter().any(|(l, t)| *l == LogLevel::Info && t.starts_with("[wmod] reloaded")), "{logs:?}");
+    assert!(e4.scripting().is_loaded(w_id));
+
+    let _ = std::fs::remove_dir_all(&d);
+}
+

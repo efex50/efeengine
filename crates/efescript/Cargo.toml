@@ -17,7 +17,7 @@ path = "src/bin/runner.rs"
 
 [dependencies]
 efevm = { path = "../efevm" }
-efa = { path = "../efa" }
+efa = { path = "../efa", features = ["wasm"] }
 efemod = { path = "../efemod", features = ["write"] }
 toml = "1"
 lsp-server = "0.10"

@@ -19,7 +19,24 @@
 
 use efeengine_core::prelude::*;
 use efeengine_ui::view::*;
-use efeengine_ui::{Align, Color, Justify, Layer, Size, Style, TextAlign, UiPlugin, column};
+use efeengine_ui::{Align, Color, Justify, Layer, Size, Style, TextAlign, UiPlugin, UiTree, column};
+
+/// Opacity of the whole HUD (0 = invisible, 1 = opaque).
+const HUD_OPACITY: f32 = 0.6;
+/// Size (logical px) of the area of the HUD you can grab with the mouse. This is an estimate of the
+/// panel size: efeengine-ui has no drag API yet and does not tell the game a node's rectangle.
+const HUD_GRAB: Vec2 = Vec2::new(260.0, 70.0);
+/// Gap kept between the HUD and the window edge while dragging (logical px).
+const HUD_MARGIN: f32 = 4.0;
+
+/// Where the HUD is (offset of its top-left layer, logical px) and the drag in progress. A resource.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HudDrag {
+    pub offset: Vec2,
+    pub dragging: bool,
+    /// Pointer position minus `offset` at the moment the drag started.
+    grab: Vec2,
+}
 
 /// Where the player is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,7 +157,50 @@ fn hud(cx: &ViewCx) -> El<MenuMsg> {
         Some(g) => format!("Score {}   Round {}   Coins left {}", g.score, g.round, g.coins_left),
         None => String::new(),
     };
-    column![text(line).key("stats"), text("Esc: pause").class("muted").key("hint")].class("panel").gap(2.0)
+    column![text(line).key("stats"), text("Esc: pause").class("muted").key("hint")].class("panel").gap(2.0).style(Style::new().opacity(HUD_OPACITY))
+}
+
+/// Drag the HUD with the left mouse button. The raw input is used: the UI captures the pointer
+/// while it is over the HUD, so the filtered view (`game_input`) would never see the press.
+fn hud_drag(cx: &mut Ctx) {
+    let scale = cx.window.scale_factor as f32;
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let (w, h) = cx.window.logical_size();
+    let pos = cx.input.mouse_pos().map(|(x, y)| Vec2::new(x / scale, y / scale));
+    let pressed = cx.input.mouse_pressed(MouseButton::Left);
+    let just = cx.input.mouse_just_pressed(MouseButton::Left);
+    let Some(d) = cx.resources.get_mut::<HudDrag>() else { return };
+    if just
+        && let Some(p) = pos
+    {
+        let rel = p - d.offset;
+        if rel.x >= 0.0 && rel.y >= 0.0 && rel.x <= HUD_GRAB.x && rel.y <= HUD_GRAB.y {
+            d.dragging = true;
+            d.grab = rel;
+        }
+    }
+    if !pressed {
+        d.dragging = false;
+    }
+    if d.dragging
+        && let Some(p) = pos
+    {
+        let max = Vec2::new((w - HUD_GRAB.x - HUD_MARGIN).max(HUD_MARGIN), (h - HUD_GRAB.y - HUD_MARGIN).max(HUD_MARGIN));
+        d.offset = (p - d.grab).clamp(Vec2::splat(HUD_MARGIN), max);
+    }
+}
+
+/// The HUD view rebuilds its layer from the fixed `Layer` every frame, so the offset is put on
+/// the layer afterwards (after `ui_view`, before `ui_sync`).
+fn hud_place(cx: &mut Ctx) {
+    let Some(off) = cx.resources.get::<HudDrag>().map(|d| d.offset) else { return };
+    if let Some(tree) = cx.resources.get_mut::<UiTree>() {
+        tree.layer("hud", hud_layer().offset(off.x, off.y));
+    }
+}
+
+fn hud_layer() -> Layer {
+    Layer::top_left(10)
 }
 
 /// Apply the messages and the Esc key, then show the right menu and (un)freeze the game.
@@ -217,9 +277,13 @@ pub fn setup(engine: &mut Engine, start_playing: bool) {
     engine.add_plugin(UiView::new("main_menu", main_menu).layer(modal(30)).enabled(!start_playing)).expect("main menu view");
     engine.add_plugin(UiView::new("pause", pause_menu).layer(modal(30)).enabled(false)).expect("pause view");
     engine.add_plugin(UiView::new("settings", settings_menu).layer(modal(31)).enabled(false)).expect("settings view");
-    engine.add_plugin(UiView::with("hud", hud).layer(Layer::top_left(10))).expect("hud view");
+    engine.add_plugin(UiView::with("hud", hud).layer(hud_layer())).expect("hud view");
+    engine.insert_resource(HudDrag { offset: Vec2::splat(HUD_MARGIN), ..HudDrag::default() });
+    engine.add_system(Stage::Update, hud_drag).order(order::EARLY + 1).name("coin_dash_hud_drag").run_if(running);
+    engine.add_system(Stage::PostUpdate, hud_place).order(order::LATE + 12).name("coin_dash_hud_place");
     engine.add_system(Stage::Update, menu_update).order(order::EARLY).name("coin_dash_menu");
 }
+
 
 /// The UI plugin for the game: the default one (iced on native, DOM on the web).
 pub fn plugin() -> UiPlugin {

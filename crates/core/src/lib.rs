@@ -107,6 +107,8 @@ pub use efemod;
 pub use efevm_jit;
 #[cfg(feature = "efa")]
 pub use efa;
+#[cfg(all(feature = "wasm-mods", not(target_arch = "wasm32")))]
+pub use efe_wasm;
 #[cfg(target_arch = "wasm32")]
 pub use wasm_bindgen;
 

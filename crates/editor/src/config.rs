@@ -6,14 +6,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 pub const MAX_RECENT: usize = 10;
-pub const DEFAULT_PORT: u16 = 7878;
 const FILE: &str = "config.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Where new projects are created and listed; `None` means [`default_projects_dir_from_env`].
     pub projects_dir: Option<PathBuf>,
-    pub default_port: u16,
     pub place_game_window: bool,
     pub cargo_release: bool,
     /// `.efproj` files, most recent first, at most [`MAX_RECENT`].
@@ -22,7 +20,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { projects_dir: None, default_port: DEFAULT_PORT, place_game_window: true, cargo_release: false, recent: Vec::new() }
+        Self { projects_dir: None, place_game_window: true, cargo_release: false, recent: Vec::new() }
     }
 }
 
@@ -66,19 +64,10 @@ impl Config {
     }
 }
 
-/// A port from a text field: 1 to 65535.
-pub fn validate_port(s: &str) -> Result<u16, String> {
-    match s.trim().parse::<u32>() {
-        Ok(p) if (1..=65535).contains(&p) => Ok(p as u16),
-        _ => Err(format!("port `{}` must be a number from 1 to 65535", s.trim())),
-    }
-}
-
 impl Config {
     pub fn to_json(&self) -> Value {
         json!({
             "projects_dir": self.projects_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            "default_port": self.default_port,
             "place_game_window": self.place_game_window,
             "cargo_release": self.cargo_release,
             "recent": self.recent.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(),
@@ -96,10 +85,6 @@ impl Config {
                     Value::String(s) => c.projects_dir = Some(PathBuf::from(s)),
                     _ => return Err("`projects_dir` must be a string or null".into()),
                 },
-                "default_port" => {
-                    let p = val.as_u64().filter(|p| (1..=65535).contains(p)).ok_or("`default_port` must be a number from 1 to 65535")?;
-                    c.default_port = p as u16;
-                }
                 "place_game_window" => c.place_game_window = val.as_bool().ok_or("`place_game_window` must be true or false")?,
                 "cargo_release" => c.cargo_release = val.as_bool().ok_or("`cargo_release` must be true or false")?,
                 "recent" => {
@@ -186,13 +171,13 @@ mod tests {
         let (c, n) = load(&d.join("nothing-here"));
         assert_eq!(c, Config::default());
         assert!(n.is_none());
-        assert_eq!((c.default_port, c.place_game_window, c.cargo_release), (7878, true, false));
+        assert_eq!((c.place_game_window, c.cargo_release), (true, false));
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
     fn bad_file_is_moved_aside() {
-        for (i, text) in ["not json {", "{\"default_port\": \"x\"}", "{\"default_port\": 0}", "[1]", "{\"recent\": [1]}"].iter().enumerate() {
+        for (i, text) in ["not json {", "{\"cargo_release\": \"x\"}", "{\"place_game_window\": 0}", "[1]", "{\"recent\": [1]}"].iter().enumerate() {
             let d = temp(&format!("bad{i}"));
             std::fs::write(d.join("config.json"), text).unwrap();
             let (c, n) = load(&d);
@@ -211,7 +196,6 @@ mod tests {
         let d = temp("round");
         let c = Config {
             projects_dir: Some("/opt/efe".into()),
-            default_port: 9000,
             place_game_window: false,
             cargo_release: true,
             recent: vec!["/a/a.efproj".into(), "/b/b.efproj".into()],
@@ -222,12 +206,15 @@ mod tests {
     }
 
     #[test]
-    fn old_engine_path_is_ignored_without_a_notice() {
+    fn old_engine_path_and_default_port_are_ignored_without_a_notice() {
         let d = temp("oldengine");
-        std::fs::write(d.join("config.json"), r#"{"engine_path": "/old/engine", "default_port": 9001}"#).unwrap();
+        std::fs::write(d.join("config.json"), r#"{"engine_path": "/old/engine", "default_port": 9001, "cargo_release": true}"#).unwrap();
         let (c, n) = load(&d);
         assert!(n.is_none(), "{n:?}");
-        assert_eq!(c.default_port, 9001);
+        assert!(c.cargo_release);
+        // A bad old value is just as harmless: the key is gone.
+        std::fs::write(d.join("config.json"), r#"{"default_port": "x"}"#).unwrap();
+        assert_eq!(load(&d), (Config::default(), None));
         assert!(!d.join("config.json.bad").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -264,16 +251,6 @@ mod tests {
         assert_eq!(c.recent.iter().filter(|p| **p == PathBuf::from("/p10.efproj")).count(), 1);
         c.remove_recent(Path::new("/p10.efproj"));
         assert_eq!(c.recent.len(), MAX_RECENT - 1);
-    }
-
-    #[test]
-    fn port_validation() {
-        assert_eq!(validate_port("7878"), Ok(7878));
-        assert_eq!(validate_port(" 1 "), Ok(1));
-        assert_eq!(validate_port("65535"), Ok(65535));
-        for bad in ["0", "65536", "-1", "", "abc", "80.5"] {
-            assert!(validate_port(bad).is_err(), "{bad}");
-        }
     }
 
     #[test]

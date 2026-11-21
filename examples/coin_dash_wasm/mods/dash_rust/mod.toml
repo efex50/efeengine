@@ -1,0 +1,16 @@
+[mod]
+id = "dash_rust"
+version = "1.0.0"
+name = "Dash Rust"
+description = "Rust wasm mod for coin_dash_wasm: player movement, autoplay bot, rounds, pickups, hits, lives and game over."
+game = "coin_dash_wasm"
+
+[dependencies]
+dash_c = "^1"
+
+[permissions]
+namespaces = ["engine.world", "engine.input", "engine.random", "engine.time", "engine.events", "engine.log", "game"]
+
+[build]
+wasm = "dash_rust.wasm"
+scratch = 256

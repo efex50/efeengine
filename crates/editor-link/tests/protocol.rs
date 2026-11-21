@@ -1,12 +1,13 @@
 //! Protocol layer tests plus end-to-end tests against a headless engine over a real socket.
 
-use std::net::TcpStream;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 
 use efeengine_core::engine::components::{EditorId, Name};
 use efeengine_core::engine::types::entity_to_bits;
 use efeengine_core::prelude::*;
 use efeengine_editor_link::protocol::ComponentInfo;
+use efeengine_editor_link::socket::{self, Conn};
 use efeengine_editor_link::*;
 use serde_json::json;
 
@@ -91,13 +92,12 @@ fn wire_shapes() {
     // `gizmo` is optional on the wire.
     let r: Request = serde_json::from_value(json!({"select": {"editor_id": "7"}})).unwrap();
     assert_eq!(r, Request::Select { entity: None, editor_id: Some("7".into()), gizmo: GizmoMode::Move });
-    assert_eq!(PROTOCOL_VERSION, 2);
+    assert_eq!(PROTOCOL_VERSION, 3);
 }
 
 #[test]
 fn select_stores_the_entity_and_clear_empties_it() {
     let (mut e, port) = engine();
-    let port = port.load(std::sync::atomic::Ordering::Relaxed);
     let ent = e.world_mut().spawn((EditorId { id: 5 }, Transform::default()));
     let bits = entity_to_bits(ent);
     let replies = drive(&mut e, move || {
@@ -145,22 +145,35 @@ fn frame_reader_handles_split_and_oversized_frames() {
     assert!(FrameReader::default().poll(&mut &huge[..]).is_err());
 }
 
-fn engine() -> (Engine, std::sync::Arc<std::sync::atomic::AtomicU16>) {
+fn engine() -> (Engine, &'static str) {
     let mut e = Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, ..EngineConfig::headless() }).expect("headless engine");
     e.register::<Door>().unwrap();
-    let link = EditorLink::new(0);
-    let port = link.port_handle();
-    e.add_plugin(link).unwrap();
-    (e, port)
+    let name = unique_name();
+    e.add_plugin(EditorLink::new(name)).unwrap();
+    (e, name)
 }
 
-fn connect(port: u16) -> TcpStream {
-    let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+/// A socket name no other test (or test run) uses: the test's thread name and the process id,
+/// as a path in the temp dir on Unix so no real runtime directory is touched.
+fn unique_name() -> &'static str {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let test = std::thread::current().name().unwrap_or("t").replace("::", "-");
+    let id = format!("{}-{}-{}", short(&test), std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let name = if cfg!(unix) { format!("{}/efe-{id}.sock", std::env::temp_dir().display()) } else { format!("efe-test-{id}") };
+    Box::leak(name.into_boxed_str())
+}
+
+fn short(s: &str) -> String {
+    s.chars().rev().take(24).collect::<Vec<_>>().into_iter().rev().collect()
+}
+
+fn connect(name: &str) -> Conn {
+    let mut s = socket::connect(name, Duration::from_secs(5)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10)));
     s
 }
 
-fn hello(s: &mut TcpStream) -> ServerMessage {
+fn hello(s: &mut Conn) -> ServerMessage {
     send(s, &ClientMessage::Hello { protocol: PROTOCOL_VERSION, client: "test".into() }).unwrap();
     recv(s).unwrap()
 }
@@ -175,7 +188,7 @@ fn drive<T: Send + 'static>(e: &mut Engine, client: impl FnOnce() -> T + Send + 
     h.join().unwrap()
 }
 
-fn ask(s: &mut TcpStream, id: u64, request: Request) -> Reply {
+fn ask(s: &mut Conn, id: u64, request: Request) -> Reply {
     send(s, &ClientMessage::Request { id, request }).unwrap();
     match recv::<ServerMessage>(s).unwrap() {
         ServerMessage::Reply { id: rid, reply } => {
@@ -189,8 +202,6 @@ fn ask(s: &mut TcpStream, id: u64, request: Request) -> Reply {
 #[test]
 fn smoke_handshake_and_stats() {
     let (mut e, port) = engine();
-    let port = port.load(std::sync::atomic::Ordering::Relaxed);
-    assert_ne!(port, 0);
     e.world_mut().spawn((Name::new("hero"),));
     let (h, r) = drive(&mut e, move || {
         let mut s = connect(port);
@@ -207,7 +218,6 @@ fn smoke_handshake_and_stats() {
 #[test]
 fn wrong_protocol_over_socket_is_refused_and_closed() {
     let (mut e, port) = engine();
-    let port = port.load(std::sync::atomic::Ordering::Relaxed);
     let (first, second) = drive(&mut e, move || {
         let mut s = connect(port);
         send(&mut s, &ClientMessage::Hello { protocol: 42, client: "old".into() }).unwrap();
@@ -221,7 +231,6 @@ fn wrong_protocol_over_socket_is_refused_and_closed() {
 #[test]
 fn entities_components_schema_logs_and_errors() {
     let (mut e, port) = engine();
-    let port = port.load(std::sync::atomic::Ordering::Relaxed);
     let door = e.world_mut().spawn((Name::new("front door"), Door { open: true.into(), _pad: [0; 3], speed: 2.5 }));
     let bits = entity_to_bits(door);
     e.logger.info("hello from the test");
@@ -286,7 +295,6 @@ fn err_code(r: &Reply) -> &str {
 #[test]
 fn editor_id_lookup_and_entities_fill_it() {
     let (mut e, port) = engine();
-    let port = port.load(std::sync::atomic::Ordering::Relaxed);
     let door = e.world_mut().spawn((Name::new("d"), EditorId { id: 42 }, Door { open: true.into(), _pad: [0; 3], speed: 1.5 }));
     let plain = e.world_mut().spawn((Name::new("p"),));
     let (door_bits, plain_bits) = (entity_to_bits(door), entity_to_bits(plain));
@@ -323,7 +331,6 @@ fn editor_id_lookup_and_entities_fill_it() {
 #[test]
 fn systems_lists_flags() {
     let (mut e, port) = engine();
-    let port = port.load(std::sync::atomic::Ordering::Relaxed);
     e.add_system(Stage::Update, |_| {}).name("plain_sys");
     e.add_system(Stage::Update, |_| {}).name("off_sys").enabled(false);
     e.add_system(Stage::Update, |_| {}).name("global_sys");
@@ -349,13 +356,12 @@ fn temp_project(tag: &str) -> std::path::PathBuf {
     d
 }
 
-fn mode_engine(dir: &std::path::Path) -> (Engine, std::sync::Arc<std::sync::atomic::AtomicU16>) {
+fn mode_engine(dir: &std::path::Path) -> (Engine, &'static str) {
     let mut e = Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, ..EngineConfig::headless() }).expect("headless engine");
     e.register::<Door>().unwrap();
-    let link = EditorLink::new(0).with_project_dir(dir);
-    let port = link.port_handle();
-    e.add_plugin(link).unwrap();
-    (e, port)
+    let name = unique_name();
+    e.add_plugin(EditorLink::new(name).with_project_dir(dir)).unwrap();
+    (e, name)
 }
 
 fn counter(e: &mut Engine, name: &'static str) -> std::sync::Arc<std::sync::atomic::AtomicU32> {
@@ -370,7 +376,6 @@ fn counter(e: &mut Engine, name: &'static str) -> std::sync::Arc<std::sync::atom
 
 #[test]
 fn set_mode_edit_and_play() {
-    use std::sync::atomic::Ordering::Relaxed;
     let dir = temp_project("mode");
     std::fs::write(
         dir.join("a.ron"),
@@ -378,7 +383,6 @@ fn set_mode_edit_and_play() {
     )
     .unwrap();
     let (mut e, port) = mode_engine(&dir);
-    let port = port.load(Relaxed);
     let plain = counter(&mut e, "plain_sys");
     let scene_sys = counter(&mut e, "scene_sys");
     let global = counter(&mut e, "global_sys");
@@ -439,7 +443,6 @@ fn save_and_load_scene_and_rejected_paths() {
     .unwrap();
     std::fs::write(dir.join("bad.ron"), "not a scene").unwrap();
     let (mut e, port) = mode_engine(&dir);
-    let port = port.load(std::sync::atomic::Ordering::Relaxed);
     let r = drive(&mut e, move || {
         let mut s = connect(port);
         hello(&mut s);
@@ -488,10 +491,8 @@ fn set_door_speed(e: &mut Engine, v: f32) {
 
 #[test]
 fn play_then_stop_restores_and_keep_changes_keeps() {
-    use std::sync::atomic::Ordering::Relaxed;
     let dir = temp_project("play");
     let (mut e, port) = mode_engine(&dir);
-    let port = port.load(Relaxed);
     e.world_mut().spawn((Door { speed: 1.0, ..Default::default() },));
     let go = |e: &mut Engine, req: Request| -> Reply {
         drive(e, move || {
@@ -527,10 +528,8 @@ fn play_then_stop_restores_and_keep_changes_keeps() {
 
 #[test]
 fn stop_without_play_is_an_error() {
-    use std::sync::atomic::Ordering::Relaxed;
     let dir = temp_project("stop");
     let (mut e, port) = mode_engine(&dir);
-    let port = port.load(Relaxed);
     let r = drive(&mut e, move || {
         let mut s = connect(port);
         hello(&mut s);
@@ -542,10 +541,8 @@ fn stop_without_play_is_an_error() {
 
 #[test]
 fn fidelity_lists_unregistered_resources() {
-    use std::sync::atomic::Ordering::Relaxed;
     let dir = temp_project("fid");
     let (mut e, port) = mode_engine(&dir);
-    let port = port.load(Relaxed);
     e.insert_resource(Unregistered(1));
     let r = drive(&mut e, move || {
         let mut s = connect(port);
@@ -575,7 +572,6 @@ fn door_of(e: &Engine, ent: Entity) -> (bool, f32) {
 #[test]
 fn set_field_in_edit_and_play_and_rejections() {
     let (mut e, port) = engine();
-    let port = port.load(std::sync::atomic::Ordering::Relaxed);
     let door = e.world_mut().spawn((EditorId { id: 5 }, Door { open: false.into(), _pad: [0; 3], speed: 1.0 }, Transform::default()));
     let other = e.world_mut().spawn((EditorId { id: 6 },));
     let bits = entity_to_bits(door);
@@ -624,7 +620,6 @@ fn set_field_in_edit_and_play_and_rejections() {
 #[test]
 fn spawn_and_despawn_over_the_socket() {
     let (mut e, port) = engine();
-    let port = port.load(std::sync::atomic::Ordering::Relaxed);
     let plain = e.world_mut().spawn((EditorId { id: 9 },));
     let plain_bits = entity_to_bits(plain);
     let replies = drive(&mut e, move || {
@@ -673,10 +668,8 @@ fn spawn_and_despawn_over_the_socket() {
 
 #[test]
 fn restart_snapshot_is_written_and_restored_on_the_next_start() {
-    use std::sync::atomic::Ordering::Relaxed;
     let dir = temp_project("restart");
     let (mut e, port) = mode_engine(&dir);
-    let port = port.load(Relaxed);
     e.world_mut().spawn((Door { speed: 3.5, ..Default::default() },));
     let r = drive(&mut e, move || {
         let mut s = connect(port);
@@ -697,7 +690,7 @@ fn restart_snapshot_is_written_and_restored_on_the_next_start() {
     // The next start: its own setup spawns a different door, the link restores on frame 2.
     let mut e2 = Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, ..EngineConfig::headless() }).expect("headless engine");
     e2.register::<Door>().unwrap();
-    e2.add_plugin(EditorLink::new(0).with_project_dir(&dir).with_restore(&file)).unwrap();
+    e2.add_plugin(EditorLink::new(unique_name()).with_project_dir(&dir).with_restore(&file)).unwrap();
     e2.world_mut().spawn((Door { speed: 1.0, ..Default::default() },));
     e2.run_frames(1, 1.0 / 60.0);
     assert_eq!(door_speeds(&e2), vec![1.0], "not restored on the first frame");
@@ -706,4 +699,91 @@ fn restart_snapshot_is_written_and_restored_on_the_next_start() {
     let logs = efeengine_editor_link::recent_logs(50);
     assert!(logs.iter().any(|l| l.text.contains("gone_field")), "{logs:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn servers_with_different_names_do_not_interfere() {
+    let (mut a, na) = engine();
+    let (mut b, nb) = engine();
+    assert_ne!(na, nb);
+    a.world_mut().spawn((Name::new("a"),));
+    let (ra, rb) = {
+        let ha = std::thread::spawn(move || {
+            let mut s = connect(na);
+            hello(&mut s);
+            ask(&mut s, 1, Request::Stats)
+        });
+        let hb = std::thread::spawn(move || {
+            let mut s = connect(nb);
+            hello(&mut s);
+            ask(&mut s, 1, Request::Stats)
+        });
+        while !(ha.is_finished() && hb.is_finished()) {
+            a.run_frames(1, 1.0 / 60.0);
+            b.run_frames(1, 1.0 / 60.0);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        (ha.join().unwrap(), hb.join().unwrap())
+    };
+    let count = |r: Reply| match r {
+        Reply::Stats { entity_count, .. } => entity_count,
+        other => panic!("{other:?}"),
+    };
+    // Each answer comes from its own engine: only `a` has the extra entity.
+    assert_eq!(count(ra), count(rb) + 1);
+}
+
+#[test]
+fn a_live_name_is_refused_and_a_stale_socket_file_is_replaced() {
+    let name = unique_name();
+    let first = socket::listen(name).unwrap();
+    let busy = socket::listen(name);
+    assert_eq!(busy.err().map(|e| e.kind()), Some(std::io::ErrorKind::AddrInUse));
+    drop(first);
+    #[cfg(unix)]
+    {
+        // A crashed game leaves its socket file behind: bind a raw listener and leak the file.
+        let path = socket::socket_path(name).unwrap();
+        let _ = std::fs::remove_file(&path);
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        let l = socket::listen(name).expect("stale file replaced");
+        let mut c = connect(name);
+        send(&mut c, &ClientMessage::Hello { protocol: PROTOCOL_VERSION, client: "t".into() }).unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while socket::accept(&l).unwrap().is_none() {
+            assert!(std::time::Instant::now() < end, "no connection accepted");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn socket_file_and_dir_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let name = unique_name();
+    let _l = socket::listen(name).unwrap();
+    let path = socket::socket_path(name).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn default_socket_dir_is_0700() {
+    use std::os::unix::fs::PermissionsExt;
+    // A plain name resolves to the runtime dir; point it at a temp dir for this process.
+    let rt = std::env::temp_dir().join(format!("efe-rt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&rt);
+    std::fs::create_dir_all(&rt).unwrap();
+    // SAFETY: no other test in this binary reads XDG_RUNTIME_DIR.
+    unsafe { std::env::set_var("XDG_RUNTIME_DIR", &rt) };
+    let name = format!("efe-editor-test-{}", std::process::id());
+    let l = socket::listen(&name).unwrap();
+    let path = socket::socket_path(&name).unwrap();
+    assert!(path.starts_with(rt.join("efeengine")));
+    assert_eq!(std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    drop(l);
+    let _ = std::fs::remove_dir_all(&rt);
 }

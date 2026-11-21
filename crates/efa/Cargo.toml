@@ -9,3 +9,8 @@ efevm = { path = "../efevm" }
 efemod = { path = "../efemod" }
 toml = "1"
 calc = { path = "../calc", default-features = false }
+efe-wasm = { path = "../efe-wasm", optional = true }
+
+[features]
+default = []
+wasm = ["dep:efe-wasm"]

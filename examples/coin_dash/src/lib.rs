@@ -12,6 +12,7 @@
 //!   over time and bob, the enemies patrol with `Velocity`, the player is moved by `Velocity` too.
 //! * The player's shadow is a child sprite (`Parent`) that follows without any code.
 //! * Collisions are circle checks in a plain Rust system. Game state is the `Game` resource.
+//! * Enemies get a world-space "Enemy" label; collecting a coin shows a rising "Scored!" popup.
 //! * The camera follows the player smoothly. There is no text rendering yet, so events go
 //!   to the log (`[coin_dash] score 3`), plus a status line once a second.
 //!
@@ -22,6 +23,7 @@
 #![allow(dead_code)]
 
 use efeengine_core::prelude::*;
+use efeengine_world_ui::{Anchor2D, Floating2D, Text2D};
 
 pub mod menu;
 
@@ -180,11 +182,16 @@ fn spawn_enemies(world: &mut World, enemy: TextureHandle) {
         (Vec2::new(110.0, 0.0), Vec2::Y, 100.0, 45.0),
     ];
     for (origin, axis, range, speed) in lanes {
-        world.spawn((
+        let e = world.spawn((
             Transform::from_position(origin),
             Velocity::default(),
             Patrol { origin, axis, range, speed, dir: 1.0 },
             Sprite { layer: LAYER_ENEMY, ..Sprite::new(enemy) }.with_size(Vec2::splat(TILE)),
+        ));
+        // world-space label that follows the enemy
+        world.spawn((
+            Anchor2D::entity(e).with_offset(Vec2::new(0.0, -14.0)),
+            Text2D { text: "Enemy".into(), size: 11.0, color: [1.0, 0.45, 0.45, 1.0], ..Default::default() },
         ));
     }
 }
@@ -260,15 +267,20 @@ fn collisions(ctx: &ParCtx<'_>) {
     let Ok(pos) = ctx.get::<&Transform>(player).map(|t| t.position) else { return };
 
     // coins
-    let taken: Vec<Entity> = ctx
+    let taken: Vec<(Entity, Vec2)> = ctx
         .query::<(Entity, &Transform, &Coin)>()
         .iter()
         .filter(|(_, t, _)| t.position.distance(pos) < PLAYER_R + COIN_R)
-        .map(|(e, _, _)| e)
+        .map(|(e, t, _)| (e, t.position))
         .collect();
     let mut new_coins = Vec::new();
-    for e in taken {
+    for (e, at) in taken {
         ctx.commands().despawn(e);
+        ctx.commands().spawn((
+            Anchor2D::point(at).with_offset(Vec2::new(0.0, -10.0)),
+            Text2D { text: "Scored!".into(), size: 14.0, color: [1.0, 0.84, 0.2, 1.0], bold: true },
+            Floating2D::new(40.0, 0.8),
+        ));
         game.score += 1;
         game.coins_left -= 1;
         global_info(&format!("[coin_dash] score {}", game.score));
@@ -436,6 +448,12 @@ fn main() {
             let autoplay = engine.resources().get::<Game>().is_some_and(|g| g.autoplay);
             if let Err(e) = engine.add_plugin(menu::plugin()) {
                 eprintln!("ui plugin failed: {e}");
+            }
+            if let Err(e) = engine.add_plugin(efeengine_world_ui::WorldUiPlugin) {
+                eprintln!("world ui plugin failed: {e}");
+            }
+            if let Err(e) = engine.add_plugin(efeengine_ui::DebugMenuPlugin) {
+                eprintln!("debug menu failed: {e}");
             }
             menu::setup(&mut engine, autoplay);
             engine.set_renderer_2d(SpriteRenderer::new());

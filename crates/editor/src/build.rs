@@ -42,12 +42,12 @@ pub fn game_binary(target: &Path, release: bool, package: &str) -> PathBuf {
 }
 
 /// The game binary itself (not `cargo run`, so Stop kills the game), with the editor link on.
-pub fn run_command(project_dir: &Path, target: &Path, package: &str, release: bool, port: u16) -> CommandSpec {
+pub fn run_command(project_dir: &Path, target: &Path, package: &str, release: bool, socket: &str) -> CommandSpec {
     CommandSpec {
         program: game_binary(target, release, package).to_string_lossy().into_owned(),
         args: Vec::new(),
         cwd: project_dir.to_path_buf(),
-        env: vec![("EFE_EDITOR".into(), "1".into()), ("EFE_EDITOR_PORT".into(), port.to_string())],
+        env: vec![("EFE_EDITOR".into(), "1".into()), ("EFE_EDITOR_SOCKET".into(), socket.to_string())],
     }
 }
 
@@ -326,12 +326,12 @@ mod tests {
         let d = Path::new("/proj");
         let t = target_dir(d, None);
         assert_eq!(t, Path::new("/proj/target"));
-        let c = run_command(d, &t, "demo", false, 9000);
+        let c = run_command(d, &t, "demo", false, "efe-editor-9");
         assert_eq!(Path::new(&c.program), Path::new("/proj/target/debug").join(format!("demo{}", std::env::consts::EXE_SUFFIX)));
         assert!(c.args.is_empty());
         assert!(c.env.contains(&("EFE_EDITOR".into(), "1".into())));
-        assert!(c.env.contains(&("EFE_EDITOR_PORT".into(), "9000".into())));
-        let r = run_command(d, &t, "demo", true, 1);
+        assert!(c.env.contains(&("EFE_EDITOR_SOCKET".into(), "efe-editor-9".into())));
+        let r = run_command(d, &t, "demo", true, "s");
         assert!(r.program.contains("target/release") || r.program.contains("target\\release"));
         assert_eq!(target_dir(d, Some("out")), Path::new("/proj/out"));
         assert_eq!(target_dir(d, Some("/abs")), Path::new("/abs"));
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn restore_env_is_added() {
         let t = target_dir(Path::new("/p"), None);
-        let c = with_restore(run_command(Path::new("/p"), &t, "demo", false, 1), Path::new("/p/target/efe-restart.ron"));
+        let c = with_restore(run_command(Path::new("/p"), &t, "demo", false, "s"), Path::new("/p/target/efe-restart.ron"));
         assert!(c.env.contains(&("EFE_RESTORE_SNAPSHOT".into(), "/p/target/efe-restart.ron".into())));
         assert!(c.env.contains(&("EFE_EDITOR".into(), "1".into())));
     }

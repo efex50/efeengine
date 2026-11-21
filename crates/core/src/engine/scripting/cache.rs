@@ -346,8 +346,8 @@ mod disk {
                 if std::mem::take(&mut first) && path != root {
                     return None;
                 }
-                let text = files.read(path).ok()?;
-                if hex(blake3::hash(text.as_bytes()).as_bytes()) != h {
+                let bytes = files.read_bytes(path).ok()?;
+                if hex(blake3::hash(&bytes).as_bytes()) != h {
                     return None;
                 }
             }
@@ -489,6 +489,39 @@ mod compile {
                 }
                 self.compile_store(key, &bytes, &deps);
             }
+            Ok((module, bytes))
+        }
+
+        /// Disk-cached translation of a `.wasm` mod entry `root` in `files` against `api`
+        /// (feature `wasm-mods`, native only). Returns the decoded module and its bytes.
+        #[cfg(all(feature = "wasm-mods", not(target_family = "wasm")))]
+        pub fn translate_wasm(
+            &mut self,
+            game: &str,
+            root: &str,
+            files: &dyn FileSource,
+            api: &efevm::api::ApiIndex,
+            opts: &efe_wasm::TranslateOptions,
+        ) -> Result<(Module, Vec<u8>), String> {
+            let wasm = files.read_bytes(root).map_err(|e| format!("{}: {e}", files.display_name(root)))?;
+            let mut h = blake3::Hasher::new();
+            h.update(b"efa-wasm-cache\0");
+            h.update(&CACHE_FORMAT.to_le_bytes());
+            h.update(&efe_wasm::TRANSLATOR_VERSION.to_le_bytes());
+            h.update(files.display_name(root).as_bytes());
+            h.update(b"\0");
+            h.update(&wasm);
+            h.update(&api.hash().to_le_bytes());
+            h.update(format!("{opts:?}").as_bytes());
+            let key = hex(h.finalize().as_bytes());
+            if let Some(hit) = self.compile_disk(game, Some(&key), root, files, api.hash()) {
+                return Ok(hit);
+            }
+            self.stats.compiles += 1;
+            let module = efe_wasm::translate(&wasm, api, opts).map_err(|e| format!("{}: {e}", files.display_name(root)))?;
+            let bytes = module.encode();
+            let deps = format!("efa-deps 1\n{} {root}\n", hex(blake3::hash(&wasm).as_bytes()));
+            self.compile_store(&key, &bytes, &deps);
             Ok((module, bytes))
         }
     }

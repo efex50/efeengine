@@ -18,7 +18,8 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use efeengine_core::cache::{CacheConfig, CacheDir};
-use efeengine_core::efa::mod_folder::read_mod_toml;
+use efeengine_core::efa::asm::FsSource;
+use efeengine_core::efa::mod_folder::{BuildLimits, prepare_mod, read_mod_toml, to_fallback};
 use efeengine_core::efemod::{Manifest, Package, ReadLimits, check_module};
 use efeengine_core::efevm::{ApiIndex, ApiType, Module, Param};
 use efeengine_core::mods::{Grant, LoadInput, ModRequest};
@@ -224,16 +225,10 @@ fn toml_table(kind: Kind) -> toml::Table {
     std::fs::read_to_string(kind.dir().join("mod.toml")).expect("mod.toml").parse().expect("mod.toml is TOML")
 }
 
-/// The manifest of `mod.toml`: the real parser (`read_mod_toml`) on the text without what E7.4c
-/// adds (`[build] wasm` and `scratch`, `[[provide]]`).
+/// The manifest of `mod.toml` via the real `read_mod_toml` parser.
 fn manifest(kind: Kind) -> Manifest {
-    let mut t = toml_table(kind);
-    t.remove("provide");
-    if let Some(b) = t.get_mut("build").and_then(|b| b.as_table_mut()) {
-        b.remove("wasm");
-        b.remove("scratch");
-    }
-    let m = read_mod_toml(&toml::to_string(&t).unwrap()).unwrap_or_else(|e| panic!("{e}")).manifest;
+    let text = std::fs::read_to_string(kind.dir().join("mod.toml")).expect("mod.toml");
+    let m = read_mod_toml(&text).unwrap_or_else(|e| panic!("{e}")).manifest;
     m.validate().expect("manifest");
     m
 }
@@ -252,21 +247,8 @@ fn api_params(v: &toml::Value) -> Vec<Param> {
 
 /// The `[[provide]]` tables and `[build] scratch` as the translator's fallback.
 fn fallback(kind: Kind) -> efe_wasm::Fallback {
-    let t = toml_table(kind);
-    let provides = t["provide"]
-        .as_array()
-        .expect("[[provide]]")
-        .iter()
-        .map(|p| efe_wasm::FallbackProvide {
-            name: p["name"].as_str().unwrap().into(),
-            export: p["export"].as_str().unwrap().into(),
-            doc: p["doc"].as_str().unwrap().into(),
-            params: api_params(&p["params"]),
-            results: api_params(&p["results"]),
-        })
-        .collect();
-    let scratch = t["build"].get("scratch").map(|s| s.as_integer().unwrap() as u32);
-    efe_wasm::Fallback { provides, events: vec![], scratch }
+    let prep = prepare_mod(&FsSource::new(kind.dir()), &BuildLimits::default()).unwrap_or_else(|e| panic!("{e}"));
+    to_fallback(&prep)
 }
 
 /// Translates the mod's wasm against the merged index. The C mod gets its provides from
@@ -506,4 +488,65 @@ fn the_rust_mod_section_and_the_fallback_agree() {
     let opts = efe_wasm::TranslateOptions { fallback: fallback(Kind::Rust), ..Default::default() };
     let both = efe_wasm::translate(bytes, &indices().merged, &opts).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(both.data().interface, translate(Kind::Rust, bytes).data().interface);
+}
+
+/// E7.4c: `efescript::pack::pack_dir` packs a wasm mod folder directly, and `Engine::load`
+/// loads it as a folder mod through `ScriptCache::translate_wasm` (second engine hits disk).
+#[test]
+fn staged_wasm_mod_folders_pack_and_load_through_script_cache() {
+    let ix = indices();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("wasm_folder_e74c_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let cache_dir = root.join("cache");
+
+    for kind in [Kind::Rust, Kind::C] {
+        let Some(bytes) = wasm(kind) else { continue };
+        let stage = root.join(kind.id());
+        let toml_text = std::fs::read_to_string(kind.dir().join("mod.toml")).unwrap();
+        let mt = read_mod_toml(&toml_text).unwrap();
+        let wasm_rel = mt.build.wasm_path().expect("wasm_path");
+        let wasm_dest = stage.join(wasm_rel);
+        std::fs::create_dir_all(wasm_dest.parent().unwrap()).unwrap();
+        std::fs::write(stage.join("mod.toml"), &toml_text).unwrap();
+        std::fs::write(&wasm_dest, bytes).unwrap();
+
+        // Pack with efescript::pack::pack_dir.
+        let packed = efescript::pack::pack_dir(&stage, &[&ix.merged]).unwrap_or_else(|e| panic!("pack {}: {e}", kind.id()));
+        assert_eq!(packed.manifest.id, kind.id());
+        assert_eq!(packed.module.data().interface, translate(kind, bytes).data().interface);
+
+        // Load directly as a mod folder with ScriptCache enabled (first run translates, second hits disk).
+        let setup_engine = |cache_dir: &Path| {
+            let cfg = EngineConfig {
+                fixed_dt: DT,
+                script_cache: CacheConfig { disk: CacheDir::Path(cache_dir.to_path_buf()), ..Default::default() },
+                ..EngineConfig::headless()
+            };
+            let mut e = Engine::with_config(cfg).expect("headless engine");
+            setup(&mut e);
+            let id = kind.id();
+            e.set_mod_policy(move |r: &ModRequest<'_>| {
+                let namespaces: &[&str] = match r.manifest.id.as_str() {
+                    "inventory" => &["engine.log", "engine.events"],
+                    m if m == id => &["engine.events", "game"],
+                    other => return Err(format!("unexpected {other}")),
+                };
+                Ok(Grant { namespaces: namespaces.iter().map(|s| s.to_string()).collect(), ..Grant::default() })
+            });
+            e.load_input(LoadInput::Package { label: "inventory.efmod", bytes: &ix.inventory }).unwrap();
+            e
+        };
+
+        let mut e1 = setup_engine(&cache_dir);
+        let loaded = e1.load(&stage).unwrap_or_else(|e| panic!("load folder {}: {e}", kind.id()));
+        assert_eq!(e1.package(loaded.id()).unwrap().manifest.id, kind.id());
+        let s1 = e1.cache().stats();
+        assert_eq!((s1.compiles, s1.disk_hits), (1, 0), "{}: {s1:?}", kind.id());
+
+        let mut e2 = setup_engine(&cache_dir);
+        e2.load(&stage).unwrap_or_else(|e| panic!("load cached {}: {e}", kind.id()));
+        let s2 = e2.cache().stats();
+        assert_eq!((s2.compiles, s2.disk_hits), (0, 1), "{}: {s2:?}", kind.id());
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }

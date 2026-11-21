@@ -140,7 +140,7 @@ def build(example, release=False, dry=False):
 
     log(f"cargo build ({profile}) {pkg} for {WASM_TARGET}")
     cmd = ["cargo", "+nightly", "build", "--lib", "-p", pkg, "--target", WASM_TARGET,
-           "-Z", "build-std=panic_abort,std"] + (["--release"] if release else [])
+           "-Z", "build-std=panic_abort,std", "--no-default-features"] + (["--release"] if release else [])
     run(cmd, dry, cwd=ROOT)
 
     if dry:

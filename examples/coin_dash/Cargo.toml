@@ -20,6 +20,7 @@ dependencies = ["sdl3"]
 [dependencies]
 efeengine-core = { path = "../../crates/core" }
 efeengine-ui = { path = "../../crates/ui", default-features = false }
+efeengine-world-ui = { path = "../../crates/world-ui" }
 
 [features]
 default = ["iced", "fallback"]

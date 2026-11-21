@@ -33,20 +33,16 @@ fn main() -> iced::Result {
         }
         None => (None, Config::default(), Some("no user config directory (set HOME or XDG_CONFIG_HOME): settings are not saved".to_string())),
     };
-    let mut cli = match parse_cli(&args, std::env::var("EFE_EDITOR_PORT").ok().as_deref(), &cwd) {
+    let cli = match parse_cli(&args, &cwd) {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
-                "efe-editor: {e}\nusage: efe-editor [--port N] [--package NAME] [--example DIR] [--project-dir DIR]\n  \
-                 port: $EFE_EDITOR_PORT or 7878; without --package Build and Run are disabled"
+                "efe-editor: {e}\nusage: efe-editor [--socket NAME] [--package NAME] [--example DIR] [--project-dir DIR]\n  \
+                 socket: a local socket name, generated when not given; without --package Build and Run are disabled"
             );
             std::process::exit(2);
         }
     };
-    // The configured default port applies when neither --port nor $EFE_EDITOR_PORT is given.
-    if !args.iter().any(|a| a == "--port" || a.starts_with("--port=")) && std::env::var("EFE_EDITOR_PORT").is_err() {
-        cli.port = config.default_port;
-    }
     iced::application(move || Editor::new(cli.clone(), config_dir.clone(), config.clone(), config_notice.clone()), Editor::update, Editor::view)
         .title("efeengine editor")
         .subscription(Editor::subscription)
@@ -99,7 +95,6 @@ enum Message {
     /// Show what is wrong with a listed project (by its file).
     ShowIssues(PathBuf),
     OpenRustup,
-    SettingsPort(String),
     SettingsPlace(bool),
     SettingsRelease(bool),
     SettingsSave,
@@ -124,7 +119,6 @@ struct Pages {
     new_error: Option<String>,
     open_list: Vec<projects::Listed>,
     open_issues: Vec<String>,
-    settings_port: String,
     settings_place: bool,
     settings_release: bool,
     settings_error: Option<String>,
@@ -148,7 +142,7 @@ struct Editor {
     config: Config,
     config_dir: Option<PathBuf>,
     pages: Pages,
-    port: u16,
+    socket: String,
     cli: Cli,
     runner: runner::Handle,
     build: BuildState,
@@ -201,7 +195,7 @@ impl Pages {
 
 impl Editor {
     fn new(cli: Cli, config_dir: Option<PathBuf>, config: Config, config_notice: Option<String>) -> Self {
-        let port = cli.port;
+        let socket = cli.socket.clone();
         // `--package` is a shortcut: the project of that package when there is one, else the
         // editor opens without a project, as before E9.
         let project = cli.package.as_deref().and_then(|pkg| {
@@ -218,12 +212,12 @@ impl Editor {
             config,
             config_dir,
             pages,
-            port,
+            socket: socket.clone(),
             cli,
             runner: runner::spawn(),
             build: BuildState::default(),
             restart: Restart::default(),
-            worker: worker::spawn(port),
+            worker: worker::spawn(socket),
             conn: ConnState::Connecting,
             ticks: 0,
             entities: Vec::new(),
@@ -293,7 +287,6 @@ impl Editor {
                 self.pages.open_list = self.config.projects_dir().map(|d| projects::list_projects(&d)).unwrap_or_default();
             }
             Route::Settings => {
-                self.pages.settings_port = self.config.default_port.to_string();
                 self.pages.settings_place = self.config.place_game_window;
                 self.pages.settings_release = self.config.cargo_release;
                 self.pages.settings_error = None;
@@ -726,29 +719,24 @@ impl Editor {
                     self.notice = Some(e);
                 }
             }
-            Message::SettingsPort(t) => self.pages.settings_port = t,
             Message::SettingsPlace(b) => self.pages.settings_place = b,
             Message::SettingsRelease(b) => self.pages.settings_release = b,
-            Message::SettingsSave => match config::validate_port(&self.pages.settings_port) {
-                Err(e) => self.pages.settings_error = Some(e),
-                Ok(port) => {
-                    self.config.default_port = port;
-                    self.config.place_game_window = self.pages.settings_place;
-                    self.config.cargo_release = self.pages.settings_release;
-                    self.place_game = self.config.place_game_window;
-                    self.release = self.config.cargo_release;
-                    match self.save_config() {
-                        Ok(()) => {
-                            self.pages.settings_error = None;
-                            self.notice = Some("settings saved (the port applies at the next start)".into());
-                        }
-                        Err(e) => {
-                            self.pages.settings_error = Some(e.clone());
-                            self.notice = Some(format!("settings not saved: {e}"));
-                        }
+            Message::SettingsSave => {
+                self.config.place_game_window = self.pages.settings_place;
+                self.config.cargo_release = self.pages.settings_release;
+                self.place_game = self.config.place_game_window;
+                self.release = self.config.cargo_release;
+                match self.save_config() {
+                    Ok(()) => {
+                        self.pages.settings_error = None;
+                        self.notice = Some("settings saved".into());
+                    }
+                    Err(e) => {
+                        self.pages.settings_error = Some(e.clone());
+                        self.notice = Some(format!("settings not saved: {e}"));
                     }
                 }
-            },
+            }
             Message::DeleteName(t) => self.pages.delete_name = t,
             Message::DeleteConfirm => {
                 let dir = self.pages.delete_dir.clone();
@@ -781,7 +769,7 @@ impl Editor {
                 if let Some(pkg) = self.package().filter(|_| self.build.can_run(true)) {
                     let dir = &self.project_dir();
                     let target = build::target_dir(dir, std::env::var("CARGO_TARGET_DIR").ok().as_deref());
-                    let game = self.game_env(build::run_command(dir, &target, &pkg, self.release, self.port));
+                    let game = self.game_env(build::run_command(dir, &target, &pkg, self.release, &self.socket));
                     self.runner.run(build::build_command(dir, &pkg, self.release), game);
                 }
             }
@@ -880,7 +868,7 @@ impl Editor {
                     let Some(pkg) = self.package() else { continue };
                     let dir = self.project_dir();
                     let target = build::target_dir(&dir, std::env::var("CARGO_TARGET_DIR").ok().as_deref());
-                    let mut game = build::run_command(&dir, &target, &pkg, self.release, self.port);
+                    let mut game = build::run_command(&dir, &target, &pkg, self.release, &self.socket);
                     if restore {
                         game = build::with_restore(game, &restart::snapshot_file(&dir));
                     }
@@ -1035,8 +1023,6 @@ impl Editor {
 
     fn settings_page(&self) -> Element<'_, Message> {
         let mut items: Vec<Element<'_, Message>> = vec![
-            text("Default port (1 to 65535; applies at the next start)").size(13).boxed(),
-            text_input("7878", &self.pages.settings_port).on_input(Message::SettingsPort).boxed(),
             checkbox(self.pages.settings_place).label("Place game window next to editor").on_toggle(Message::SettingsPlace).boxed(),
             checkbox(self.pages.settings_release).label("Build in release mode by default").on_toggle(Message::SettingsRelease).boxed(),
         ];
@@ -1097,7 +1083,7 @@ impl Editor {
             if allowed { b.on_press(m) } else { b }
         };
         let top = row![
-            text(self.conn.label(self.port)),
+            text(self.conn.label()),
             space().width(Fill),
             text(self.build.header()).size(13),
             checkbox(self.release).label("release").on_toggle(Message::Release),

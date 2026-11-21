@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The protocol version; bumped on every incompatible change.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 /// The largest frame either side accepts (1 MiB); a bigger length closes the connection.
 pub const MAX_FRAME: usize = 1 << 20;
 

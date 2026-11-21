@@ -194,7 +194,7 @@ pub fn mod_api_cmd(project: &Project, dir: &Path, output: Option<PathBuf>, api: 
 /// Exports the game's index with `api` (builds and runs the native binary) and returns its path.
 fn export_game_index(project: &Project, ex: &Example) -> Result<PathBuf> {
     let path = game_index_path(project, ex);
-    api::api_export(project, ex, Some(path.clone()), false, false)?;
+    api::api_export(project, ex, Some(path.clone()), false, false, false)?;
     Ok(path)
 }
 

@@ -1,0 +1,41 @@
+[mod]
+id = "dash_c"
+version = "1.0.0"
+name = "Dash C"
+description = "C wasm mod for coin_dash_wasm: enemy patrol, coin spin/bob animation, and lane/coin helpers."
+game = "coin_dash_wasm"
+
+[permissions]
+namespaces = ["engine.world", "engine.time", "engine.math", "engine.events", "engine.log", "game"]
+
+[build]
+wasm = "dash_c.wasm"
+scratch = 256
+
+[[provide]]
+name = "next_lane"
+export = "efe_provide_next_lane"
+doc = "Return the next patrol lane index `(lane + 1) mod 3`."
+params = ["lane: i32"]
+results = ["result: i32"]
+
+[[provide]]
+name = "coin_phase"
+export = "efe_provide_coin_phase"
+doc = "Return the initial animation phase for coin `index` of `total`."
+params = ["index: i32", "total: i32"]
+results = ["result: f32"]
+
+[[provide]]
+name = "check_coin_spot"
+export = "efe_provide_check_coin_spot"
+doc = "Return true when `tr.position` is a valid coin spawn spot away from the start."
+params = ["tr: &Transform"]
+results = ["result: bool"]
+
+[[provide]]
+name = "provide_calls"
+export = "efe_provide_provide_calls"
+doc = "Total number of times dash_c's provided helpers have been called."
+params = []
+results = ["result: i32"]

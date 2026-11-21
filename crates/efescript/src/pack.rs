@@ -11,7 +11,7 @@ use efa::mod_folder::{build_mod, list_assets, BuildLimits};
 use efemod::{Manifest, Package, ReadLimits};
 pub use efevm::api::ApiIndex;
 
-pub use efa::mod_folder::{mod_index, read_mod_toml, BuildToml, ModToml};
+pub use efa::mod_folder::{mod_index, read_mod_toml, to_fallback, BuildToml, ModToml, ProvideEventToml, ProvideToml};
 
 /// The result of [`pack_dir`].
 #[derive(Debug)]

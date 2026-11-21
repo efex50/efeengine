@@ -1,0 +1,21 @@
+# Not a member of the root workspace (has its own empty [workspace]).
+# Built for wasm32-unknown-unknown by build_mods.py or tests/headless.rs.
+[package]
+name = "dash_rust"
+version = "1.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+efe-guest = { path = "../../../../crates/efe-guest" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[workspace]

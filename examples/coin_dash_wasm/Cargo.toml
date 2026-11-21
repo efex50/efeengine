@@ -1,0 +1,38 @@
+[package]
+name = "coin_dash_wasm"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "coin_dash_wasm"
+path = "src/main.rs"
+
+[package.metadata.vcpkg]
+git = "https://github.com/microsoft/vcpkg"
+rev = "4c1db68"
+dependencies = ["sdl3"]
+
+[dependencies]
+efeengine-core = { path = "../../crates/core" }
+efeengine-ui = { path = "../../crates/ui", default-features = false }
+efeengine-world-ui = { path = "../../crates/world-ui" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+efe-wasm = { path = "../../crates/efe-wasm" }
+efemod = { path = "../../crates/efemod", features = ["write"] }
+toml = "1"
+
+[dev-dependencies]
+efescript = { path = "../../crates/efescript" }
+
+[features]
+default = ["iced", "fallback"]
+# Native UI backend (iced); without it the native build runs headless (nothing drawn).
+iced = ["efeengine-ui/iced"]
+# Fallback native UI backend (taffy + cosmic-text through Draw2D); also draws in SDL mode.
+fallback = ["efeengine-ui/fallback"]
+# Script JIT (Cranelift, native only): the debug menu's Scripts tab can then switch backends.
+jit = ["efeengine-core/jit"]

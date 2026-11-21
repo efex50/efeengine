@@ -1,9 +1,11 @@
-//! Editor link (docs/EDITOR.md phases E1 and E2): a localhost TCP listener that lets an editor
+//! Editor link (docs/EDITOR.md phases E1 and E2): a local socket (Unix domain socket or Windows
+//! named pipe, see [`socket`]) that lets an editor
 //! read a running game, switch edit and play mode, save and load scene files, and (E4) set
 //! fields, spawn and despawn entities, and (E7.2) select an entity to draw gizmo handles over it.
 //!
 //! - Off unless `EFE_EDITOR=1`: [`EditorLink::from_env`] then adds nothing, so release games
-//!   never open a socket. The port is `EFE_EDITOR_PORT` (default 7878). It binds `127.0.0.1` only.
+//!   never open a socket. The socket name is `EFE_EDITOR_SOCKET` (set by the editor); without it the
+//!   link has nothing to listen on and stays off.
 //! - Connection threads read frames and queue requests; one system in `PostUpdate` at
 //!   `order::LATE + 100` drains the queue once per frame, applies the requests and writes the
 //!   replies.
@@ -12,6 +14,8 @@
 mod handler;
 pub mod gizmo;
 pub mod protocol;
+#[cfg(not(target_family = "wasm"))]
+pub mod socket;
 
 pub use gizmo::Selection;
 pub use handler::{RingLogger, recent_logs, resolve_project_path};
@@ -33,32 +37,31 @@ pub fn handshake(msg: &ClientMessage, game: &str) -> Result<ServerMessage, Serve
     }
 }
 
-/// The plugin. `EditorLink::from_env()` for games, `EditorLink::new(port)` to force it on
-/// (port 0 picks a free one, see [`EditorLink::port_handle`]).
+/// The plugin. `EditorLink::from_env()` for games, `EditorLink::new(name)` to force it on
+/// with a socket name (see [`socket`]).
 pub struct EditorLink {
-    port: Option<u16>,
+    socket: Option<String>,
     project_dir: Option<std::path::PathBuf>,
-    bound: std::sync::Arc<std::sync::atomic::AtomicU16>,
     restore: Option<std::path::PathBuf>,
 }
 
 impl EditorLink {
-    /// Always on, listening on `127.0.0.1:port`.
-    pub fn new(port: u16) -> Self {
-        Self { port: Some(port), project_dir: None, bound: Default::default(), restore: None }
+    /// Always on, listening on the local socket `name`.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { socket: Some(name.into()), project_dir: None, restore: None }
     }
 
-    /// On only when `EFE_EDITOR=1`; port from `EFE_EDITOR_PORT` (default 7878).
+    /// On only when `EFE_EDITOR=1` and `EFE_EDITOR_SOCKET` names the socket (the editor sets both).
     pub fn from_env() -> Self {
         let on = std::env::var("EFE_EDITOR").is_ok_and(|v| v == "1");
-        let port = std::env::var("EFE_EDITOR_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7878);
+        let name = std::env::var("EFE_EDITOR_SOCKET").ok().filter(|n| !n.is_empty());
         let restore = std::env::var_os("EFE_RESTORE_SNAPSHOT").filter(|v| !v.is_empty()).map(Into::into);
-        Self { port: on.then_some(port), project_dir: None, bound: Default::default(), restore }
+        Self { socket: name.filter(|_| on), project_dir: None, restore }
     }
 
     /// The disabled plugin (adds nothing).
     pub fn off() -> Self {
-        Self { port: None, project_dir: None, bound: Default::default(), restore: None }
+        Self { socket: None, project_dir: None, restore: None }
     }
 
     /// The directory `save_scene` / `load_scene` paths are relative to. Default: the
@@ -74,11 +77,6 @@ impl EditorLink {
         self.restore = Some(path.into());
         self
     }
-
-    /// The port actually bound once the plugin is built (0 before, or when off or failed).
-    pub fn port_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicU16> {
-        self.bound.clone()
-    }
 }
 
 impl Plugin for EditorLink {
@@ -91,21 +89,20 @@ impl Plugin for EditorLink {
 
     #[cfg(not(target_family = "wasm"))]
     fn build(&self, engine: &mut Engine) {
-        let Some(port) = self.port else { return };
+        let Some(name) = &self.socket else { return };
         let dir = self
             .project_dir
             .clone()
             .or_else(|| std::env::var_os("EFE_EDITOR_PROJECT").map(Into::into))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-        native::build(engine, port, &self.bound, dir, self.restore.clone());
+        native::build(engine, name, dir, self.restore.clone());
     }
 }
 
 #[cfg(not(target_family = "wasm"))]
 mod native {
     use std::io;
-    use std::net::{Ipv4Addr, TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -117,11 +114,12 @@ mod native {
     use crate::handler::{LinkState, RingLogger, handle};
     use crate::protocol::*;
     use crate::handshake;
+    use crate::socket::{self, Conn, Listener};
 
     const MAX_CLIENTS: usize = 4;
     const QUEUE: usize = 256;
 
-    type Writer = Arc<Mutex<TcpStream>>;
+    type Writer = Arc<Mutex<Conn>>;
 
     struct Pending {
         id: u64,
@@ -137,23 +135,20 @@ mod native {
         }
     }
 
-    pub fn build(engine: &mut Engine, port: u16, bound: &AtomicU16, project_dir: std::path::PathBuf, restore: Option<std::path::PathBuf>) {
-        let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+    pub fn build(engine: &mut Engine, name: &str, project_dir: std::path::PathBuf, restore: Option<std::path::PathBuf>) {
+        let listener = match socket::listen(name) {
             Ok(l) => l,
             Err(e) => {
-                engine.logger.error(&format!("editor-link: cannot listen on 127.0.0.1:{port}: {e}"));
+                engine.logger.error(&format!("editor-link: cannot listen on socket `{name}`: {e}"));
                 return;
             }
         };
-        let actual = listener.local_addr().map(|a| a.port()).unwrap_or(port);
-        bound.store(actual, Ordering::Relaxed);
-        let _ = listener.set_nonblocking(true);
 
         // Record log lines for the `logs` request; the old logger keeps printing.
         let old = std::mem::replace(&mut engine.logger, Box::new(NoLog));
         engine.logger = Box::new(RingLogger { inner: old });
         set_global_logger(Box::new(RingLogger { inner: Box::new(NewDefaultLogger()) }));
-        engine.logger.info(&format!("editor-link: listening on 127.0.0.1:{actual}"));
+        engine.logger.info(&format!("editor-link: listening on socket `{name}`"));
 
         let game = engine.api_index().game;
         let stop = Arc::new(AtomicBool::new(false));
@@ -234,10 +229,10 @@ mod native {
         fn log(&mut self, _: &efeengine_core::log::LogMsg) {}
     }
 
-    fn accept_loop(listener: TcpListener, game: String, tx: SyncSender<Pending>, stop: Arc<AtomicBool>, clients: Arc<AtomicUsize>) {
+    fn accept_loop(listener: Listener, game: String, tx: SyncSender<Pending>, stop: Arc<AtomicBool>, clients: Arc<AtomicUsize>) {
         while !stop.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((stream, _)) => {
+            match socket::accept(&listener) {
+                Ok(Some(stream)) => {
                     if clients.load(Ordering::Relaxed) >= MAX_CLIENTS {
                         continue; // dropped: the client sees the connection close
                     }
@@ -248,17 +243,16 @@ mod native {
                         clients.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(20)),
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                 Err(_) => std::thread::sleep(Duration::from_millis(100)),
             }
         }
     }
 
-    fn serve(stream: TcpStream, game: &str, tx: SyncSender<Pending>, stop: &AtomicBool) -> io::Result<()> {
-        stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(Duration::from_millis(50)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-        let mut reader = stream.try_clone()?;
+    fn serve(mut stream: Conn, game: &str, tx: SyncSender<Pending>, stop: &AtomicBool) -> io::Result<()> {
+        stream.set_read_timeout(Some(Duration::from_millis(50)));
+        stream.set_write_timeout(Some(Duration::from_secs(2)));
+        let mut reader = stream.clone();
         let out: Writer = Arc::new(Mutex::new(stream));
         let mut frames = FrameReader::default();
         let mut greeted = false;

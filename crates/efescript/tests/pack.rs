@@ -323,3 +323,91 @@ fn cli_builds_against_an_efmod_api() {
     let o = efescript(&["pack", &s.s("shop")]);
     assert_eq!(o.status.code(), Some(2));
 }
+
+fn minimal_wasm_mod() -> Vec<u8> {
+    let mut wasm = Vec::new();
+    wasm.extend_from_slice(b"\0asm\x01\0\0\0");
+    wasm.extend_from_slice(&[1, 6, 1, 0x60, 1, 0x7f, 1, 0x7f]); // type 0: (i32) -> i32
+    wasm.extend_from_slice(&[3, 2, 1, 0]); // func 0: type 0
+    wasm.extend_from_slice(&[5, 3, 1, 0, 1]); // memory: min 1
+    wasm.extend_from_slice(&[6, 7, 1, 0x7f, 0, 0x41, 0x80, 0x08, 0x0b]); // global 0: i32 = 1024
+    let ex0 = b"\x0fefe_provide_dbl\x00\x00";
+    let ex1 = b"\x0befe_scratch\x03\x00";
+    wasm.push(7);
+    wasm.push((1 + ex0.len() + ex1.len()) as u8);
+    wasm.push(2);
+    wasm.extend_from_slice(ex0);
+    wasm.extend_from_slice(ex1);
+    wasm.extend_from_slice(&[10, 9, 1, 7, 0, 0x20, 0, 0x20, 0, 0x6a, 0x0b]);
+    wasm
+}
+
+#[test]
+fn packs_a_wasm_mod_folder_and_efa_mod_uses_it() {
+    let s = Scratch::new("wasm");
+    let wasm = minimal_wasm_mod();
+    s.write(
+        "wbag/mod.toml",
+        r#"[mod]
+id = "wbag"
+version = "1.0.0"
+
+[build]
+wasm = "mod.wasm"
+scratch = 256
+
+[[provide]]
+name = "dbl"
+doc = "Double `x`."
+params = ["x: i32"]
+results = ["r: i32"]
+"#,
+    );
+    std::fs::write(s.path("wbag/mod.wasm"), &wasm).unwrap();
+    s.write("wbag/assets/info.txt", "wasm-asset");
+
+    let out = s.s("wbag-1.0.0.efmod");
+    let o = efescript(&["pack", &s.s("wbag"), "-o", &out]);
+    assert!(o.status.success(), "{}", stderr(&o));
+
+    // Deterministic output, contains module.efvm and assets, never mod.wasm.
+    let again = pack_dir(&s.path("wbag"), &[]).expect("pack_dir");
+    assert_eq!(std::fs::read(&out).unwrap(), again.bytes);
+    let pkg = read_pkg(&again.bytes);
+    assert_eq!(pkg.manifest.id, "wbag");
+    assert_eq!(pkg.asset("info.txt"), Some(&b"wasm-asset"[..]));
+    assert!(pkg.ignored.is_empty());
+    let iface = pkg.module.data().interface.as_ref().expect("section 13");
+    assert_eq!(iface.scratch, Some((1024, 256)));
+    assert_eq!(iface.provides[0].name, "dbl");
+
+    // Inspect and api-export work as usual.
+    let o = efescript(&["inspect", &out]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains("dbl(x: i32) -> (r: i32)"), "{}", stdout(&o));
+    let o = efescript(&["api-export", &out]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let ix = ApiIndex::from_json(&stdout(&o)).unwrap();
+    assert_eq!(ix.functions[0].qualified(), "wbag.dbl");
+
+    // An .efa mod can pack against the packed wasm mod's .efmod.
+    s.write(
+        "caller/mod.toml",
+        "[mod]\nid = \"caller\"\nversion = \"0.1.0\"\n[dependencies]\nwbag = \"^1\"\n",
+    );
+    s.write(
+        "caller/src/main.efa",
+        "import wbag.dbl\nexport fn main() {\n    reg x, y\n    const.i32 x, 7\n    call wbag.dbl(x) -> y\n    ret\n}\n",
+    );
+    let o = efescript(&["pack", &s.s("caller"), "--api", &out, "-o", &s.s("caller.efmod")]);
+    assert!(o.status.success(), "{}", stderr(&o));
+
+    // `[build] entry = "mod.wasm"` also triggers wasm translation.
+    s.write(
+        "wentry/mod.toml",
+        "[mod]\nid = \"wentry\"\nversion = \"1.0.0\"\n[build]\nentry = \"mod.wasm\"\nscratch = 128\n[[provide]]\nname = \"dbl\"\ndoc = \"Double.\"\nparams = [\"x: i32\"]\nresults = [\"r: i32\"]\n",
+    );
+    std::fs::write(s.path("wentry/mod.wasm"), &wasm).unwrap();
+    let wentry = pack_dir(&s.path("wentry"), &[]).expect("entry = mod.wasm");
+    assert_eq!(wentry.module.data().interface.as_ref().unwrap().provides[0].name, "dbl");
+}

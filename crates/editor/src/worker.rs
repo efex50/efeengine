@@ -3,7 +3,6 @@
 //! [`crate::conn`]) and never panics on a dropped connection; the UI thread only talks to it
 //! through channels.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -11,6 +10,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use efeengine_editor_link::protocol::{ClientMessage, PROTOCOL_VERSION, Reply, Request, ServerMessage, recv, send};
+use efeengine_editor_link::socket::{self, Conn};
 
 use crate::conn::ConnState;
 
@@ -52,13 +52,13 @@ impl Drop for Handle {
     }
 }
 
-/// Start the worker for `127.0.0.1:port`.
-pub fn spawn(port: u16) -> Handle {
+/// Start the worker for the game's local socket `name`.
+pub fn spawn(name: String) -> Handle {
     let (tx, cmd_rx) = channel();
     let (evt_tx, rx) = channel();
     let stop = Arc::new(AtomicBool::new(false));
     let s = stop.clone();
-    let thread = std::thread::spawn(move || run(port, cmd_rx, evt_tx, s));
+    let thread = std::thread::spawn(move || run(name, cmd_rx, evt_tx, s));
     Handle { tx, rx: Mutex::new(rx), stop, thread: Some(thread) }
 }
 
@@ -86,11 +86,11 @@ fn sleep_unless_stopped(total: Duration, stop: &AtomicBool, cmds: &Receiver<Requ
     }
 }
 
-fn run(port: u16, cmds: Receiver<Request>, events: Sender<Event>, stop: Arc<AtomicBool>) {
+fn run(name: String, cmds: Receiver<Request>, events: Sender<Event>, stop: Arc<AtomicBool>) {
     let mut state = ConnState::Connecting;
     let _ = events.send(Event::State(state.clone()));
     while !stop.load(Ordering::Relaxed) {
-        let err = match connect(port) {
+        let err = match connect(&name) {
             Ok((mut stream, game)) => {
                 state = ConnState::connected(game);
                 let _ = events.send(Event::State(state.clone()));
@@ -109,11 +109,10 @@ fn run(port: u16, cmds: Receiver<Request>, events: Sender<Event>, stop: Arc<Atom
     }
 }
 
-fn connect(port: u16) -> Result<(TcpStream, String), String> {
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).map_err(|e| e.to_string())?;
-    s.set_read_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
-    s.set_write_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
+fn connect(name: &str) -> Result<(Conn, String), String> {
+    let mut s = socket::connect(name, Duration::from_millis(500)).map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(Duration::from_secs(3)));
+    s.set_write_timeout(Some(Duration::from_secs(3)));
     send(&mut s, &ClientMessage::Hello { protocol: PROTOCOL_VERSION, client: "efe-editor".into() }).map_err(|e| e.to_string())?;
     match recv::<ServerMessage>(&mut s).map_err(|e| format!("handshake: {e}"))? {
         ServerMessage::Hello { game, .. } => Ok((s, game)),
@@ -123,7 +122,7 @@ fn connect(port: u16) -> Result<(TcpStream, String), String> {
 }
 
 /// Serve requests until the connection fails (the error) or the UI stops us (`Ok`).
-fn session(stream: &mut TcpStream, cmds: &Receiver<Request>, events: &Sender<Event>, stop: &AtomicBool) -> Result<(), String> {
+fn session(stream: &mut Conn, cmds: &Receiver<Request>, events: &Sender<Event>, stop: &AtomicBool) -> Result<(), String> {
     let mut next_id = 1u64;
     while !stop.load(Ordering::Relaxed) {
         let first = match cmds.recv_timeout(Duration::from_millis(100)) {
@@ -157,7 +156,7 @@ fn session(stream: &mut TcpStream, cmds: &Receiver<Request>, events: &Sender<Eve
 mod tests {
     use super::*;
     use efeengine_editor_link::protocol::{Mode, read_frame, write_frame};
-    use std::net::TcpListener;
+    use efeengine_editor_link::socket::Listener;
 
     #[test]
     fn dedupe_keeps_first_of_each_in_order() {
@@ -165,6 +164,12 @@ mod tests {
         assert_eq!(v, vec![Request::Stats, Request::Entities, Request::SetMode { mode: Mode::Edit, keep_changes: false }]);
         let d = Request::Despawn { entity: Some(1), editor_id: None };
         assert_eq!(dedupe(vec![d.clone(), d.clone()]), vec![d.clone(), d]);
+    }
+
+    /// A socket name unique to this test and process (a temp-dir path on Unix).
+    fn unique_name(test: &str) -> String {
+        let id = format!("efe-worker-{test}-{}", std::process::id());
+        if cfg!(unix) { format!("{}/{id}.sock", std::env::temp_dir().display()) } else { id }
     }
 
     fn wait_for(h: &Handle, mut pred: impl FnMut(&Event) -> bool) -> Event {
@@ -181,8 +186,14 @@ mod tests {
     }
 
     /// A fake game: greets, answers `stats` once, then drops the connection.
-    fn fake_game(listener: &TcpListener) {
-        let (mut s, _) = listener.accept().unwrap();
+    fn fake_game(listener: &Listener) {
+        let mut s = loop {
+            if let Some(s) = socket::accept(listener).unwrap() {
+                break s;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        s.set_read_timeout(Some(Duration::from_secs(10)));
         let _hello: ClientMessage = recv(&mut s).unwrap();
         send(&mut s, &ServerMessage::Hello { protocol: PROTOCOL_VERSION, game: "fake".into() }).unwrap();
         let msg: ClientMessage = serde_json::from_slice(&read_frame(&mut s).unwrap()).unwrap();
@@ -193,9 +204,9 @@ mod tests {
 
     #[test]
     fn connects_gets_a_reply_survives_a_drop_and_reconnects() {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let h = spawn(port);
+        let name = unique_name("reconnect");
+        let listener = socket::listen(&name).unwrap();
+        let h = spawn(name);
         let t = std::thread::spawn(move || {
             fake_game(&listener);
             fake_game(&listener); // second connection after the drop
@@ -216,9 +227,8 @@ mod tests {
 
     #[test]
     fn refused_connection_is_reported_not_fatal() {
-        // Bind then drop to get a port nobody listens on.
-        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
-        let h = spawn(port);
+        // Nobody listens on this name.
+        let h = spawn(unique_name("refused"));
         let e = wait_for(&h, |e| matches!(e, Event::State(ConnState::Retrying { .. })));
         assert!(matches!(e, Event::State(ConnState::Retrying { attempt: 1, .. })));
         drop(h); // joins the thread promptly

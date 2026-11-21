@@ -21,6 +21,9 @@ dependencies = ["sdl3"]
 efeengine-core = { path = "../../crates/core" }
 efeengine-editor-link = { path = "../../crates/editor-link" }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+efeengine-core = { path = "../../crates/core", features = ["wasm-mods"] }
+
 [dev-dependencies]
 # tests/wasm_mods_e2e.rs: packs the example mods, translates their wasm, generates the bindings
 efescript = { path = "../../crates/efescript" }
@@ -30,3 +33,4 @@ toml = "1"
 [features]
 # Run the scripts on the Cranelift JIT (native only): `cargo run -p script_demo --features jit`
 jit = ["efeengine-core/jit"]
+wasm-mods = ["efeengine-core/wasm-mods"]

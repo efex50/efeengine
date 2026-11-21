@@ -1,14 +1,13 @@
-//! The editor's command line beyond `--port`: which game it is for (`--package`, `--example`)
+//! The editor's command line beyond `--socket`: which game it is for (`--package`, `--example`)
 //! and the project directory builds and runs happen in. Pure, tested without a window.
 
 use std::path::{Path, PathBuf};
 
-use crate::model::parse_port;
-
 /// What the editor was started for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cli {
-    pub port: u16,
+    /// The local socket name the game listens on and the editor connects to.
+    pub socket: String,
     /// The cargo package (and binary) of the game. Without it Build and Run are disabled.
     pub package: Option<String>,
     /// The example directory, shown in the header.
@@ -68,9 +67,13 @@ pub fn resolve_project_dir(given: Option<&str>, cwd: &Path) -> Result<PathBuf, S
     Ok(dir)
 }
 
-/// Parse `args` (without the program name). `env_port` is `$EFE_EDITOR_PORT`.
-pub fn parse_cli(args: &[String], env_port: Option<&str>, cwd: &Path) -> Result<Cli, String> {
-    let port = parse_port(args, env_port)?;
+/// Parse `args` (without the program name). Without `--socket` a name is generated.
+pub fn parse_cli(args: &[String], cwd: &Path) -> Result<Cli, String> {
+    let socket = match flag(args, "socket")? {
+        Some(n) if n.trim().is_empty() => return Err("--socket needs a name".into()),
+        Some(n) => n,
+        None => efeengine_editor_link::socket::new_name(),
+    };
     let package = flag(args, "package")?;
     if let Some(p) = &package
         && !valid_name(p)
@@ -84,7 +87,7 @@ pub fn parse_cli(args: &[String], env_port: Option<&str>, cwd: &Path) -> Result<
         return Err(format!("bad example name `{e}`"));
     }
     let project_dir = resolve_project_dir(flag(args, "project-dir")?.as_deref(), cwd)?;
-    Ok(Cli { port, package, example, project_dir })
+    Ok(Cli { socket, package, example, project_dir })
 }
 
 #[cfg(test)]
@@ -106,13 +109,17 @@ mod tests {
     fn parses_flags_both_forms() {
         let root = temp("flags");
         std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
-        let c = parse_cli(&a(&["--port", "9", "--package=demo", "--example", "demo_dir"]), None, &root).unwrap();
-        assert_eq!((c.port, c.package.as_deref(), c.example.as_deref()), (9, Some("demo"), Some("demo_dir")));
+        let c = parse_cli(&a(&["--socket", "mysock", "--package=demo", "--example", "demo_dir"]), &root).unwrap();
+        assert_eq!((c.socket.as_str(), c.package.as_deref(), c.example.as_deref()), ("mysock", Some("demo"), Some("demo_dir")));
         assert_eq!(c.project_dir, root.canonicalize().unwrap());
-        let none = parse_cli(&a(&[]), None, &root).unwrap();
+        let none = parse_cli(&a(&[]), &root).unwrap();
+        assert_eq!(none.socket, format!("efe-editor-{}", std::process::id()));
+        assert_eq!(parse_cli(&a(&["--socket=x"]), &root).unwrap().socket, "x");
+        assert!(parse_cli(&a(&["--socket"]), &root).is_err());
+        assert!(parse_cli(&a(&["--socket", " "]), &root).is_err());
         assert_eq!((none.package, none.example), (None, None));
-        assert!(parse_cli(&a(&["--package"]), None, &root).is_err());
-        assert!(parse_cli(&a(&["--package", "a/b"]), None, &root).is_err());
+        assert!(parse_cli(&a(&["--package"]), &root).is_err());
+        assert!(parse_cli(&a(&["--package", "a/b"]), &root).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 

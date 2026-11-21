@@ -39,10 +39,10 @@ impl ConnState {
     }
 
     /// One line for the status bar.
-    pub fn label(&self, port: u16) -> String {
+    pub fn label(&self) -> String {
         match self {
-            ConnState::Connecting => format!("connecting to 127.0.0.1:{port}..."),
-            ConnState::Connected { game } => format!("connected to {game} (127.0.0.1:{port})"),
+            ConnState::Connecting => "connecting to the game...".to_string(),
+            ConnState::Connected { game } => format!("connected to {game}"),
             ConnState::Retrying { attempt, error, wait } => {
                 format!("not connected: {error} (attempt {attempt}, retrying in {:.1} s)", wait.as_secs_f32())
             }
@@ -76,9 +76,9 @@ mod tests {
 
     #[test]
     fn labels() {
-        assert!(ConnState::Connecting.label(7878).contains("7878"));
-        assert!(ConnState::connected("demo").label(7878).contains("demo"));
-        let l = ConnState::Connecting.failed("refused").label(7878);
+        assert!(ConnState::Connecting.label().contains("connecting"));
+        assert!(ConnState::connected("demo").label().contains("demo"));
+        let l = ConnState::Connecting.failed("refused").label();
         assert!(l.contains("refused") && l.contains("attempt 1") && l.contains("0.5"));
     }
 }

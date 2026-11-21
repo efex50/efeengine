@@ -686,6 +686,17 @@ impl Scripting {
         };
         list.sort();
         list.dedup();
+        if let Ok(text) = files.read("mod.toml")
+            && let Ok(mt) = efa::mod_folder::read_mod_toml(&text)
+            && mt.build.is_wasm()
+        {
+            let entry_raw = mt.build.wasm.as_deref().unwrap_or(&mt.build.entry);
+            let what = if mt.build.wasm.is_some() { "wasm" } else { "entry" };
+            let entry = efa::mod_folder::inside(entry_raw, what).map_err(ModError::Build)?.join("/");
+            let assets_dir = efa::mod_folder::inside(&mt.build.assets, "assets").map_err(ModError::Build)?.join("/");
+            let assets_prefix = format!("{assets_dir}/");
+            list.retain(|p| p == "mod.toml" || p == &entry || p.starts_with(&assets_prefix));
+        }
         let limits = BuildLimits::default();
         let lim = LimitedSource::new(files, &limits);
         h.update(b"efe-mod-folder\0");
@@ -721,10 +732,27 @@ impl Scripting {
         self.check_deps(&prep.manifest)?;
         let api = self.folder_index(&prep.manifest)?;
         let game = self.registry.game().to_string();
-        let (module, bytes) = self
-            .cache
-            .compile(&game, &prep.entry, &src, &api, &asm_options(None, &limits))
-            .map_err(|d| ModError::Build(d.to_string()))?;
+        let (module, bytes) = if prep.build.is_wasm() {
+            #[cfg(all(feature = "wasm-mods", not(target_family = "wasm")))]
+            {
+                let opts = efe_wasm::TranslateOptions {
+                    fallback: efa::mod_folder::to_fallback(&prep),
+                    ..Default::default()
+                };
+                self.cache.translate_wasm(&game, &prep.entry, &src, &api, &opts).map_err(ModError::Build)?
+            }
+            #[cfg(not(all(feature = "wasm-mods", not(target_family = "wasm"))))]
+            {
+                return Err(ModError::Build(format!(
+                    "mod `{}` has a wasm entry (`{}`), which requires the `wasm-mods` feature (or pack it into an .efmod with `efescript pack`)",
+                    prep.manifest.id, prep.entry
+                )));
+            }
+        } else {
+            self.cache
+                .compile(&game, &prep.entry, &src, &api, &asm_options(None, &limits))
+                .map_err(|d| ModError::Build(d.to_string()))?
+        };
         let built = finish_mod(prep, module, &src, assets, &limits).map_err(ModError::Build)?;
         let pkg = Package { manifest: built.manifest, module: built.module, module_bytes: bytes, assets: built.assets, ignored: Vec::new() };
         Ok(Built { pkg, label: label.to_string(), hash })

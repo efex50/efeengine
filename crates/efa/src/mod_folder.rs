@@ -20,6 +20,10 @@ use crate::asm::{assemble_program, AsmOptions, FileSource};
 pub struct BuildToml {
     /// The entry file, relative to the mod folder.
     pub entry: String,
+    /// The `.wasm` entry file, relative to the mod folder (`[build] wasm`).
+    pub wasm: Option<String>,
+    /// Size of the `efe_scratch` region for a `.wasm` mod (`[build] scratch`).
+    pub scratch: Option<u32>,
     /// Default `--api` inputs, relative to `mod.toml` (`.efapi` or `.efmod`).
     pub api: Vec<String>,
     /// The asset folder, relative to the mod folder.
@@ -28,8 +32,38 @@ pub struct BuildToml {
 
 impl Default for BuildToml {
     fn default() -> Self {
-        BuildToml { entry: "src/main.efa".into(), api: Vec::new(), assets: "assets".into() }
+        BuildToml { entry: "src/main.efa".into(), wasm: None, scratch: None, api: Vec::new(), assets: "assets".into() }
     }
+}
+
+impl BuildToml {
+    /// The `.wasm` entry path if `[build] wasm` was set or `[build] entry` ends in `.wasm`.
+    pub fn wasm_path(&self) -> Option<&str> {
+        self.wasm.as_deref().or_else(|| self.entry.ends_with(".wasm").then_some(self.entry.as_str()))
+    }
+
+    /// True when this mod builds from a `.wasm` file rather than `.efa` sources.
+    pub fn is_wasm(&self) -> bool {
+        self.wasm_path().is_some()
+    }
+}
+
+/// A `[[provide]]` table in `mod.toml` (fallback metadata for `.wasm` mods, E7.4c).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvideToml {
+    pub name: String,
+    pub export: String,
+    pub doc: String,
+    pub params: Vec<efevm::Param>,
+    pub results: Vec<efevm::Param>,
+}
+
+/// A `[[provide_event]]` table in `mod.toml` (fallback metadata for `.wasm` mods, E7.4c).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvideEventToml {
+    pub name: String,
+    pub payload: Option<String>,
+    pub doc: String,
 }
 
 /// A parsed `mod.toml`.
@@ -38,6 +72,8 @@ pub struct ModToml {
     /// Everything that becomes `manifest.json` (not yet validated).
     pub manifest: Manifest,
     pub build: BuildToml,
+    pub provides: Vec<ProvideToml>,
+    pub events: Vec<ProvideEventToml>,
 }
 
 type Table = toml::Table;
@@ -117,14 +153,95 @@ fn to_u32(n: i64, key: &str, table: &str) -> Result<u32, String> {
     u32::try_from(n).map_err(|_| format!("mod.toml: `{key}` in [{table}] is out of range"))
 }
 
+fn parse_param(s: &str, allow_unnamed: bool, ctx: &str) -> Result<efevm::api::Param, String> {
+    if let Some((name, ty)) = s.split_once(':') {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(format!("mod.toml: {ctx}: empty name in `{s}`"));
+        }
+        let ty_str = ty.trim();
+        let api_ty = efevm::api::ApiType::parse(ty_str).ok_or_else(|| format!("mod.toml: {ctx}: unknown API type `{ty_str}`"))?;
+        Ok(efevm::api::Param::new(name, api_ty))
+    } else if allow_unnamed {
+        let ty_str = s.trim();
+        let api_ty = efevm::api::ApiType::parse(ty_str).ok_or_else(|| format!("mod.toml: {ctx}: unknown API type `{ty_str}`"))?;
+        Ok(efevm::api::Param::new("result", api_ty))
+    } else {
+        Err(format!("mod.toml: {ctx}: expected `name: type`, got `{s}`"))
+    }
+}
+
+fn parse_provides(root: &Table) -> Result<Vec<ProvideToml>, String> {
+    let Some(val) = root.get("provide") else { return Ok(Vec::new()) };
+    let toml::Value::Array(arr) = val else {
+        return Err("mod.toml: `provide` must be an array of tables (`[[provide]]`)".to_string());
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let table_name = format!("provide[{i}]");
+        let toml::Value::Table(t) = item else {
+            return Err(format!("mod.toml: [[{table_name}]] must be a table"));
+        };
+        no_unknown(t, &["name", "export", "doc", "params", "results"], &table_name)?;
+        let name = get_str(t, "name", &table_name)?.ok_or_else(|| format!("mod.toml: [{table_name}] needs `name`"))?;
+        if name.is_empty() {
+            return Err(format!("mod.toml: [{table_name}] `name` cannot be empty"));
+        }
+        let export = match get_str(t, "export", &table_name)? {
+            Some(e) if e.is_empty() => return Err(format!("mod.toml: [{table_name}] `export` cannot be empty")),
+            Some(e) => e,
+            None => format!("efe_provide_{name}"),
+        };
+        let doc = get_str(t, "doc", &table_name)?.ok_or_else(|| format!("mod.toml: [{table_name}] needs `doc`"))?;
+        let params = get_strs(t, "params", &table_name)?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| parse_param(&s, false, &format!("[{table_name}].params")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let results = get_strs(t, "results", &table_name)?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| parse_param(&s, true, &format!("[{table_name}].results")))
+            .collect::<Result<Vec<_>, _>>()?;
+        out.push(ProvideToml { name, export, doc, params, results });
+    }
+    Ok(out)
+}
+
+fn parse_provide_events(root: &Table) -> Result<Vec<ProvideEventToml>, String> {
+    let Some(val) = root.get("provide_event") else { return Ok(Vec::new()) };
+    let toml::Value::Array(arr) = val else {
+        return Err("mod.toml: `provide_event` must be an array of tables (`[[provide_event]]`)".to_string());
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let table_name = format!("provide_event[{i}]");
+        let toml::Value::Table(t) = item else {
+            return Err(format!("mod.toml: [[{table_name}]] must be a table"));
+        };
+        no_unknown(t, &["name", "payload", "doc"], &table_name)?;
+        let name = get_str(t, "name", &table_name)?.ok_or_else(|| format!("mod.toml: [{table_name}] needs `name`"))?;
+        if name.is_empty() {
+            return Err(format!("mod.toml: [{table_name}] `name` cannot be empty"));
+        }
+        let payload = match get_str(t, "payload", &table_name)? {
+            Some(p) if p.is_empty() => return Err(format!("mod.toml: [{table_name}] `payload` cannot be empty")),
+            other => other,
+        };
+        let doc = get_str(t, "doc", &table_name)?.ok_or_else(|| format!("mod.toml: [{table_name}] needs `doc`"))?;
+        out.push(ProvideEventToml { name, payload, doc });
+    }
+    Ok(out)
+}
+
 /// Parses `mod.toml`. Unknown keys and tables are errors naming the key. The manifest part
 /// is not validated here (`pack_dir` does that); only types and versions are checked.
 pub fn read_mod_toml(text: &str) -> Result<ModToml, String> {
     let root: Table = text.parse().map_err(|e| format!("mod.toml: {e}"))?;
     for k in root.keys() {
-        if !["mod", "dependencies", "permissions", "build", "meta"].contains(&k.as_str()) {
+        if !["mod", "dependencies", "permissions", "build", "meta", "provide", "provide_event"].contains(&k.as_str()) {
             return Err(format!(
-                "mod.toml: unknown key or table `{k}` (known tables: mod, dependencies, permissions, build, meta)"
+                "mod.toml: unknown key or table `{k}` (known tables: mod, dependencies, permissions, build, meta, provide, provide_event)"
             ));
         }
     }
@@ -170,9 +287,21 @@ pub fn read_mod_toml(text: &str) -> Result<ModToml, String> {
 
     let mut build = BuildToml::default();
     if let Some(b) = get_table(&root, "build")? {
-        no_unknown(b, &["entry", "api", "assets"], "build")?;
-        if let Some(e) = get_str(b, "entry", "build")? {
+        no_unknown(b, &["entry", "wasm", "scratch", "api", "assets"], "build")?;
+        let entry = get_str(b, "entry", "build")?;
+        let wasm = get_str(b, "wasm", "build")?;
+        if entry.is_some() && wasm.is_some() {
+            return Err("mod.toml: [build] cannot specify both `entry` and `wasm`".to_string());
+        }
+        if let Some(e) = entry {
             build.entry = e;
+        }
+        if let Some(w) = wasm {
+            build.entry = w.clone();
+            build.wasm = Some(w);
+        }
+        if let Some(n) = get_int(b, "scratch", "build")? {
+            build.scratch = Some(to_u32(n, "scratch", "build")?);
         }
         if let Some(a) = get_strs(b, "api", "build")? {
             build.api = a;
@@ -184,7 +313,9 @@ pub fn read_mod_toml(text: &str) -> Result<ModToml, String> {
     if let Some(meta) = get_table(&root, "meta")? {
         manifest.meta = Some(toml_to_json(&toml::Value::Table(meta.clone()), "meta")?);
     }
-    Ok(ModToml { manifest, build })
+    let provides = parse_provides(&root)?;
+    let events = parse_provide_events(&root)?;
+    Ok(ModToml { manifest, build, provides, events })
 }
 
 /// A `[build]` path: relative, no `..`, no root or prefix. Returns its segments.
@@ -235,6 +366,8 @@ pub struct PreparedMod {
     pub build: BuildToml,
     /// The entry path inside the folder, `/`-separated.
     pub entry: String,
+    pub provides: Vec<ProvideToml>,
+    pub events: Vec<ProvideEventToml>,
 }
 
 /// A built mod folder: everything a package holds.
@@ -324,12 +457,52 @@ pub fn prepare_mod(src: &dyn FileSource, limits: &BuildLimits) -> Result<Prepare
     }
     let mt = read_mod_toml(&text)?;
     mt.manifest.validate().map_err(|e| format!("mod.toml: {e}"))?;
-    let entry = inside(&mt.build.entry, "entry")?.join("/");
+    let entry = if let Some(w) = &mt.build.wasm {
+        inside(w, "wasm")?
+    } else {
+        inside(&mt.build.entry, "entry")?
+    }
+    .join("/");
     inside(&mt.build.assets, "assets")?;
     for a in &mt.build.api {
         inside(a, "api")?;
     }
-    Ok(PreparedMod { manifest: mt.manifest, build: mt.build, entry })
+    Ok(PreparedMod {
+        manifest: mt.manifest,
+        build: mt.build,
+        entry,
+        provides: mt.provides,
+        events: mt.events,
+    })
+}
+
+/// Converts a prepared mod's `[[provide]]`, `[[provide_event]]`, and `[build] scratch` into
+/// [`efe_wasm::Fallback`].
+#[cfg(feature = "wasm")]
+pub fn to_fallback(p: &PreparedMod) -> efe_wasm::Fallback {
+    efe_wasm::Fallback {
+        provides: p
+            .provides
+            .iter()
+            .map(|pr| efe_wasm::FallbackProvide {
+                name: pr.name.clone(),
+                export: pr.export.clone(),
+                doc: pr.doc.clone(),
+                params: pr.params.clone(),
+                results: pr.results.clone(),
+            })
+            .collect(),
+        events: p
+            .events
+            .iter()
+            .map(|ev| efe_wasm::FallbackEvent {
+                name: ev.name.clone(),
+                payload: ev.payload.clone(),
+                doc: ev.doc.clone(),
+            })
+            .collect(),
+        scratch: p.build.scratch,
+    }
 }
 
 /// Checks `module` against the manifest, then reads each asset `<build.assets>/<p>`.
@@ -364,8 +537,9 @@ pub fn finish_mod(
     Ok(BuiltMod { manifest: p.manifest, module, assets: out })
 }
 
-/// `prepare_mod`, assemble the entry (the folder is the source root), then `finish_mod`.
-/// `api` is the index the entry is assembled against; `[build] api` entries are ignored.
+/// `prepare_mod`, assemble (or translate if `[build] wasm` / `.wasm` entry) the entry (the
+/// folder is the source root), then `finish_mod`. `api` is the index the entry is built against;
+/// `[build] api` entries are ignored.
 pub fn build_mod(
     src: &dyn FileSource,
     api: Option<&ApiIndex>,
@@ -374,7 +548,22 @@ pub fn build_mod(
 ) -> Result<BuiltMod, String> {
     let ls = LimitedSource::new(src, limits);
     let p = prepare_mod(&ls, limits)?;
-    let module = assemble_program(&p.entry, &ls, &asm_options(api, limits)).map_err(|d| d.to_string())?;
+    let module = if p.build.is_wasm() {
+        #[cfg(feature = "wasm")]
+        {
+            let wasm = ls.read_bytes(&p.entry).map_err(|e| format!("{}: {e}", ls.display_name(&p.entry)))?;
+            let empty = ApiIndex::default();
+            let opts = efe_wasm::TranslateOptions { fallback: to_fallback(&p), ..Default::default() };
+            efe_wasm::translate(&wasm, api.unwrap_or(&empty), &opts)
+                .map_err(|e| format!("{}: {e}", ls.display_name(&p.entry)))?
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            return Err("wasm mod folders require the `wasm` feature".to_string());
+        }
+    } else {
+        assemble_program(&p.entry, &ls, &asm_options(api, limits)).map_err(|d| d.to_string())?
+    };
     finish_mod(p, module, &ls, assets, limits)
 }
 
@@ -609,5 +798,122 @@ mod tests {
             let src = folder().with("src/main.efa", &types);
             let _ = build_mod(&src, None, &[], &BuildLimits::default());
         }
+    }
+
+    #[test]
+    fn mod_toml_parses_wasm_scratch_provides_and_events() {
+        let toml = r#"
+[mod]
+id = "wmod"
+version = "1.0.0"
+
+[build]
+wasm = "mod.wasm"
+scratch = 256
+
+[[provide]]
+name = "add_one"
+doc = "Add one to `x`."
+params = ["x: i32"]
+results = ["i32"]
+
+[[provide]]
+name = "greet"
+export = "custom_greet"
+doc = "Greet `who`."
+params = ["who: str"]
+results = ["ok: bool"]
+
+[[provide_event]]
+name = "ping"
+payload = "PingData"
+doc = "Ping event."
+
+[[provide_event]]
+name = "empty"
+doc = "No payload."
+"#;
+        let mt = read_mod_toml(toml).unwrap();
+        assert!(mt.build.is_wasm());
+        assert_eq!(mt.build.wasm_path(), Some("mod.wasm"));
+        assert_eq!(mt.build.entry, "mod.wasm");
+        assert_eq!(mt.build.scratch, Some(256));
+        assert_eq!(mt.provides.len(), 2);
+        assert_eq!(mt.provides[0].name, "add_one");
+        assert_eq!(mt.provides[0].export, "efe_provide_add_one");
+        assert_eq!(mt.provides[0].params, vec![efevm::api::Param::new("x", efevm::api::ApiType::I32)]);
+        assert_eq!(mt.provides[0].results, vec![efevm::api::Param::new("result", efevm::api::ApiType::I32)]);
+        assert_eq!(mt.provides[1].export, "custom_greet");
+        assert_eq!(mt.provides[1].results, vec![efevm::api::Param::new("ok", efevm::api::ApiType::Bool)]);
+        assert_eq!(mt.events.len(), 2);
+        assert_eq!(mt.events[0].payload.as_deref(), Some("PingData"));
+        assert_eq!(mt.events[1].payload, None);
+    }
+
+    #[test]
+    fn mod_toml_rejects_bad_wasm_and_provide_fields() {
+        let e = read_mod_toml(&format!("{TOML}[build]\nentry = \"a.efa\"\nwasm = \"a.wasm\"\n")).unwrap_err();
+        assert!(e.contains("cannot specify both"), "{e}");
+
+        let e = read_mod_toml(&format!("{TOML}[[provide]]\nname = \"x\"\ndoc = \"d\"\nunknown = 1\n")).unwrap_err();
+        assert!(e.contains("unknown"), "{e}");
+
+        let e = read_mod_toml(&format!("{TOML}[[provide]]\nname = \"x\"\ndoc = \"d\"\nparams = [\"bad\"]\n")).unwrap_err();
+        assert!(e.contains("name: type"), "{e}");
+
+        let e = read_mod_toml(&format!("{TOML}[[provide]]\nname = \"x\"\ndoc = \"d\"\nparams = [\"a: nope\"]\n")).unwrap_err();
+        assert!(e.contains("unknown API type"), "{e}");
+
+        let e = read_mod_toml(&format!("{TOML}[[provide_event]]\nname = \"x\"\ndoc = \"d\"\nextra = 1\n")).unwrap_err();
+        assert!(e.contains("extra"), "{e}");
+
+        let src = MemSource::new().with("mod.toml", &format!("{TOML}[build]\nwasm = \"../bad.wasm\"\n"));
+        let e = prepare_mod(&src, &BuildLimits::default()).unwrap_err();
+        assert!(e.contains("inside the mod folder"), "{e}");
+    }
+
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn build_mod_translates_wasm_with_fallback() {
+        // Minimal valid wasm: memory(1), immutable i32 global efe_scratch=1024, fn efe_provide_dbl(i32)->i32.
+        let mut wasm = Vec::new();
+        wasm.extend_from_slice(b"\0asm\x01\0\0\0");
+        wasm.extend_from_slice(&[1, 6, 1, 0x60, 1, 0x7f, 1, 0x7f]); // type 0: (i32) -> i32
+        wasm.extend_from_slice(&[3, 2, 1, 0]); // func 0: type 0
+        wasm.extend_from_slice(&[5, 3, 1, 0, 1]); // memory: min 1
+        wasm.extend_from_slice(&[6, 7, 1, 0x7f, 0, 0x41, 0x80, 0x08, 0x0b]); // global 0: i32 = 1024
+        let ex0 = b"\x0fefe_provide_dbl\x00\x00";
+        let ex1 = b"\x0befe_scratch\x03\x00";
+        wasm.push(7);
+        wasm.push((1 + ex0.len() + ex1.len()) as u8);
+        wasm.push(2);
+        wasm.extend_from_slice(ex0);
+        wasm.extend_from_slice(ex1);
+        wasm.extend_from_slice(&[10, 9, 1, 7, 0, 0x20, 0, 0x20, 0, 0x6a, 0x0b]);
+
+        let toml = r#"[mod]
+id = "wmod"
+version = "1.0.0"
+
+[build]
+wasm = "mod.wasm"
+scratch = 256
+
+[[provide]]
+name = "dbl"
+doc = "Double `x`."
+params = ["x: i32"]
+results = ["r: i32"]
+"#;
+        let src = MemSource::new()
+            .with("mod.toml", toml)
+            .with_bytes("mod.wasm", &wasm)
+            .with_bytes("assets/hi.txt", b"hello");
+        let built = build_mod(&src, None, &["hi.txt".to_string()], &BuildLimits::default()).unwrap();
+        let iface = built.module.data().interface.as_ref().expect("section 13");
+        assert_eq!(iface.scratch, Some((1024, 256)));
+        assert_eq!(iface.provides.len(), 1);
+        assert_eq!(iface.provides[0].name, "dbl");
+        assert_eq!(built.assets["hi.txt"], b"hello");
     }
 }

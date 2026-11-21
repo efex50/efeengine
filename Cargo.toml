@@ -26,7 +26,7 @@ members = [
     "examples/*",
     "xtask",
 ]
-exclude = ["crates/efa/fuzz", "crates/efecs/tests/no-std-test-crates", "examples/script_demo/wasm_mods/rust_mod"]
+exclude = ["crates/efa/fuzz", "crates/efecs/tests/no-std-test-crates", "examples/script_demo/wasm_mods/rust_mod", "examples/coin_dash_wasm/mods/dash_rust"]
 
 [profile.optimize]
 inherits = "release"

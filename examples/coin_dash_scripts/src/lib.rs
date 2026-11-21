@@ -370,6 +370,9 @@ pub fn load_scripts(engine: &mut Engine, dir: &std::path::Path) -> Option<Module
 /// Everything except the scripts: components, API, textures, camera, ground. Returns the game
 /// handle; call [`load_scripts`] / [`load_embedded`] next, then [`spawn_actors`].
 pub fn setup(engine: &mut Engine) -> Game {
+    // the Debug menu window (F5): FPS and the log
+    engine.add_plugin(efeengine_ui::UiPlugin::new()).expect("UiPlugin");
+    engine.add_plugin(efeengine_ui::DebugMenuPlugin).expect("DebugMenuPlugin");
     let game = register_api(engine);
     load_textures(engine, &game);
     spawn_scenery(engine, &game);
