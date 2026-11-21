@@ -236,6 +236,18 @@ impl Theme {
                 disabled: Style::default(),
             },
         );
+        // A field whose text was rejected (add it after `wire-field`): red border and text.
+        let red = Color::hex(0xff6b6b);
+        t.set_class(
+            "wire-error",
+            StateStyles {
+                normal: Style::new().border(Border::new(1.0, red, 0.0)).text_color(red),
+                hovered: Style::new().border(Border::new(1.0, red, 0.0)),
+                pressed: Style::default(),
+                focused: Style::new().border(Border::new(2.0, red, 0.0)),
+                disabled: Style::default(),
+            },
+        );
         t
     }
 }

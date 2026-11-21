@@ -332,6 +332,18 @@ fn remap_entities(entry: &TypeEntry, bytes: &mut [u8], map: &BTreeMap<u64, u64>)
     }
 }
 
+fn renumber_entities(v: &mut SceneValue, map: &BTreeMap<u64, u64>) {
+    match v {
+        SceneValue::UInt(u) => {
+            if let Some(n) = map.get(u) {
+                *u = *n;
+            }
+        }
+        SceneValue::List(l) => l.iter_mut().for_each(|x| renumber_entities(x, map)),
+        _ => {}
+    }
+}
+
 /// One entity ready to spawn: `(type id, component bytes)` pairs.
 type DecodedEntity = Vec<(u32, Vec<u8>)>;
 
@@ -464,7 +476,7 @@ impl Engine {
             .collect()
     }
 
-    fn capture_entity(&self, e: Entity) -> SceneEntity {
+    pub(super) fn capture_entity(&self, e: Entity) -> SceneEntity {
         let world = self.world();
         let mut ent = SceneEntity::default();
         for entry in self.types().entries() {
@@ -507,6 +519,56 @@ impl Engine {
             systems: Vec::new(),
             entities: ents.into_iter().map(|(_, e)| e).collect(),
         }
+    }
+
+    /// Capture every entity an editor sees (what [`snapshot`](Self::snapshot) covers: scene-owned
+    /// or holding a registered, writable component), owned by the active scene or not, as a
+    /// scene named `name`. Unlike [`capture_scene`](Self::capture_scene) the entities carry ids
+    /// (their entity bits), so `Parent` and other entity fields are remapped when the file is
+    /// loaded (ids are 1, 2, ... in file order), and the order is by `EditorId` (entities without one last, then by entity bits),
+    /// not by content. Loading the result with [`load_scene`](Self::load_scene) gives the
+    /// same world, owned by the new scene.
+    pub fn capture_world_scene(&self, name: &str) -> Scene {
+        let mut list: Vec<(u64, u64, Entity)> = self
+            .captured_entities(false)
+            .into_iter()
+            .map(|e| {
+                let id = self.world().get::<&super::components::EditorId>(e).map_or(u64::MAX, |i| i.id);
+                (id, super::types::entity_to_bits(e), e)
+            })
+            .collect();
+        list.sort_by_key(|(id, bits, _)| (*id, *bits));
+        let mut entities = Vec::with_capacity(list.len());
+        for (_, bits, e) in list {
+            let mut ent = self.capture_entity(e);
+            if !ent.components.is_empty() {
+                ent.id = Some(bits);
+                entities.push(ent);
+            }
+        }
+        // Ids 1, 2, ... in file order instead of raw entity bits; entity fields follow.
+        let map: BTreeMap<u64, u64> = entities.iter().enumerate().filter_map(|(i, e)| e.id.map(|b| (b, i as u64 + 1))).collect();
+        for ent in &mut entities {
+            ent.id = ent.id.and_then(|b| map.get(&b).copied());
+            for (cname, fields) in &mut ent.components {
+                let Some(entry) = self.types().by_name(cname) else { continue };
+                for f in entry.desc().fields.iter().filter(|f| f.ty == Prim::Entity) {
+                    if let Some(v) = fields.get_mut(&f.name) {
+                        renumber_entities(v, &map);
+                    }
+                }
+            }
+        }
+        Scene { format: SCENE_FORMAT, name: name.to_string(), requires: Vec::new(), systems: Vec::new(), entities }
+    }
+
+    /// [`capture_world_scene`](Self::capture_world_scene) written to a file, named after the
+    /// file stem.
+    pub fn save_world_scene(&self, path: impl AsRef<Path>) -> Result<(), SceneError> {
+        let path = path.as_ref();
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("scene");
+        let text = self.capture_world_scene(name).to_ron();
+        std::fs::write(path, text).map_err(|e| SceneError::Io { path: path.display().to_string(), msg: e.to_string() })
     }
 
     /// Write the current scene's [`SceneOwned`] entities as a scene file (see
@@ -662,7 +724,7 @@ impl Engine {
     /// field holding the `id` of a scene entity can be remapped to the entity it became (the
     /// stable-id scheme of snapshots, docs/SCENES.md S3.2). Values that are no scene id are left
     /// as they are (they may name an entity outside the scene).
-    fn spawn_decoded(&mut self, scene: &Scene, decoded: &[DecodedEntity], owners: &[Option<SceneOwned>]) -> Result<Vec<Entity>, SceneError> {
+    pub(super) fn spawn_decoded(&mut self, scene: &Scene, decoded: &[DecodedEntity], owners: &[Option<SceneOwned>]) -> Result<Vec<Entity>, SceneError> {
         let mut spawned = Vec::with_capacity(decoded.len());
         let mut map: BTreeMap<u64, u64> = BTreeMap::new();
         for (i, owner) in owners.iter().enumerate() {
@@ -701,7 +763,7 @@ impl Engine {
 
     /// Everything that can fail, before the world is touched: per entity, `(type id, bytes)`,
     /// and the system names the scene lists (`plugin:` entries expanded).
-    fn decode_scene_full(&self, scene: &Scene) -> Result<(Vec<DecodedEntity>, BTreeSet<String>), SceneError> {
+    pub(super) fn decode_scene_full(&self, scene: &Scene) -> Result<(Vec<DecodedEntity>, BTreeSet<String>), SceneError> {
         let name = &scene.name;
         if scene.format != SCENE_FORMAT {
             return Err(SceneError::Format { scene: name.clone(), found: scene.format });

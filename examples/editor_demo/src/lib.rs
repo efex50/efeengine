@@ -2,10 +2,20 @@
 //! with `Name` and `EditorId`, a parent and child, and a system that spins them.
 //!
 //! `cargo xtask run editor_demo native`, then F5 for the Debug menu and its "Editor" tab. The game
-//! starts frozen (Edit): pick entities in the hierarchy, see their components, press Play to run
-//! the spinning, Stop to put everything back.
+//! starts frozen (Edit): pick entities in the hierarchy, edit their fields, add and remove
+//! components, create / duplicate / delete entities (Ctrl+Z undoes), press Play to run the
+//! spinning, Stop to put everything back, Save to write `scenes/demo.ron`.
+//!
+//! The world comes from `scenes/demo.ron` when that file exists (so Save / Load round-trip), else
+//! from [`spawn_demo_world`]. The file is what `spawn_demo_world` saves (a test keeps them equal).
+use std::path::PathBuf;
+
 use efeengine_core::prelude::*;
+use efeengine_ui::editor::load_scene_with_names;
 use efeengine_ui::{DebugMenuPlugin, EditorPlugin, UiPlugin};
+
+/// The scene file the demo loads at startup, relative to the current directory.
+pub const SCENE_FILE: &str = "scenes/demo.ron";
 
 /// Turns the entity (radians per second).
 #[script_component(name = "Spin")]
@@ -25,10 +35,32 @@ fn sprite(color: [f32; 4], size: f32) -> Sprite {
     Sprite { color, ..Sprite::default().with_size(Vec2::splat(size)) }
 }
 
-/// The world and the game system, without any UI (tests add their own plugins).
-pub fn build_game(engine: &mut Engine) {
+/// `scenes/demo.ron` in the current directory, else the one next to this crate.
+pub fn scene_path() -> Option<PathBuf> {
+    [PathBuf::from(SCENE_FILE), PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SCENE_FILE)].into_iter().find(|p| p.exists())
+}
+
+/// The component and the game system, without a world.
+pub fn register_game(engine: &mut Engine) {
     engine.register::<Spin>().expect("Spin");
     engine.add_system(Stage::Update, spin).name("spin");
+}
+
+/// The world and the game system, without any UI (tests add their own plugins): the scene file
+/// when there is one (a broken file is reported and the world is spawned from code instead).
+pub fn build_game(engine: &mut Engine) {
+    register_game(engine);
+    if let Some(path) = scene_path() {
+        match load_scene_with_names(engine, &path, false) {
+            Ok(n) => return global_info(&format!("[editor_demo] {n} entities from {}", path.display())),
+            Err(e) => global_warn(&format!("[editor_demo] {}: {e}; spawning the demo world from code", path.display())),
+        }
+    }
+    spawn_demo_world(engine);
+}
+
+/// The demo entities, spawned from code (what `scenes/demo.ron` holds).
+pub fn spawn_demo_world(engine: &mut Engine) {
     let world = engine.world_mut();
     world.spawn((Camera { zoom: 1.0, clear_color: [0.05, 0.06, 0.09, 1.0], ..Camera::orthographic_2d() }, Transform::default(), Name::new("camera"), EditorId { id: 1 }));
     let sun = world.spawn((
@@ -51,6 +83,10 @@ pub fn build_game(engine: &mut Engine) {
 }
 
 pub fn run() {
+    // Save / Load and the `scenes/` list are relative to the current directory: use the crate's.
+    if !std::path::Path::new("scenes").exists() {
+        let _ = std::env::set_current_dir(env!("CARGO_MANIFEST_DIR"));
+    }
     let mut engine = Engine::new("editor demo").expect("engine");
     engine.add_plugin(UiPlugin::new()).expect("ui");
     engine.add_plugin(DebugMenuPlugin).expect("debug menu");

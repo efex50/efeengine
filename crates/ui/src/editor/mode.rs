@@ -164,6 +164,7 @@ pub(crate) fn apply(e: &mut Engine, req: EditorRequest) {
                     Ok(()) => {
                         // The restored flags are the ones the snapshot saw: Edit's frozen state.
                         reapply_names(e, &r.names);
+                        super::edit::reset(e);
                         let sel = e.resources().get::<EditorSelection>().map(|s| s.editor_id);
                         if let Some(id) = sel {
                             let entity = id.and_then(|id| e.entity_by_editor_id(id));

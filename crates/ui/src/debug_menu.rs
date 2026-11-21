@@ -551,7 +551,7 @@ fn window_update(cx: &mut Ctx) {
                 cx.commands.close_window(id);
                 None
             }
-            None => Some(cx.commands.create_window(WindowDesc::new("Debug menu").size(520, 460))),
+            None => Some(cx.commands.create_window(WindowDesc::new("Debug menu").size(640, 600))),
         };
     }
     if now != open {
@@ -1925,7 +1925,8 @@ mod fallback_tests {
         (x0..x1).filter(|x| s.pixel(*x, y)[..3].iter().zip([0xb4, 0xb9, 0xc8]).all(|(a, b)| (*a as i32 - b).abs() < 6)).count()
     }
 
-    /// The Editor tab: toolbar, hierarchy with a parent and a selection, inspector.
+    /// The Editor tab: toolbar, scene row, hierarchy with a parent and a selection, the editable
+    /// inspector (one valid edit, one rejected text), the "Add component" list and Play.
     #[cfg(feature = "editor")]
     #[test]
     fn editor_screenshot() {
@@ -1939,19 +1940,69 @@ mod fallback_tests {
             w.spawn((Name::new("planet"), EditorId { id: 3 }, Transform::from_position(Vec2::new(9.0, 0.0)), Parent::new(sun), Sprite::default().with_size(Vec2::new(36.0, 36.0))));
             w.spawn((Name::new("crate"), EditorId { id: 4 }, Transform::default()));
         });
+        // The editor needs room: this is the size the window opens with.
+        r.fb.borrow_mut().resize((640.0, 600.0), 1.0);
         r.click("tab_editor");
         r.frames(10);
-        let sun = r.engine.world().query::<(Entity, &Name)>().iter().find(|(_, n)| n.0 == "sun").map(|(e, _)| e).unwrap();
-        r.click(&format!("editor/hierarchy/list/e{}/row", efeengine_core::ecs::entity_to_bits(sun)));
+        let row = |r: &Rig, name: &str| {
+            let e = r.engine.world().query::<(Entity, &Name)>().iter().find(|(_, n)| n.0 == name).map(|(e, _)| e).unwrap();
+            format!("editor/hierarchy/list/e{}/row", efeengine_core::ecs::entity_to_bits(e))
+        };
+        // `editor/inspector/c<N>/f<M>/value/e<K>` of a component and field, by name
+        let input = |r: &Rig, comp: &str, field: &str, k: usize| -> String {
+            let tree = r.engine.resources().get::<UiTree>().unwrap();
+            for i in 0.. {
+                let base = format!("editor/inspector/c{i}");
+                let Some(head) = tree.find(&format!("debug_menu/{base}/bar/head")) else { panic!("no {comp}") };
+                if tree.text_of(head) != Some(comp) {
+                    continue;
+                }
+                for j in 0.. {
+                    let f = format!("{base}/f{j}");
+                    let Some(n) = tree.find(&format!("debug_menu/{f}/name")) else { panic!("no {field}") };
+                    if tree.text_of(n) == Some(field) {
+                        return format!("{f}/value/e{k}");
+                    }
+                }
+            }
+            unreachable!()
+        };
+        let sun = row(&r, "sun");
+        r.click(&sun);
         r.frames(10);
-        let mut shooter = None;
-        let edit = shoot(&mut r, &mut shooter, "editor_edit");
+        // a valid edit (dirty marker, Undo enabled) ...
+        let x = input(&r, "Transform", "position", 0);
+        r.click(&x);
+        for _ in 0..5 {
+            r.named(NamedKey::Backspace, KeyCode::Backspace);
+        }
+        r.text("40");
+        r.named(NamedKey::Enter, KeyCode::Enter);
+        // ... and a rejected one (red field, message line)
+        let y = input(&r, "Transform", "position", 1);
+        r.click(&y);
+        r.named(NamedKey::Backspace, KeyCode::Backspace);
+        r.text("abc");
+        r.named(NamedKey::Enter, KeyCode::Enter);
+        r.frames(5);
+        assert!(r.engine.resources().get::<crate::editor::EditorUi>().unwrap().dirty);
+        assert_eq!(r.engine.world().get::<&Transform>(r.engine.entity_by_editor_id(2).unwrap()).unwrap().position, Vec2::new(40.0, 3.0));
+        let mut shooter = crate::fallback::offscreen::SdlShooter::new((640, 600)).ok();
+        let edit = shoot(&mut r, &mut shooter, "step2_editor_edit");
+        // the Add component list on the short inspector of `crate`
+        let krate = row(&r, "crate");
+        r.click(&krate);
+        r.frames(8);
+        r.click("editor/inspector/add/row/toggle");
+        r.frames(3);
+        let picker = shoot(&mut r, &mut shooter, "step2_editor_picker");
         r.click("editor/toolbar/play");
         r.frames(10);
-        let play = shoot(&mut r, &mut shooter, "editor_play");
-        if let (Some(a), Some(b)) = (&edit, &play) {
-            assert_ne!(a.rgba, b.rgba, "the highlighted mode button changed");
-            assert!(line_pixels(a, 4, 516, 0) > 400, "top border");
+        let play = shoot(&mut r, &mut shooter, "step2_editor_play");
+        if let (Some(a), Some(b), Some(c)) = (&edit, &picker, &play) {
+            assert_ne!(a.rgba, c.rgba, "the highlighted mode button changed");
+            assert_ne!(a.rgba, b.rgba, "the picker is open");
+            assert!(line_pixels(a, 4, 636, 0) > 400, "top border");
         }
     }
 

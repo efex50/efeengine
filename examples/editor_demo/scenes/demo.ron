@@ -1,0 +1,226 @@
+Scene(
+    format: 1,
+    name: "demo",
+    requires: [],
+    systems: [],
+    entities: [
+        SceneEntity(
+            id: Some(1),
+            components: {
+                "Camera": {
+                    "active": 1,
+                    "clear_color": [
+                        0.05,
+                        0.06,
+                        0.09,
+                        1.0,
+                    ],
+                    "far": 1000.0,
+                    "fov_y": 1.0471976,
+                    "kind": 0,
+                    "near": -1000.0,
+                    "target": 0,
+                    "zoom": 1.0,
+                },
+                "EditorId": {
+                    "id": 1,
+                },
+                "Transform": {
+                    "position": [
+                        0.0,
+                        0.0,
+                    ],
+                    "rotation": 0.0,
+                    "scale": [
+                        1.0,
+                        1.0,
+                    ],
+                },
+            },
+        ),
+        SceneEntity(
+            id: Some(2),
+            components: {
+                "EditorId": {
+                    "id": 2,
+                },
+                "Spin": {
+                    "speed": 0.8,
+                },
+                "Sprite": {
+                    "auto_size": 0,
+                    "color": [
+                        1.0,
+                        0.75,
+                        0.2,
+                        1.0,
+                    ],
+                    "flip": 0,
+                    "layer": 0,
+                    "size": [
+                        80.0,
+                        80.0,
+                    ],
+                    "texture": 0,
+                    "uv_max": [
+                        1.0,
+                        1.0,
+                    ],
+                    "uv_min": [
+                        0.0,
+                        0.0,
+                    ],
+                },
+                "Transform": {
+                    "position": [
+                        -120.0,
+                        0.0,
+                    ],
+                    "rotation": 0.0,
+                    "scale": [
+                        1.0,
+                        1.0,
+                    ],
+                },
+            },
+        ),
+        SceneEntity(
+            id: Some(3),
+            components: {
+                "EditorId": {
+                    "id": 3,
+                },
+                "Parent": {
+                    "entity": 2,
+                },
+                "Spin": {
+                    "speed": -2.0,
+                },
+                "Sprite": {
+                    "auto_size": 0,
+                    "color": [
+                        0.3,
+                        0.6,
+                        1.0,
+                        1.0,
+                    ],
+                    "flip": 0,
+                    "layer": 0,
+                    "size": [
+                        36.0,
+                        36.0,
+                    ],
+                    "texture": 0,
+                    "uv_max": [
+                        1.0,
+                        1.0,
+                    ],
+                    "uv_min": [
+                        0.0,
+                        0.0,
+                    ],
+                },
+                "Transform": {
+                    "position": [
+                        90.0,
+                        0.0,
+                    ],
+                    "rotation": 0.0,
+                    "scale": [
+                        1.0,
+                        1.0,
+                    ],
+                },
+            },
+        ),
+        SceneEntity(
+            id: Some(4),
+            components: {
+                "EditorId": {
+                    "id": 4,
+                },
+                "Sprite": {
+                    "auto_size": 0,
+                    "color": [
+                        0.7,
+                        0.45,
+                        0.25,
+                        1.0,
+                    ],
+                    "flip": 0,
+                    "layer": 0,
+                    "size": [
+                        64.0,
+                        64.0,
+                    ],
+                    "texture": 0,
+                    "uv_max": [
+                        1.0,
+                        1.0,
+                    ],
+                    "uv_min": [
+                        0.0,
+                        0.0,
+                    ],
+                },
+                "Transform": {
+                    "position": [
+                        120.0,
+                        -60.0,
+                    ],
+                    "rotation": 0.0,
+                    "scale": [
+                        1.0,
+                        1.0,
+                    ],
+                },
+            },
+        ),
+        SceneEntity(
+            id: Some(5),
+            components: {
+                "EditorId": {
+                    "id": 5,
+                },
+                "Spin": {
+                    "speed": 3.0,
+                },
+                "Sprite": {
+                    "auto_size": 0,
+                    "color": [
+                        0.4,
+                        1.0,
+                        0.5,
+                        1.0,
+                    ],
+                    "flip": 0,
+                    "layer": 0,
+                    "size": [
+                        28.0,
+                        28.0,
+                    ],
+                    "texture": 0,
+                    "uv_max": [
+                        1.0,
+                        1.0,
+                    ],
+                    "uv_min": [
+                        0.0,
+                        0.0,
+                    ],
+                },
+                "Transform": {
+                    "position": [
+                        150.0,
+                        70.0,
+                    ],
+                    "rotation": 0.0,
+                    "scale": [
+                        1.0,
+                        1.0,
+                    ],
+                },
+            },
+        ),
+    ],
+)

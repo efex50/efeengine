@@ -317,7 +317,12 @@ pub struct StateStyles { pub normal: Style, pub hovered: Style, pub pressed: Sty
   view returns `El<DebugMsg>`, its widgets send `DebugMsg::Ext(ExtMsg)` that the plugin's own system
   reads from `cx.events::<DebugMsg>()`, and `wake` says when the body is stale so the view stays
   asleep otherwise). The in-game editor (`EditorPlugin`, cargo feature `editor`,
-  `docs/IN_GAME_EDITOR.md`) is the first user: an "Editor" tab.
+  `docs/IN_GAME_EDITOR.md`) is the first user: an "Editor" tab. It is also the reference for a
+  tab with editable fields: typed text lives in a resource (`EditorUi::drafts`) so the rebuilt
+  view keeps what the user typed, a field commits on `on_submit` or when `on_focus(false)` fires,
+  a rejected text gets the `wire-error` theme class (red border and text, add it after
+  `wire-field`), and `on_focus` of every input is tracked so keyboard shortcuts wait while one
+  has focus. The Debug menu window opens at 640x600.
 - **iced:** the theme is resolved per node when the tree changes (`WidgetState` variants: normal, hovered, pressed, focused, disabled) and the widgets' status closures pick one (`button::Style` for Active / Hovered / Pressed / Disabled, `text_input` Active / Hovered / Focused / Disabled, checkbox and slider Active / Hovered(Dragged) / Disabled). iced buttons, checkboxes and sliders are not focusable, so only text inputs show `focused`. A checkbox's background / border style paints its box (not the whole row as on the web).
 - **Fallback:** resolved per node at sync time and cached until the node, its classes or the theme
   change.
