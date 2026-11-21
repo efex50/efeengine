@@ -22,6 +22,10 @@
 //!   page limit). The data is a [`ScriptsInfo`] snapshot copied from `engine.scripting()` by an
 //!   Update system at most twice a second, and only while the window shows this tab.
 //!
+//! Cost: the view runs only when something it shows changed (`UiView::when`: `DebugState`, the shown
+//! FPS value, `ScriptsInfo`, a log tick bumped at most every 0.1 s when lines arrived) or one of its
+//! widgets sent a message. With auto scroll on only the last 100 lines get rows.
+//!
 //! Keyboard: while the FPS field has focus the UI captures the keyboard (`UiCapture`, the engine's
 //! input capture), so the game does not see the keys. Enter, Escape, a tab switch, a click
 //! elsewhere and closing the window all end the focus (`UiTree::blur_window`).
@@ -155,7 +159,8 @@ pub struct ScriptsInfo {
     pub stats: ScriptStats,
     /// Every module slot, loaded or not, in id order.
     pub modules: Vec<ModuleInfo>,
-    /// Seconds since the last refresh (infinite while the tab is not showing: the next show reads at once).
+    /// Seconds since the last refresh, as of that refresh (so 0; infinite while the tab is not
+    /// showing: the next show reads at once). Not advanced between refreshes.
     pub age: f32,
 }
 
@@ -251,7 +256,12 @@ fn menu_update(cx: &mut Ctx) {
     let escape = cx.input.just_pressed(KeyCode::Escape);
     let mut blur = false;
     let mut apply_fps = None;
-    if let Some(st) = cx.resources.get_mut::<DebugState>() {
+    // `get_mut` stamps the resource changed, and that wakes the view: only take it when there is
+    // something to write.
+    let esc_blur = escape && cx.resources.get::<DebugState>().is_some_and(|s| s.fps_focused);
+    if (esc_blur || !msgs.is_empty())
+        && let Some(st) = cx.resources.get_mut::<DebugState>()
+    {
         if escape && st.fps_focused {
             st.fps_text = st.fps_limit.to_string();
             st.fps_focused = false;
@@ -315,8 +325,8 @@ fn menu_update(cx: &mut Ctx) {
         HOLD.store(!st.auto_scroll, std::sync::atomic::Ordering::Relaxed);
     }
     if let Some(oldest) = lines().lock().ok().and_then(|s| s.lines.front().map(|l| l.id))
+        && cx.resources.get::<DebugState>().is_some_and(|st| st.truncated.iter().any(|id| *id < oldest))
         && let Some(st) = cx.resources.get_mut::<DebugState>()
-        && st.truncated.iter().any(|id| *id < oldest)
     {
         st.truncated.retain(|id| *id >= oldest);
     }
@@ -341,15 +351,25 @@ fn scripts_update(cx: &mut Ctx) {
     let shown = cx.resources.get::<UiViews>().is_some_and(|v| v.is_enabled("debug_menu"))
         && cx.resources.get::<DebugState>().is_some_and(|s| s.tab == DebugTab::Scripts);
     let dt = cx.time.delta();
+    // The age lives in a private resource: writing `ScriptsInfo` every frame would wake the view.
+    let age = {
+        let Some(clock) = cx.resources.get_mut::<ScriptsClock>() else { return };
+        clock.0 = if shown { clock.0 + dt } else { f32::INFINITY };
+        clock.0
+    };
+    if !shown || age < SCRIPTS_REFRESH {
+        // Hidden: the next show reads at once (the view is woken when the tab or window changes).
+        if !shown && cx.resources.get::<ScriptsInfo>().is_some_and(|i| i.age.is_finite()) {
+            if let Some(info) = cx.resources.get_mut::<ScriptsInfo>() {
+                info.age = f32::INFINITY;
+            }
+        }
+        return;
+    }
+    if let Some(clock) = cx.resources.get_mut::<ScriptsClock>() {
+        clock.0 = 0.0;
+    }
     let Some(info) = cx.resources.get_mut::<ScriptsInfo>() else { return };
-    if !shown {
-        info.age = f32::INFINITY;
-        return;
-    }
-    info.age += dt;
-    if info.age < SCRIPTS_REFRESH {
-        return;
-    }
     info.age = 0.0;
     let sc = &*cx.scripting;
     info.read = true;
@@ -365,8 +385,51 @@ fn fps_update(cx: &mut Ctx) {
         return;
     }
     let k = 1.0 - (-2.0 * dt).exp();
-    if let Some(f) = cx.resources.get_mut::<Fps>() {
-        f.0 = if f.0 <= 0.0 { 1.0 / dt } else { f.0 + (1.0 / dt - f.0) * k };
+    let Some(avg) = cx.resources.get_mut::<FpsSmooth>() else { return };
+    avg.0 = if avg.0 <= 0.0 { 1.0 / dt } else { avg.0 + (1.0 / dt - avg.0) * k };
+    let now = avg.0;
+    // `Fps` is written only when the shown (rounded) value changes: every write wakes the view.
+    if cx.resources.get::<Fps>().is_some_and(|f| f.0.round() != now.round()) {
+        if let Some(f) = cx.resources.get_mut::<Fps>() {
+            f.0 = now;
+        }
+    }
+}
+
+/// The unrounded smoothed FPS (private; [`Fps`] follows it when the rounded value changes).
+#[derive(Default)]
+struct FpsSmooth(f32);
+
+/// Seconds since the Scripts tab last read the engine.
+struct ScriptsClock(f32);
+
+/// Bumped when new log lines arrived, at most [`LOG_REFRESH`] seconds apart: the view's wake-up for
+/// the log (a burst of lines is one rebuild, not one per line).
+#[derive(Default)]
+struct LogTick(u64);
+
+/// The shortest time between two log-driven rebuilds of the view.
+const LOG_REFRESH: f32 = 0.1;
+
+struct LogWatch {
+    /// `Store::next_id` at the last bump.
+    seen: u64,
+    /// Seconds since the last bump (infinite at the start: the first line shows at once).
+    since: f32,
+}
+
+fn log_update(cx: &mut Ctx) {
+    let dt = cx.time.delta();
+    let next = lines().lock().map_or(0, |s| s.next_id);
+    let Some(w) = cx.resources.get_mut::<LogWatch>() else { return };
+    w.since = (w.since + dt).min(1.0e6);
+    if next == w.seen || w.since < LOG_REFRESH {
+        return;
+    }
+    w.seen = next;
+    w.since = 0.0;
+    if let Some(t) = cx.resources.get_mut::<LogTick>() {
+        t.0 += 1;
     }
 }
 
@@ -595,11 +658,28 @@ fn menu_view(fps: f32, state: &DebugState, recent: &[Line], scripts: &ScriptsInf
     .height(Size::Fill)
 }
 
+/// How many log rows the view builds while auto scroll is on.
+const PINNED_ROWS: usize = 100;
+
+/// How often the view function ran (tests).
+#[cfg(test)]
+static VIEW_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn view(cx: &ViewCx) -> El<DebugMsg> {
     let fps = cx.res::<Fps>().map_or(0.0, |f| f.0);
+    #[cfg(test)]
+    VIEW_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let state = cx.res::<DebugState>().map(|s| s.clone()).unwrap_or_default();
-    // oldest first, newest at the bottom, like a terminal
-    let recent: Vec<Line> = lines().lock().map(|s| s.lines.iter().cloned().collect()).unwrap_or_default();
+    // Oldest first, newest at the bottom, like a terminal. With auto scroll on the view is pinned to
+    // the bottom, so only the last `PINNED_ROWS` lines get rows (the ring keeps more); with it off
+    // all the held lines are shown, so what the user reads does not move.
+    let recent: Vec<Line> = lines()
+        .lock()
+        .map(|s| {
+            let skip = if state.auto_scroll { s.lines.len().saturating_sub(PINNED_ROWS) } else { 0 };
+            s.lines.iter().skip(skip).cloned().collect()
+        })
+        .unwrap_or_default();
     let scripts = cx.res::<ScriptsInfo>().map(|s| s.clone()).unwrap_or_default();
     menu_view(fps, &state, &recent, &scripts)
 }
@@ -621,6 +701,11 @@ impl Plugin for DebugMenuPlugin {
         // The FPS field starts at the engine's current cap (None or invalid = unlimited = 0).
         let limit = engine.config().max_fps.filter(|f| f.is_finite() && *f > 0.0).map_or(0, |f| f.round() as u32);
         engine.insert_resource(Fps::default());
+        engine.insert_resource(FpsSmooth::default());
+        engine.insert_resource(ScriptsClock(f32::INFINITY));
+        engine.insert_resource(LogTick::default());
+        engine.insert_resource(LogWatch { seen: lines().lock().map_or(0, |s| s.next_id), since: f32::INFINITY });
+        engine.add_system(Stage::Update, log_update).name("debug_menu_log");
         engine.insert_resource(DebugState::with_limit(limit));
         engine.insert_resource(ScriptsInfo::default());
         engine.add_system(Stage::Update, scripts_update).name("debug_menu_scripts");
@@ -630,7 +715,13 @@ impl Plugin for DebugMenuPlugin {
         engine.add_system(Stage::Update, window_update).order(order::EARLY).name("debug_menu_window");
         engine.add_system(Stage::PostUpdate, place).order(order::LATE + 12).name("debug_menu_place");
         engine
-            .add_plugin(UiView::with("debug_menu", view).layer(layer()).enabled(false))
+            .add_plugin(
+                // Only what the view shows wakes it (plus its first run and its own messages).
+                UiView::with("debug_menu", view)
+                    .layer(layer())
+                    .enabled(false)
+                    .when(changed::<DebugState>().or(changed::<Fps>()).or(changed::<ScriptsInfo>()).or(changed::<LogTick>())),
+            )
             .expect("debug menu view");
     }
 }
@@ -687,6 +778,100 @@ mod tests {
         t.resource_mut::<UiViews>().set_enabled("debug_menu", true);
         t.step(2);
         t
+    }
+
+    fn view_runs() -> usize {
+        VIEW_RUNS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[test]
+    fn an_idle_window_does_not_run_the_view() {
+        let mut t = menu();
+        log("one line");
+        t.step(30);
+        let before = view_runs();
+        t.step(180);
+        assert_eq!(view_runs(), before, "no new lines, no state change: the view stays asleep");
+        // ... and wakes for a change of state or a new line
+        edits(&mut t);
+        assert!(view_runs() > before);
+        let b = view_runs();
+        log("a new line");
+        t.step(10);
+        assert!(view_runs() > b);
+        assert!(t.ui().find("debug_menu/log_scroll").is_none() || t.ui().find("debug_menu/edits").is_some());
+    }
+
+    #[test]
+    fn a_burst_of_lines_is_a_few_rebuilds_a_second() {
+        let mut t = menu();
+        log("first");
+        t.step(30);
+        let before = view_runs();
+        for f in 0..60 {
+            for i in 0..50 {
+                push("", &format!("burst {f}/{i}"));
+            }
+            t.step(1);
+        }
+        let runs = view_runs() - before;
+        assert!(runs >= 1 && runs <= 11, "60 frames (1 s) of 50 lines each: {runs} rebuilds");
+        // the last line shows up once the burst ends
+        t.step(10);
+        let last = lines().lock().unwrap().lines.back().unwrap().id;
+        assert!(t.ui().find(&key(last, "text")).is_some());
+    }
+
+    #[test]
+    fn auto_scroll_builds_only_the_last_rows_and_off_shows_all_held_lines() {
+        let mut t = menu();
+        for i in 0..150 {
+            push("", &format!("row {i}"));
+        }
+        t.step(10);
+        let (first, end) = {
+            let s = lines().lock().unwrap();
+            (s.lines.front().unwrap().id, s.next_id)
+        };
+        let rows = |t: &UiTest| (first..end).filter(|i| t.ui().find(&key(*i, "text")).is_some()).count();
+        assert!(rows(&t) <= PINNED_ROWS, "{} rows", rows(&t));
+        assert!(t.ui().find(&key(first, "text")).is_none());
+        t.set_checked("debug_menu/auto_scroll", false);
+        t.step(3);
+        assert_eq!(rows(&t), 150);
+    }
+
+    /// Milliseconds per frame of `run_frames` with the window open on the Logs tab, `fill` lines in
+    /// the log, `per_frame` new lines every frame, 300 frames (`open` false: the window is closed, the
+    /// engine's own floor).
+    fn bench(fill: usize, per_frame: usize, open: bool) -> f64 {
+        serial();
+        let mut t = UiTest::new(|e| {
+            e.add_plugin(DebugMenuPlugin).expect("debug menu");
+        });
+        t.resource_mut::<UiViews>().set_enabled("debug_menu", open);
+        for i in 0..fill {
+            push("", &format!("fill line {i} with some text to make it a realistic log row"));
+        }
+        t.step(10);
+        let start = std::time::Instant::now();
+        for f in 0..300 {
+            for i in 0..per_frame {
+                push("", &format!("spam {f}/{i} with some text to make it a realistic log row"));
+            }
+            t.step(1);
+        }
+        start.elapsed().as_secs_f64() * 1000.0 / 300.0
+    }
+
+    #[test]
+    #[ignore = "benchmark: run in release with --nocapture"]
+    fn bench_the_log_view() {
+        let floor = bench(200, 0, false);
+        println!("closed window (engine floor): {floor:.3} ms/frame");
+        for (fill, n) in [(200, 0), (200, 5), (200, 50), (1000, 0), (1000, 5), (1000, 50)] {
+            println!("fill {fill:4} new/frame {n:2}: {:.3} ms/frame", bench(fill, n, true));
+        }
     }
 
     /// Pushes a unique log line and returns its id.
@@ -936,7 +1121,8 @@ mod tests {
         assert!(child_pos(&t, a) < child_pos(&t, b) && child_pos(&t, b) < child_pos(&t, c));
         // a new line goes to the end
         let d = log("order D");
-        t.step(2);
+        // log-driven rebuilds are at most 0.1 s apart
+        t.step(8);
         assert!(child_pos(&t, c) < child_pos(&t, d));
         assert_eq!(child_pos(&t, d), t.ui().children(t.ui().children(t.id("debug_menu/log_scroll"))[0]).len() - 1);
     }
@@ -1392,6 +1578,32 @@ mod fallback_tests {
         assert!(r.state().expanded.contains(&long));
         assert!(!r.keyboard());
         assert!(r.value(&format!("log_scroll/log{long}/row/text_open")).starts_with("selectable "));
+    }
+
+    /// ms per frame (engine frame + the backend's layout, paint and draw) with `fill` lines in the log
+    /// and `per_frame` new ones every frame, 120 frames, the window open on the Logs tab.
+    fn bench_fb(fill: usize, per_frame: usize) -> f64 {
+        let mut r = Rig::new();
+        for i in 0..fill {
+            super::push("", &format!("fill line {i} with some text to make it a realistic log row"));
+        }
+        r.frames(10);
+        let start = std::time::Instant::now();
+        for f in 0..120 {
+            for i in 0..per_frame {
+                super::push("", &format!("spam {f}/{i} with some text to make it a realistic log row"));
+            }
+            r.frames(1);
+        }
+        start.elapsed().as_secs_f64() * 1000.0 / 120.0
+    }
+
+    #[test]
+    #[ignore = "benchmark: run in release with --nocapture"]
+    fn bench_the_log_view_fallback() {
+        for (fill, n) in [(200, 0), (200, 1), (200, 5), (200, 50), (1000, 5)] {
+            println!("fallback fill {fill:4} new/frame {n:2}: {:.3} ms/frame", bench_fb(fill, n));
+        }
     }
 
     fn log_line(text: &str) -> u64 {
