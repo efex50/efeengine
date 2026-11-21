@@ -32,6 +32,7 @@ pub mod config;
 pub mod input;
 pub mod scripting;
 pub mod scene;
+pub mod inspect;
 pub mod schema;
 
 pub static WASM_PATH:OnceCell<String> =OnceCell::new();

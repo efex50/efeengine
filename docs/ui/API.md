@@ -313,6 +313,11 @@ pub struct StateStyles { pub normal: Style, pub hovered: Style, pub pressed: Sty
   system applies it with `Scripting::set_backend(choice, jit_config())` and refreshes the snapshot at
   once). Without the `jit` cargo feature (build with `--jit`) it shows "JIT not compiled in" instead;
   a hint line counts loaded mods that stay interpreted for lack of `Grant::jit`.
+  Other plugins add tabs through the `DebugExtraTabs` resource (`add(id, title, view, wake)`; the
+  view returns `El<DebugMsg>`, its widgets send `DebugMsg::Ext(ExtMsg)` that the plugin's own system
+  reads from `cx.events::<DebugMsg>()`, and `wake` says when the body is stale so the view stays
+  asleep otherwise). The in-game editor (`EditorPlugin`, cargo feature `editor`,
+  `docs/IN_GAME_EDITOR.md`) is the first user: an "Editor" tab.
 - **iced:** the theme is resolved per node when the tree changes (`WidgetState` variants: normal, hovered, pressed, focused, disabled) and the widgets' status closures pick one (`button::Style` for Active / Hovered / Pressed / Disabled, `text_input` Active / Hovered / Focused / Disabled, checkbox and slider Active / Hovered(Dragged) / Disabled). iced buttons, checkboxes and sliders are not focusable, so only text inputs show `focused`. A checkbox's background / border style paints its box (not the whole row as on the web).
 - **Fallback:** resolved per node at sync time and cached until the node, its classes or the theme
   change.

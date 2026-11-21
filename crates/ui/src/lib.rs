@@ -9,6 +9,8 @@ pub mod bindings;
 pub mod capture;
 pub use efeui_core::css;
 pub mod debug_menu;
+#[cfg(feature = "editor")]
+pub mod editor;
 pub use efeui_core::dom_plan;
 #[cfg(feature = "fallback")]
 pub mod fallback;
@@ -36,6 +38,8 @@ pub use backend::{Filter, ImageIdExt, TextInputArea, TextureExt, UiBackend, UiBa
 pub use bindings::{Bind, BindCx, BindCxExt, BindExt, BindTarget, BindUpdate, BoundValue, TextSrc, UiBindings, engine_bind_cx};
 pub use capture::UiCapture;
 pub use debug_menu::DebugMenuPlugin;
+#[cfg(feature = "editor")]
+pub use editor::EditorPlugin;
 pub use headless::{HeadlessBackend, HeadlessHandle};
 pub use id::{Owner, WidgetId};
 pub use journal::UiChange;

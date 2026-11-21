@@ -237,7 +237,7 @@ fn write_prim(p: Prim, v: &SceneValue, out: &mut [u8]) -> Result<(), String> {
 }
 
 /// Component bytes to named fields (the codec's write side).
-fn encode_component(entry: &TypeEntry, bytes: &[u8]) -> BTreeMap<String, SceneValue> {
+pub(crate) fn encode_component(entry: &TypeEntry, bytes: &[u8]) -> BTreeMap<String, SceneValue> {
     let mut fields = BTreeMap::new();
     for f in &entry.desc().fields {
         let sz = prim_size(f.ty);
@@ -250,7 +250,7 @@ fn encode_component(entry: &TypeEntry, bytes: &[u8]) -> BTreeMap<String, SceneVa
 
 /// Named fields to component bytes (the codec's read side). A missing field is zero; an
 /// unknown field, a wrong type or an out-of-range number is an error naming the field.
-fn decode_component(entry: &TypeEntry, fields: &BTreeMap<String, SceneValue>) -> Result<Vec<u8>, (String, String)> {
+pub(crate) fn decode_component(entry: &TypeEntry, fields: &BTreeMap<String, SceneValue>) -> Result<Vec<u8>, (String, String)> {
     let desc = entry.desc();
     if let Some(unknown) = fields.keys().find(|k| !desc.fields.iter().any(|f| &f.name == *k)) {
         return Err((unknown.clone(), "no such field".into()));
@@ -451,7 +451,7 @@ impl Scene {
 impl Engine {
     /// Entities a scene or snapshot covers: those owned by a scene when `owned_only`, else also
     /// every entity with at least one registered, writable component.
-    fn captured_entities(&self, owned_only: bool) -> Vec<Entity> {
+    pub(crate) fn captured_entities(&self, owned_only: bool) -> Vec<Entity> {
         let world = self.world();
         let types = self.types();
         world

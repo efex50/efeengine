@@ -26,6 +26,11 @@
 //!   interpreted for lack of a `Grant::jit`. The data is a [`ScriptsInfo`] snapshot copied from `engine.scripting()` by an
 //!   Update system at most twice a second, and only while the window shows this tab.
 //!
+//! - **Extra tabs**: other plugins add tabs with [`DebugExtraTabs`] (the in-game editor's "Editor"
+//!   tab does): a title, a view function returning `El<DebugMsg>` and a wake check that says when
+//!   the body must be rebuilt. The tab's widgets send [`DebugMsg::Ext`] messages (a tag plus any
+//!   payload the plugin downcasts), read by the plugin's own systems from `cx.events::<DebugMsg>()`.
+//!
 //! Cost: the view runs only when something it shows changed (`UiView::when`: `DebugState`, the shown
 //! FPS value, `ScriptsInfo`, a log tick bumped at most every 0.1 s when lines arrived) or one of its
 //! widgets sent a message. With auto scroll on only the last 100 lines get rows.
@@ -38,8 +43,9 @@
 //! the last [`MAX_LINES`] lines and still forwards everything to the default logger, so
 //! `global_info` and friends show up both in the terminal and in the window.
 
+use std::any::Any;
 use std::collections::{HashSet, VecDeque};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use efeengine_core::log::{LogMsg, Logger, NewDefaultLogger, set_global_logger};
 use efeengine_core::prelude::*;
@@ -146,6 +152,73 @@ pub enum DebugTab {
     Edits,
     /// Scripts, mods and the JIT (read-only, a [`ScriptsInfo`] snapshot).
     Scripts,
+    /// A tab added through [`DebugExtraTabs`], by its id.
+    Extra(&'static str),
+}
+
+/// A message from an extra tab: a tag naming the plugin and a payload only that plugin knows.
+/// Two messages are equal when they are the same message value (`Arc` identity), which is all the
+/// view layer needs to tell "unchanged" apart.
+#[derive(Clone)]
+pub struct ExtMsg {
+    pub tag: &'static str,
+    payload: Arc<dyn Any + Send + Sync>,
+}
+
+impl ExtMsg {
+    pub fn new<T: Any + Send + Sync>(tag: &'static str, payload: T) -> Self {
+        ExtMsg { tag, payload: Arc::new(payload) }
+    }
+    /// The payload as `T`, if that is what it is.
+    pub fn payload<T: Any>(&self) -> Option<&T> {
+        self.payload.downcast_ref::<T>()
+    }
+}
+
+impl std::fmt::Debug for ExtMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ExtMsg({})", self.tag)
+    }
+}
+
+impl PartialEq for ExtMsg {
+    fn eq(&self, other: &Self) -> bool {
+        self.tag == other.tag && Arc::ptr_eq(&self.payload, &other.payload)
+    }
+}
+
+type ExtraView = Arc<dyn Fn(&ViewCx) -> El<DebugMsg> + Send + Sync>;
+type ExtraWake = Arc<dyn for<'a> Fn(&Ctx<'a>) -> bool + Send + Sync>;
+
+/// One tab added by another plugin.
+#[derive(Clone)]
+pub struct ExtraTab {
+    pub id: &'static str,
+    pub title: &'static str,
+    view: ExtraView,
+    wake: ExtraWake,
+}
+
+/// The tabs other plugins add to the window, in the order they were added. A resource (inserted by
+/// `DebugMenuPlugin`, which must come first).
+#[derive(Default, Clone)]
+pub struct DebugExtraTabs(pub Vec<ExtraTab>);
+
+impl DebugExtraTabs {
+    /// Adds a tab (an existing id is replaced). `view` builds the body (keys under
+    /// `debug_menu/<id>/...`: the tab's own root should be keyed `id`); `wake` says when the body
+    /// is stale: it is evaluated every frame the tab shows, so keep it a resource-changed check
+    /// (`cx.res_changed::<T>()`), never a rebuild trigger of its own.
+    pub fn add(
+        &mut self,
+        id: &'static str,
+        title: &'static str,
+        view: impl Fn(&ViewCx) -> El<DebugMsg> + Send + Sync + 'static,
+        wake: impl for<'a> Fn(&Ctx<'a>) -> bool + Send + Sync + 'static,
+    ) {
+        self.0.retain(|t| t.id != id);
+        self.0.push(ExtraTab { id, title, view: Arc::new(view), wake: Arc::new(wake) });
+    }
 }
 
 /// How often (seconds) the Scripts tab reads the engine.
@@ -207,6 +280,8 @@ pub enum DebugMsg {
     FpsFocus(bool),
     /// A backend button of the Scripts tab: switch the scripting backend (applied by `menu_update`).
     SetBackend(ScriptBackend),
+    /// A widget of an extra tab (see [`DebugExtraTabs`]); the owning plugin reads it.
+    Ext(ExtMsg),
 }
 
 /// What the window remembers. A resource.
@@ -323,7 +398,7 @@ fn menu_update(cx: &mut Ctx) {
                     st.fps_focused = false;
                     blur = true;
                 }
-                DebugMsg::SetBackend(_) => {} // applied above
+                DebugMsg::SetBackend(_) | DebugMsg::Ext(_) => {} // applied above / read by the plugin
                 DebugMsg::FpsFocus(on) => {
                     st.fps_focused = on;
                     if !on {
@@ -649,7 +724,7 @@ fn scripts_tab(info: &ScriptsInfo) -> El<DebugMsg> {
 }
 
 /// The whole window. `recent`: log lines, newest first.
-fn menu_view(fps: f32, state: &DebugState, recent: &[Line], scripts: &ScriptsInfo) -> El<DebugMsg> {
+fn menu_view(fps: f32, state: &DebugState, recent: &[Line], scripts: &ScriptsInfo, extras: &[ExtraTab], extra_body: Option<El<DebugMsg>>) -> El<DebugMsg> {
     let header = row![
         text(format!("{fps:.0} fps")).class("muted").key("fps").width(Size::Px(90.0)),
         text("Debug Menu").key("title").width(Size::Fill).text_align(TextAlign::Center).font_size(18.0).bold(true),
@@ -664,9 +739,12 @@ fn menu_view(fps: f32, state: &DebugState, recent: &[Line], scripts: &ScriptsInf
         container().class("separator-v").key("tab_sep2"),
         tab_button("Scripts", "tab_scripts", DebugTab::Scripts, state.tab),
         container().class("separator-v").key("tab_sep3"),
-        container().width(Size::Fill),
     ]
     .width(Size::Fill);
+    for t in extras {
+        tabs = tabs.child(tab_button(t.title, &format!("tab_{}", t.id), DebugTab::Extra(t.id), state.tab)).child(container().class("separator-v").key(&format!("tab_sep_{}", t.id)));
+    }
+    tabs = tabs.child(container().width(Size::Fill));
     if state.tab == DebugTab::Logs {
         tabs = tabs
             .child(checkbox("Auto scroll", state.auto_scroll).key("auto_scroll").on_toggle(DebugMsg::AutoScroll))
@@ -681,6 +759,7 @@ fn menu_view(fps: f32, state: &DebugState, recent: &[Line], scripts: &ScriptsInf
             DebugTab::Logs => logs_tab(recent, state),
             DebugTab::Edits => edits_tab(state),
             DebugTab::Scripts => scripts_tab(scripts),
+            DebugTab::Extra(_) => extra_body.unwrap_or_else(|| container().key("extra_missing").width(Size::Fill).height(Size::Fill)),
         },
     ]
     .class("wire-panel")
@@ -688,12 +767,23 @@ fn menu_view(fps: f32, state: &DebugState, recent: &[Line], scripts: &ScriptsInf
     .height(Size::Fill)
 }
 
+/// True when the shown extra tab says its body is stale (or the tab list changed).
+fn extra_wake() -> RunCondition {
+    RunCondition::custom(|cx| {
+        if cx.res_changed::<DebugExtraTabs>() {
+            return true;
+        }
+        let Some(DebugTab::Extra(id)) = cx.resources.get::<DebugState>().map(|s| s.tab) else { return false };
+        cx.resources.get::<DebugExtraTabs>().and_then(|t| t.0.iter().find(|t| t.id == id).map(|t| (t.wake)(cx))).unwrap_or(false)
+    })
+}
+
 /// How many log rows the view builds while auto scroll is on.
 const PINNED_ROWS: usize = 100;
 
 /// How often the view function ran (tests).
 #[cfg(test)]
-static VIEW_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static VIEW_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn view(cx: &ViewCx) -> El<DebugMsg> {
     let fps = cx.res::<Fps>().map_or(0.0, |f| f.0);
@@ -711,7 +801,12 @@ fn view(cx: &ViewCx) -> El<DebugMsg> {
         })
         .unwrap_or_default();
     let scripts = cx.res::<ScriptsInfo>().map(|s| s.clone()).unwrap_or_default();
-    menu_view(fps, &state, &recent, &scripts)
+    let extras = cx.res::<DebugExtraTabs>().map(|t| t.0.clone()).unwrap_or_default();
+    let extra_body = match state.tab {
+        DebugTab::Extra(id) => extras.iter().find(|t| t.id == id).map(|t| (t.view)(cx)),
+        _ => None,
+    };
+    menu_view(fps, &state, &recent, &scripts, &extras, extra_body)
 }
 
 /// Adds the Debug menu window. Add it after `UiPlugin`. Hidden until F5 is pressed.
@@ -741,6 +836,7 @@ impl Plugin for DebugMenuPlugin {
         engine.add_system(Stage::Update, scripts_update).name("debug_menu_scripts");
         engine.add_system(Stage::Update, menu_update).order(order::EARLY).name("debug_menu_update");
         engine.add_system(Stage::Update, fps_update).name("debug_menu_fps");
+        engine.insert_resource(DebugExtraTabs::default());
         engine.insert_resource(DebugWindow::default());
         engine.add_system(Stage::Update, window_update).order(order::EARLY).name("debug_menu_window");
         engine.add_system(Stage::PostUpdate, place).order(order::LATE + 12).name("debug_menu_place");
@@ -750,7 +846,7 @@ impl Plugin for DebugMenuPlugin {
                 UiView::with("debug_menu", view)
                     .layer(layer())
                     .enabled(false)
-                    .when(changed::<DebugState>().or(changed::<Fps>()).or(changed::<ScriptsInfo>()).or(changed::<LogTick>())),
+                    .when(changed::<DebugState>().or(changed::<Fps>()).or(changed::<ScriptsInfo>()).or(changed::<LogTick>()).or(extra_wake())),
             )
             .expect("debug menu view");
     }
@@ -759,7 +855,7 @@ impl Plugin for DebugMenuPlugin {
 /// The log store is one global: tests that look at it take this lock (kept until the test thread
 /// ends) and start from an empty store.
 #[cfg(test)]
-fn serial() {
+pub(crate) fn serial() {
     use std::sync::{Mutex, MutexGuard};
     static LOCK: Mutex<()> = Mutex::new(());
     thread_local! {
@@ -1499,6 +1595,11 @@ mod fallback_tests {
 
     impl Rig {
         fn new() -> Rig {
+            Rig::with(|_| {})
+        }
+
+        /// A rig whose engine got `setup` after the debug menu was added.
+        fn with(setup: impl FnOnce(&mut Engine)) -> Rig {
             super::serial();
             let fb = Rc::new(RefCell::new(FallbackBackend::new()));
             fb.borrow_mut().set_caret_blink(false);
@@ -1506,6 +1607,7 @@ mod fallback_tests {
             let mut engine = Engine::with_config(EngineConfig { fixed_dt: 1.0 / 60.0, ..EngineConfig::headless() }).expect("engine");
             engine.add_plugin(UiPlugin::with_backend(Shared(fb.clone()))).expect("ui");
             engine.add_plugin(DebugMenuPlugin).expect("menu");
+            setup(&mut engine);
             engine.resources_mut().get_mut::<UiViews>().unwrap().set_enabled("debug_menu", true);
             let mut r = Rig { engine, fb };
             r.frames(3);
@@ -1821,6 +1923,36 @@ mod fallback_tests {
     /// Pixels close to the wireframe line colour (0xb4b9c8).
     fn line_pixels(s: &crate::fallback::offscreen::Shot, x0: u32, x1: u32, y: u32) -> usize {
         (x0..x1).filter(|x| s.pixel(*x, y)[..3].iter().zip([0xb4, 0xb9, 0xc8]).all(|(a, b)| (*a as i32 - b).abs() < 6)).count()
+    }
+
+    /// The Editor tab: toolbar, hierarchy with a parent and a selection, inspector.
+    #[cfg(feature = "editor")]
+    #[test]
+    fn editor_screenshot() {
+        use crate::EditorPlugin;
+        let mut r = Rig::with(|e| {
+            e.add_plugin(EditorPlugin::new()).expect("editor");
+            e.add_system(Stage::Update, |_| {}).name("game_system");
+            let w = e.world_mut();
+            w.spawn((Camera::orthographic_2d(), Transform::default(), Name::new("camera"), EditorId { id: 1 }));
+            let sun = w.spawn((Name::new("sun"), EditorId { id: 2 }, Transform::from_position(Vec2::new(-12.5, 3.0)), Sprite::default().with_size(Vec2::new(80.0, 80.0))));
+            w.spawn((Name::new("planet"), EditorId { id: 3 }, Transform::from_position(Vec2::new(9.0, 0.0)), Parent::new(sun), Sprite::default().with_size(Vec2::new(36.0, 36.0))));
+            w.spawn((Name::new("crate"), EditorId { id: 4 }, Transform::default()));
+        });
+        r.click("tab_editor");
+        r.frames(10);
+        let sun = r.engine.world().query::<(Entity, &Name)>().iter().find(|(_, n)| n.0 == "sun").map(|(e, _)| e).unwrap();
+        r.click(&format!("editor/hierarchy/list/e{}/row", efeengine_core::ecs::entity_to_bits(sun)));
+        r.frames(10);
+        let mut shooter = None;
+        let edit = shoot(&mut r, &mut shooter, "editor_edit");
+        r.click("editor/toolbar/play");
+        r.frames(10);
+        let play = shoot(&mut r, &mut shooter, "editor_play");
+        if let (Some(a), Some(b)) = (&edit, &play) {
+            assert_ne!(a.rgba, b.rgba, "the highlighted mode button changed");
+            assert!(line_pixels(a, 4, 516, 0) > 400, "top border");
+        }
     }
 
     #[test]

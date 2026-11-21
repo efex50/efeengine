@@ -22,6 +22,8 @@ default = ["iced"]
 # `Draw2D`, wgpu and SDL modes) on top of `text`. Built on all targets; the screenshot/offscreen helper is native only.
 text = ["dep:cosmic-text"]
 fallback = ["text", "dep:taffy"]
+# The in-game scene editor plugin (`EditorPlugin`, docs/IN_GAME_EDITOR.md): an "Editor" tab in the Debug menu.
+editor = []
 iced = ["dep:iced_wgpu", "dep:iced_widget", "dep:iced_runtime", "dep:iced_core", "dep:pollster"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
